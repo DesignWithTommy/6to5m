@@ -39,7 +39,7 @@ What works today:
   - Road and apron tiles: one opaque base layer plus alpha-blended decal layers, with the terrain sunk underneath.
   - Draw distances: big buildings never vanish before the props on them; small clutter streams only within 40-100 m.
   - Fast rebuilds: every converted ydr/ytd/ybn is kept in `<work>/fivem_out_cache` by fingerprint (per-stage versions, so a collision fix doesn't redo textures) and hardlinked into `stream/`; unchanged files are never rewritten, so FXServer keeps its hashes. `--bake` fills the cache from the whole map once; after that a new region, out dir or `--split` is mostly linking.
-  - Dense meshes simplified (meshopt-rs, 0.5% error, UV seams kept); textures capped by prop size (128 to 1024 px; `--max-tex 512` cuts building ytds by about 70%).
+  - Optional mesh simplification (`--simplify`, meshopt-rs; off by default, it flattened facades in game); textures capped by prop size.(128 to 1024 px; `--max-tex 512` cuts building ytds by about 70%).
   - BC7 textures used only by opaque geometry are re-encoded to DXT1 (half size, cached in the texture cache).
   - Texture dictionaries share common textures through a gtxd.meta parent chain.
   - Correct render buckets (opaque, alpha, decal, cutout).
