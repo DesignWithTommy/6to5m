@@ -624,3 +624,12 @@ pub fn cli(args: &[String]) -> Result<(), String> {
     println!("ybn: {} verts, {} tris -> {} ({} bytes)", v.len(), f.len(), args[1], data.len());
     Ok(())
 }
+
+/// BVH for a BoundComposite with more than 5 children (one item per child
+/// AABB, in composite space), as the ybn composite above builds it. Used by
+/// the yft writer.
+pub(crate) fn composite_bvh(b: &mut Builder, boxes: &[(V3, V3)]) -> BlockId {
+    let items: Vec<Item> = boxes.iter().enumerate().map(|(i, (mn, mx))| Item { min: *mn, max: *mx, index: i }).collect();
+    let (bvh, _) = build_bvh(&items, 1);
+    write_bvh(b, &bvh)
+}

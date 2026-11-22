@@ -30,7 +30,7 @@ Next, from the FiveM port's requests:
 
 ## fivem vehicle (`src/gta5/fivem/vehicles.rs`, `src/gta5/yft.rs`)
 Loads in CodeWalker; not yet tested in game.
-- Doors, bonnet and boot are drawn on their bones but are static: physics is at most 5 box children (chassis + 4 wheels) because more needs a BVH. Add the BVH and per-part children, groups and joint limits.
+- Physics: one box child per exterior 6m physics group (doors, bonnet, boot, bumpers, windows, wings, mirrors, plates) with 6m collider masses, composite BVH past 5 children; joint limits are left to GTA V (6m vehicle fragments have no limits block). Unverified in game whether doors open; boxes are AABBs of each part, not the 6m hull colliders.
 - Wheels: rim + tyre drawables from `sixng vehicles` (scale 1.625 x wheelScale is fitted, not decoded); right-side rim orientation unverified.
 - Paint is a solid texture of the configuration's body colour (stored ARGB read as linear); add vehicle_paint shaders so carcols colours apply, plus glass, lights, dirt and damage.
 - Modular parts (bumpers, intakes, roof attachments in part_groups) are not added; handling PSO fields are unnamed, so handling stays default.

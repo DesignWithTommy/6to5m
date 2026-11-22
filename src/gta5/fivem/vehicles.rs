@@ -19,6 +19,9 @@
 //! With `sixng vehicles` data: the configuration's rim + tyre drawables
 //! (scaled 1.625 x wheelScale, a fitted factor), wheelScale and the body
 //! colour (6m paint slot -> solid texture); without it a generated tyre.
+//! Physics: a box child per 6m fragment physics group (doors, bonnet, boot,
+//! bumpers, windows ...; masses from the 6m colliders) on its bone, so GTA V
+//! can open and detach parts by bone name; joint limits are GTA V's own.
 //! Limits: physics is a box per child (chassis + 4
 //! wheels), so doors, bonnet and boot are drawn on their bones but do not
 //! open or break; plain default/alpha shaders (no paint colours, no dirt or
@@ -337,6 +340,39 @@ fn kind_of(bucket: u8) -> u8 {
 struct Source {
     bones: Vec<drawable::Bone>,
     lods: Vec<Vec<(usize, Geom)>>,
+    groups: Vec<PGroup>,
+}
+
+/// One 6m fragment physics group (GTA6-Asset-Info 13.4): first bone name,
+/// parent group, summed collider mass.
+#[derive(Clone, Debug)]
+struct PGroup {
+    name: String,
+    parent: Option<usize>,
+    mass: f32,
+}
+
+/// Physics groups: root +0x20 groups (stride 0x70; bone hash +0x08, parent
+/// u16 +0x16, collider range +0x1A..+0x1C), +0x28 colliders (stride 0x50;
+/// mass f32 +0x2C), counts u16 at +0x34 / +0x36.
+fn phys_groups(r: &Resource, bones: &[drawable::Bone]) -> Vec<PGroup> {
+    let u16at = |o: usize| r.sys.get(o..o + 2).map_or(0xFFFF, |b| u16::from_le_bytes([b[0], b[1]]));
+    let f32at = |o: usize| r.sys.get(o..o + 4).map_or(0.0, |b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let (Some(gp), Some(cp)) = (r.sys_off(r.u64(0x20)), r.sys_off(r.u64(0x28))) else { return Vec::new() };
+    let (ng, nc) = (u16at(0x34) as usize, u16at(0x36) as usize);
+    if gp + ng * 0x70 > r.sys.len() || cp + nc * 0x50 > r.sys.len() {
+        return Vec::new();
+    }
+    let by_hash: HashMap<u32, &str> = bones.iter().map(|b| (crate::gta5::rsc::joaat(&b.name), b.name.as_str())).collect();
+    (0..ng)
+        .map(|g| {
+            let o = gp + g * 0x70;
+            let h = r.u32(o + 8);
+            let (c0, c1) = (u16at(o + 0x1a) as usize, (u16at(o + 0x1c) as usize).min(nc));
+            let parent = Some(u16at(o + 0x16) as usize).filter(|&p| p < ng);
+            PGroup { name: by_hash.get(&h).map_or(format!("{h:08x}"), |n| n.to_string()), parent, mass: (c0..c1).map(|c| f32at(cp + c * 0x50 + 0x2c)).sum() }
+        })
+        .collect()
 }
 
 fn load_source(game: &Path, e: &Entry, pools: &mut Pools, texs: &mut Vec<String>, missing: &mut Vec<String>) -> Result<Source, String> {
@@ -434,7 +470,8 @@ fn load_source(game: &Path, e: &Entry, pools: &mut Pools, texs: &mut Vec<String>
             }
         }
     }
-    Ok(Source { bones: info.skeleton, lods })
+    let groups = phys_groups(&r, &info.skeleton);
+    Ok(Source { bones: info.skeleton, lods, groups })
 }
 
 // ---------------------------------------------------------------- build
@@ -553,7 +590,9 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
         by.into_iter().map(|(bone, geoms)| Model { bone, geoms }).collect()
     };
 
-    // physics: chassis + wheels
+    // physics: chassis, wheels, then the 6m physics groups
+    let pgroups: Vec<PGroup> = [&s_mid, &s_base, &s_hi].into_iter().flatten().map(|s| s.groups.clone()).find(|g| !g.is_empty()).unwrap_or_default();
+    let high = to_models(&main_plan[0].1.lods[main_plan[0].2]);
     let chassis_parts: Vec<V3> = main_plan[0].1.lods[main_plan[0].2].iter().flat_map(|(b, gm)| {
         let wheelish = skel[*b].name.contains("wheel");
         gm.positions.iter().copied().filter(move |_| !wheelish)
@@ -569,18 +608,54 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
             let (gs, r) = if w.ends_with('f') { &wf } else { &wr };
             let (drawable, r) = if gs.is_empty() { (generated(o.wheel_r), o.wheel_r) } else { (gs.clone(), *r) };
             let wd = r * 0.65;
-            children.push(Child { bone: bi, group: groups.len() - 1, min: [-wd / 2.0, -r, -r], max: [wd / 2.0, r, r], mass: 20.0, drawable });
+            let mass = pgroups.iter().find(|g| g.name == w).map_or(20.0, |g| g.mass.max(1.0));
+            children.push(Child { bone: bi, group: groups.len() - 1, min: [-wd / 2.0, -r, -r], max: [wd / 2.0, r, r], mass, drawable });
             wheels.push(w);
         }
     }
+    // the exterior 6m physics groups (doors, bonnet, boot, bumpers, windows ...):
+    // one box child per group on its bone, so GTA V can open / detach them by
+    // bone name. Box = the part's own geometry in bone space; mass from the 6m
+    // colliders. Other groups (dummies, droop pivots, internals) are folded
+    // into their nearest kept parent.
+    // exterior parts GTA V cars articulate or detach; internals (seats,
+    // engine, axles, brake discs) stay in the chassis so they never fall off
+    const PARTS: [&str; 11] = ["bonnet", "boot", "bumper_", "door_dside", "door_pside", "window", "windscreen", "wing_", "mirror_", "plate_", "spoiler"];
+    let skip = |n: &str| !PARTS.iter().any(|p| n.starts_with(p));
+    let mut gmap: HashMap<usize, usize> = HashMap::new(); // 6m group -> yft group
+    gmap.insert(0, 0);
+    for (k, pg) in pgroups.iter().enumerate() {
+        if k == 0 || skip(&pg.name) {
+            continue;
+        }
+        let Some(bi) = bones.iter().position(|b| b.name == pg.name) else { continue };
+        // nearest kept ancestor group
+        let mut p = pg.parent;
+        let parent = loop {
+            match p {
+                Some(q) if gmap.contains_key(&q) => break gmap[&q],
+                Some(q) => p = pgroups[q].parent,
+                None => break 0,
+            }
+        };
+        let pts: Vec<V3> = high.iter().filter(|m| m.bone == bi).flat_map(|m| m.geoms.iter().flat_map(|g| g.positions.iter().copied())).collect();
+        let (mn, mx) = if pts.is_empty() { ([-0.05; 3], [0.05; 3]) } else { aabb(pts.iter()) };
+        groups.push(Group { name: pg.name.clone(), parent: Some(parent) });
+        gmap.insert(k, groups.len() - 1);
+        children.push(Child { bone: bi, group: groups.len() - 1, min: mn, max: mx, mass: pg.mass.clamp(0.5, 500.0), drawable: Vec::new() });
+    }
+    // children must be contiguous per group and groups ordered parent first:
+    // one child per group, appended in group order, so both already hold.
+    let parts_mass: f32 = children[1..].iter().map(|c| c.mass).sum();
+    children[0].mass = (o.mass - parts_mass).max(o.mass * 0.5);
     if wheels.len() < 4 {
         eprintln!("vehicle: warning: only wheels {wheels:?} found in the skeleton");
     }
 
     let lod_dist = [9998.0f32; 4];
     let mut frag = Frag { name: o.model.clone(), bones: bones.clone(), lods: Default::default(), lod_dist, groups, children, mass: o.mass };
-    for (slot, s, l) in &main_plan {
-        frag.lods[*slot] = to_models(&s.lods[*l]);
+    for (k, (slot, s, l)) in main_plan.iter().enumerate() {
+        frag.lods[*slot] = if k == 0 { high.clone() } else { to_models(&s.lods[*l]) };
     }
     let stream = o.out.join("stream");
     let data = o.out.join("data");

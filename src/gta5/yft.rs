@@ -610,8 +610,8 @@ fn box_inertia(min: V3, max: V3) -> (V3, f32) {
 /// the bones' model-space transforms.
 fn add_composite(b: &mut Builder, f: &Frag, g: &[(V3, Q)]) -> Result<(BlockId, Vec<BlockId>), String> {
     let n = f.children.len();
-    if n == 0 || n > 5 {
-        return Err(format!("{n} physics children (1..5 supported: no composite BVH)"));
+    if n == 0 || n > 255 {
+        return Err(format!("{n} physics children (1..255 supported)"));
     }
     let mut kids = Vec::new();
     let mut world = Vec::new();
@@ -653,7 +653,9 @@ fn add_composite(b: &mut Builder, f: &Frag, g: &[(V3, Q)]) -> Result<(BlockId, V
     let mut w = W::new();
     bounds_hdr(&mut w, VFT_COMPOSITE, 10, mn, mx, i, v);
     w.ptr(Some(children_b)).ptr(Some(tr_b)).ptr(Some(tr_b)).ptr(Some(bb_b)).ptr(Some(f1)).ptr(Some(f2));
-    w.u16(n as u16).u16(n as u16).u32(0).u64(0);
+    // more than 5 children need a BVH over the child boxes (CodeWalker)
+    let bvh = (n > 5).then(|| crate::gta5::ybn::composite_bvh(b, &world));
+    w.u16(n as u16).u16(n as u16).u32(0).ptr(bvh);
     debug_assert_eq!(w.len(), 176);
     Ok((b.add(Seg::Sys, w), kids))
 }
