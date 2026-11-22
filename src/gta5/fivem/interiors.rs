@@ -775,8 +775,9 @@ fn light_ext(mb: &mut MB, lights: &[Value]) -> ((u64, u16), usize) {
         let x = v.as_str().and_then(|s| u32::from_str_radix(s, 16).ok()).unwrap_or(0xffffff);
         [(x >> 16) as u8, (x >> 8) as u8, x as u8]
     };
-    // 6m intensities run ~25x GTA's (median 50 vs ~2); T6M_LIGHT_SCALE overrides
-    let scale = std::env::var("T6M_LIGHT_SCALE").ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.04);
+    // same CLightAttr field as GTA V, copied 1:1 (no known unit change);
+    // T6M_LIGHT_SCALE tunes it
+    let scale = std::env::var("T6M_LIGHT_SCALE").ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or(1.0);
     let mut items = Vec::new();
     for l in lights {
         let ty = l["light_type"].as_u64().unwrap_or(0) as u8;
@@ -801,7 +802,7 @@ fn light_ext(mb: &mut MB, lights: &[Value]) -> ((u64, u16), usize) {
         w.f32(fl("", "38e6c28a", 0.01)).f32(fl("corona_intensity", "88a2b1fb", 0.0)).f32(fl("", "9639a173", 0.1));
         w.v3(f3(&l["direction"])).v3(f3(&l["tangent"]));
         w.f32(fl("cone_inner", "455c3938", 5.0)).f32(fl("cone_outer", "f8d9e344", 60.0));
-        w.v3([0.0; 3]).u32(0); // extents, projectedTextureKey
+        w.v3(f3(&l["extents"])).u32(0); // extents (capsule length in x), projectedTextureKey
         debug_assert_eq!(w.len(), 160);
         items.push(w.b);
     }

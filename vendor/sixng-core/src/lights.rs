@@ -39,6 +39,8 @@ pub struct Light {
     /// `CLightAttrDef`).
     pub direction: [f32; 3],
     pub tangent: [f32; 3],
+    /// `extents` vec3 at +0x1DC (capsules: x = length along the direction).
+    pub extents: [f32; 3],
     /// vec4 at +0x00 (unknown).
     pub v0: [f32; 4],
     /// Field names are the case-sensitive joaat of the GTA V `CLightAttr`
@@ -113,6 +115,7 @@ fn lights_of_ext(m: &Meta, eo: usize) -> Vec<Light> {
                 colour3: rgb(r, o + 0x285),
                 direction: [r.f32(o + 0x1A0), r.f32(o + 0x1A4), r.f32(o + 0x1A8)],
                 tangent: [r.f32(o + 0x1AC), r.f32(o + 0x1B0), r.f32(o + 0x1B4)],
+                extents: [r.f32(o + 0x1DC), r.f32(o + 0x1E0), r.f32(o + 0x1E4)],
                 v0: [r.f32(o), r.f32(o + 4), r.f32(o + 8), r.f32(o + 12)],
                 light_type: num(&f, "1cbbbe30") as u32,
                 intensity: num(&f, "efcd993d") as f32,
