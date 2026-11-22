@@ -28,9 +28,15 @@ fn main() {
         }
         "full" => {
             let mut st: BTreeMap<u8, [usize; 5]> = BTreeMap::new();
+            let only = a.get(3).and_then(|x| u8::from_str_radix(x, 16).ok());
+            let stride: usize = a.get(4).and_then(|x| x.parse().ok()).unwrap_or(1);
+            let mut seen = 0usize;
             for s in &set.stores { for (i, w) in s.chunks.windows(2).enumerate() {
                 let c = w[0].2 & 0x3F;
                 if w[0].2 & 0x1C == 0 || !sixng_core::bcpack::supported(c) { continue; }
+                if only.is_some_and(|o| o != c) { continue; }
+                seen += 1;
+                if seen % stride != 0 { continue; }
                 let comp = chunk_comp(s, i);
                 let e = st.entry(c).or_default();
                 e[0] += 1;
@@ -53,6 +59,7 @@ fn main() {
             let mut h = sixng_core::bcpack::History::from_bytes(&std::fs::read(&a[3]).unwrap()).unwrap();
             let t0 = std::time::Instant::now();
             sixng_core::bcpack_refine::refine_indices(&set, &mut h);
+            sixng_core::bcpack_refine::refine_bc7_pbits(&set, &mut h);
             std::fs::write(&a[4], h.to_bytes()).unwrap();
             println!("refined in {:.1}s", t0.elapsed().as_secs_f64());
         }

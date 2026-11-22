@@ -178,3 +178,140 @@ pub fn refine_indices(set: &TtpfSet, h: &mut History) {
         }
     }
 }
+
+/// R-channel slot state: (root entry, root slot, start value -> current value).
+type RSlot = Option<(u8, u8, [u8; 256])>;
+
+/// Mode-1 BC7 blocks share one p-bit per subset, stored as the low bit of
+/// both endpoints' R value; chains rooted in the preset whose two R start
+/// values have the wrong relative parity flag every such block. For every
+/// (entry, R slot) count, per candidate start value with the partner slot
+/// at its current value, how many shared-p-bit mismatches it gives.
+fn count_pbits(lanes: &[&[u16]], nb: usize, cur: &History, viol: &mut [[[u32; 256]; 24]], obs: &mut [[u32; 24]]) {
+    let l15 = lanes[15];
+    let mut st: Vec<[RSlot; 24]> = vec![[None; 24]; 256];
+    for i in 0..nb {
+        let (a, b) = (2 * i, 2 * i + 1);
+        let (sa, sb) = (l15[a] as usize, l15[b] as usize);
+        let rank = if sa < 32 && sb < 16 { t::BC7_RANK_OF[sa * 16 + sb] } else { -1 };
+        let mut out: [RSlot; 24] = [None; 24];
+        if rank < 0 || t::BC7_CONFIG[rank as usize][0] > 7 {
+            st[i & 255] = out;
+            continue;
+        }
+        let [mode, _, rot, _] = t::BC7_CONFIG[rank as usize].map(|x| x as usize);
+        let l1 = lanes[1];
+        let di = bp::inter8(l1[a], l1[b]) as i32;
+        let de = ((di + bp::unzig(bp::inter8(lanes[0][a], lanes[0][b]))) & 255) as usize;
+        let src = |s: usize| -> RSlot {
+            if de == 0 {
+                None
+            } else if de <= i {
+                st[(i - de) & 255][s]
+            } else {
+                Some(((256 + i - de) as u8, s as u8, std::array::from_fn(|h| h as u8)))
+            }
+        };
+        let ns = bp::B7_NS[mode];
+        let (cb, abits, pk) = (bp::B7_CB[mode], bp::B7_AB[mode], bp::B7_PK[mode]);
+        let wc = if rot == 1 { abits } else { cb };
+        for sub in 0..ns {
+            let li = bp::B7_LANE[sub][0];
+            if wc == 0 || li < 0 {
+                continue;
+            }
+            let bits = wc + (pk != 0) as u32;
+            let shift = 8 - bits;
+            let mask = (1i32 << bits) - 1;
+            for e in 0..2 {
+                let s = sub * 8 + e * 4;
+                let dz = bp::unzig(lanes[li as usize][if e == 0 { a } else { b }] as u32);
+                out[s] = src(s).map(|(k, rs, m)| (k, rs, m.map(|v| (((((v >> shift) as i32) + dz) & mask) << shift) as u8)));
+            }
+            if pk == 2 {
+                let (s0, s1) = (sub * 8, sub * 8 + 4);
+                let bitv = |v: u8| (v >> shift) & 1;
+                if let (Some((k0, r0, m0)), Some((k1, r1, m1))) = (out[s0], out[s1]) {
+                    let c0 = bitv(m0[cur.bc7_ep[k0 as usize][r0 as usize] as usize]);
+                    let c1 = bitv(m1[cur.bc7_ep[k1 as usize][r1 as usize] as usize]);
+                    for h in 0..256 {
+                        if bitv(m1[h]) != c0 {
+                            viol[k1 as usize][r1 as usize][h] += 1;
+                        }
+                        if bitv(m0[h]) != c1 {
+                            viol[k0 as usize][r0 as usize][h] += 1;
+                        }
+                    }
+                    obs[k1 as usize][r1 as usize] += 1;
+                    obs[k0 as usize][r0 as usize] += 1;
+                }
+            }
+        }
+        for sub in ns..3 {
+            for e in 0..2 {
+                out[sub * 8 + e * 4] = out[e * 4];
+            }
+        }
+        st[i & 255] = out;
+    }
+}
+
+/// Refit BC7 preset R values so mode-1 shared p-bits agree.
+pub fn refine_bc7_pbits(set: &TtpfSet, h: &mut History) {
+    let jobs: Vec<(usize, usize)> = set
+        .stores
+        .iter()
+        .enumerate()
+        .flat_map(|(si, s)| s.chunks.windows(2).enumerate().filter(|(_, w)| w[0].2 & 0x3F == bp::CODEC_BC7 && w[0].2 & 0x1C != 0).map(move |(ci, _)| (si, ci)))
+        .collect();
+    for _pass in 0..2 {
+        let cur: &History = h;
+        let (viol, obs) = jobs
+            .par_iter()
+            .fold(
+                || (vec![[[0u32; 256]; 24]; 256], vec![[0u32; 24]; 256]),
+                |(mut v, mut o), &(si, ci)| {
+                    let s = &set.stores[si];
+                    let vlen = (s.chunks[ci + 1].1 - s.chunks[ci].1) as usize;
+                    if let Ok(lo) = s.chunk_bytes(ci).map_err(|e| e.to_string()).and_then(|b| bp::decode_lanes(bp::CODEC_BC7, &b, vlen).map_err(|e| e.to_string())) {
+                        let lanes: Vec<&[u16]> = lo.iter().map(|x| x.as_slice()).collect();
+                        count_pbits(&lanes, vlen / 16, cur, &mut v, &mut o);
+                    }
+                    (v, o)
+                },
+            )
+            .reduce(
+                || (vec![[[0u32; 256]; 24]; 256], vec![[0u32; 24]; 256]),
+                |(mut v, mut o), (v2, o2)| {
+                    for k in 0..256 {
+                        for s in 0..24 {
+                            o[k][s] += o2[k][s];
+                            for x in 0..256 {
+                                v[k][s][x] += v2[k][s][x];
+                            }
+                        }
+                    }
+                    (v, o)
+                },
+            );
+        let mut changed = 0;
+        for k in 0..256 {
+            for s in 0..24 {
+                if obs[k][s] == 0 {
+                    continue;
+                }
+                let v = &viol[k][s];
+                let c = h.bc7_ep[k][s] as usize;
+                // nearest value with the fewest mismatches (keeps the colour close)
+                let best = (0..256).min_by_key(|&x| (v[x], (x as i32 - c as i32).abs())).unwrap();
+                if v[best] < v[c] {
+                    h.bc7_ep[k][s] = best as u8;
+                    changed += 1;
+                }
+            }
+        }
+        if changed == 0 {
+            break;
+        }
+    }
+}

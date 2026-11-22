@@ -731,6 +731,7 @@ pub fn calibrate(set: &TtpfSet) -> History {
     c4.build(&mut h);
     c6.build(&mut h);
     crate::bcpack_refine::refine_indices(set, &mut h);
+    crate::bcpack_refine::refine_bc7_pbits(set, &mut h);
     crate::bcpack_refine6::refine_endpoints(&recs6, &mut h);
     h
 }
