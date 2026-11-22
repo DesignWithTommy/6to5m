@@ -56,7 +56,8 @@ What works today:
 - [ ] Collision surface materials (currently all default) (in progress)
 - [x] Interiors as GTA V MLOs: `t6m_int.ytyp` (CMloArchetypeDef with decoded rooms, entity sets and the interior entities) and `t6m_int_X_Y.ymap` (CMloInstanceDef); `--interiors` still flattens them into world space instead
 - [ ] MLO portals (not decoded yet: every entity sits in limbo, entity sets start off)
-- [ ] Tint palettes and vertex-colour materials (in progress)
+- [x] Tint palettes: the embedded palette entry (vertex colour blue, row 0) is baked into tinted copies of the colour texture (32-step colours, max 512 px); the palette is no longer picked as a colour map
+- [ ] Per-placement tint rows (`tintValue`): every placement uses row 0
 - [ ] Fragments with physics (currently static)
 - [x] Peds to GTA V: `6ixpack fivem ped <name>` (skinned ydd components, yft skeleton retargeted to the GTA V ped skeleton, ytd, ymt, peds.meta; loads in CodeWalker, in-game test pending)
 - [x] Vehicles to GTA V: `6ixpack fivem vehicle <name>` (yft + vehicles/handling/carvariations/carcols metas; in-game test pending)
