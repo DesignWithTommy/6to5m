@@ -891,6 +891,12 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         .collect();
     let yt = meta::build_ytyp(&MapTypes { name: "t6m_bld".into(), archetypes: archetypes.clone() })?;
     emit_meta(ctx, "t6m_bld.ytyp", yt)?;
+    {
+        // for --split (split.rs): which txd each archetype uses
+        let mut l = ctx.layout.lock().unwrap();
+        *l = Default::default();
+        l.txd = txd_of.iter().map(|(a, t)| (a.clone(), t.clone())).collect();
+    }
 
     // LOD chains: level 0 in 512 m cells, each LOD level in one ymap
     // (t6m_lod1 = LOD, t6m_lod2 = SLOD1, ...), each the parent of the one below.
@@ -978,6 +984,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         let has_parent = ids.iter().any(|&i| parent[i].is_some());
         let entities: Vec<Entity> = ids.iter().enumerate().map(|(k, &i)| ent(i, k + 1, parent[i].map_or(-1, |q| slot[q] as i32))).collect();
         let name = lvl_name(lvl);
+        ctx.layout.lock().unwrap().lod_ymaps.insert(name.clone(), ids.iter().map(|&i| done[&kept[i].name].an.clone()).collect());
         let pname = if has_parent { lvl_name(lvl + 1) } else { String::new() };
         let map = MapData { entities, ..serde_json::from_value(json!({"name": name, "parent": pname, "flags": 2, "content_flags": 2, "exported_by": "6ixpack fivem"})).unwrap() };
         emit_meta(ctx, &format!("{name}.ymap"), meta::build_ymap_with(&map, &archetypes)?)?;
@@ -1021,6 +1028,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     eprintln!("buildings: {} entities, {links_n} LOD links, {top} LOD levels", alive.iter().filter(|x| **x).count());
     for ((cx, cy), ids) in cells {
         let name = format!("t6m_bld_{:02}_{:02}", cx + 50, cy + 50);
+        ctx.layout.lock().unwrap().ymaps.insert(name.clone(), ids.iter().map(|&i| done[&kept[i].name].an.clone()).collect());
         let has_parent = ids.iter().any(|&i| parent[i].is_some());
         let entities: Vec<Entity> = ids.iter().enumerate().map(|(j, &i)| ent(i, j + 1, parent[i].map_or(-1, |q| slot[q] as i32))).collect();
         let pname = if has_parent { lvl_name(1) } else { String::new() };

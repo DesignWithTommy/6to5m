@@ -22,6 +22,7 @@
 mod buildings;
 mod collision;
 mod geom;
+pub mod split;
 mod terrain;
 pub mod verify;
 
@@ -57,7 +58,11 @@ usage: 6ixpack fivem build --game <dir> --out <resource dir> [options]
   --no-lod            HD entities only, all ORPHANHD (no LOD/SLOD chain)
   --weapon-collision  keep weapon-only collision shapes (bullets); off by default (~20% of triangles)
   --conjugate-rot      write the conjugate of the stored placement quaternion
-  --force              rebuild outputs even when up to date";
+  --force              rebuild outputs even when up to date
+  --split <metres>     also write <out>/[<name>]/: one resource per square region
+                       (rounded to 512 m cells) plus <name>_common (ytyps, LOD/SLOD
+                       ymaps, shared txds, terrain, water); see ensure.cfg there
+  --split-max <MB>     quarter any region resource bigger than this (default 1024)";
 
 const TOOL: &str = "fivem-20";
 
@@ -76,6 +81,8 @@ pub struct Opts {
     pub weapon_collision: bool,
     pub force: bool,
     pub max_tex: Option<u16>,
+    pub split: Option<f32>,
+    pub split_max: u64,
 }
 
 impl Opts {
@@ -115,6 +122,7 @@ pub struct Ctx {
     pub input_time: SystemTime,
     manifest: Mutex<Manifest>,
     pub report: Mutex<Report>,
+    pub layout: Mutex<split::Layout>,
 }
 
 impl Ctx {
@@ -200,6 +208,8 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         weapon_collision: false,
         force: false,
         max_tex: None,
+        split: None,
+        split_max: 1024,
     };
     let mut it = args.iter();
     let val = |it: &mut std::slice::Iter<String>, k: &str| it.next().cloned().ok_or(format!("{k} needs a value"));
@@ -223,6 +233,8 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "--weapon-collision" => o.weapon_collision = true,
             "--force" => o.force = true,
             "--max-tex" => o.max_tex = Some(val(&mut it, a)?.parse().map_err(|e| format!("--max-tex: {e}"))?),
+            "--split" => o.split = Some(val(&mut it, a)?.parse().map_err(|e| format!("--split: {e}"))?),
+            "--split-max" => o.split_max = val(&mut it, a)?.parse().map_err(|e| format!("--split-max: {e}"))?,
             _ => return Err(format!("unknown argument {a}\n{USAGE}")),
         }
     }
@@ -282,7 +294,8 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
     if manifest.tool != TOOL {
         manifest = Manifest { tool: TOOL.into(), ..Default::default() };
     }
-    let ctx = Ctx { o, stream, levels, input_time, manifest: Mutex::new(manifest), report: Mutex::new(Report::default()) };
+    let layout = split::load(&o.out);
+    let ctx = Ctx { o, stream, levels, input_time, manifest: Mutex::new(manifest), report: Mutex::new(Report::default()), layout: Mutex::new(layout) };
     let part = |p: &str| ctx.o.only.iter().any(|x| x == p);
 
     let result = (|| -> Result<(), Box<dyn Error>> {
@@ -299,6 +312,7 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
         if part("buildings") {
             buildings::build(&ctx, index.as_ref().unwrap())?;
             ctx.save_manifest()?;
+            split::save(&ctx)?;
         }
         if part("terrain") {
             terrain::build(&ctx, index.as_ref().unwrap())?;
@@ -312,6 +326,9 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
             water(&ctx)?;
         }
         fxmanifest(&ctx)?;
+        if let Some(m) = ctx.o.split {
+            split::split(&ctx, m, ctx.o.split_max)?;
+        }
         Ok(())
     })();
     ctx.save_manifest()?;

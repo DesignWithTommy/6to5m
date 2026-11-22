@@ -34,6 +34,6 @@ Next, from the FiveM port's requests:
 - Lights to ymap LODLights / DistantLODLights (night lighting)
 - Instanced batches (grass, vegetation) to ymap grass instance lists
 - Minimap texture and zone names
-- Split output into several resources by region/size (the 2 km airport alone is 5.2 GB)
+- Region split (`--split`) done; verify in game, and split the LOD/SLOD ymaps and terrain per region if common grows too big
 - Coordinate offset option: GTA VI's map reaches y 9474, past GTA V's ~±8000 limit
 - Los Santos removal in Rust: stub ymaps/ybns for vanilla _citye/_cityw/_hills, packing the ~11k ybn stubs into fewer files
