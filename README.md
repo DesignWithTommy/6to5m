@@ -56,6 +56,7 @@ What works today:
 - [x] BCPack BC4
 - [ ] BCPack BC6H (modes m10/m14) and the remaining inconsistent BC7 blocks (in progress: mode 14 bad blocks 75% to 14%)
 - [x] Road and asphalt surfaces
+- [x] Four-layer roads and ground: terrain_cb_w_4lyr.sps with the four 6m layer diffuses, lookup weights baked into Colour1 (no layer bump maps yet)
 - [x] LOD/SLOD drawables with no linked model (unresolved archetypes 84,216 to 37; `#member` model ids resolved, so every airport placement converts)
 - [ ] Models outside `levels.rpf` (`pack/*` archives)
 - [x] Interiors as GTA V MLOs: `t6m_int.ytyp` (CMloArchetypeDef with decoded rooms, entity sets and the interior entities) and `t6m_int_X_Y.ymap` (CMloInstanceDef); `--interiors` still flattens them into world space instead
@@ -118,7 +119,7 @@ Built on the work of:
 
 - **offs** — [rpf9-extract](https://github.com/offs/rpf9-extract) (no license published): the archive scanner, carver and report code this tool started from.
 - **breadbbbb** — [rpf9-explorer](https://github.com/breadbbbb/rpf9-explorer) (no license published): model, texture and audio decoding references; the 1.2 model recovery (zero-radius drawables, empty-bounds geometry fallback, optional fragment header pointers, 16-bit bone palettes) is ported in `src/model/decode.rs`.
-- **holdmysocks** — [SixNG](https://github.com/holdmysocks/SixNG) (GPL-3.0): vendored in `vendor/sixng-core` and the `sixng` command (plus its BC6H one-region y-state rule, a4063d3); synced to 0.5.0 for drawable-dictionary members (per-member model names, bounds and exports).
+- **holdmysocks** — [SixNG](https://github.com/holdmysocks/SixNG) (GPL-3.0): vendored in `vendor/sixng-core` and the `sixng` command (plus its BC6H one-region y-state rule, a4063d3); synced to 0.5.0 for drawable-dictionary members (per-member model names, bounds and exports). Four-layer ground shaders (layer slots, lookup-weight channels, detail tiling; 6046d19, 1456a9b) drive the fivem terrain_cb_w_4lyr roads and ground.
 - **ShrewBrew** — [OpenRPF9](https://github.com/shrewbrewsh/OpenRPF9) (MIT): stream-carving approach.
 - **rpf9-audio contributors** — [rpf9-audio](https://github.com/jaylikesbunda/rpf9-audio) (MIT): AWC/ADAT and Ogg Opus handling.
 - **opus-decoder** (BSD-3-Clause, port of libopus): built-in Opus decoding.
