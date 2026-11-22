@@ -26,10 +26,17 @@ pub struct Geom {
     /// Tangent-space normal map (DirectX green); non-empty switches the
     /// geometry to normal_spec.sps with a flat spec map and adds tangents.
     pub normal: String,
+    /// Four-layer ground: layer diffuse names (terrain_cb_w_4lyr.sps,
+    /// layout PNCCTX); `colours1` holds the blend weights (G picks layers
+    /// 2/3 over 0/1, B picks 1/3 over 0/2).
+    pub layers: Option<[String; 4]>,
+    pub colours1: Vec<u32>,
 }
 
 /// Flat specular map shared by every normal_spec.sps geometry.
 pub const FLAT_SPEC: &str = "r6m_flatspec";
+/// Flat tangent-space normal map (glass_env without a real bump map).
+pub const FLAT_BUMP: &str = "r6m_flatbump";
 
 #[derive(Clone, Default, Debug)]
 pub struct Mesh {
@@ -46,6 +53,10 @@ const VFT_IB: u32 = 1080152408;
 const GTAV1: u64 = 0x7755555555996996;
 const LAYOUT_FLAGS: u32 = 1 | (1 << 3) | (1 << 4) | (1 << 6); // Position Normal Colour0 TexCoord0
 const STRIDE: usize = 36;
+// Position Normal Colour0 Colour1 TexCoord0 Tangent (float4)
+const LAYOUT_PNCCTX: u32 = 1 | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 14);
+const STRIDE_PNCCTX: usize = 56;
+
 /// + Tangent (Float4): the normal-mapped layout.
 const LAYOUT_FLAGS_T: u32 = LAYOUT_FLAGS | (1 << 14);
 const STRIDE_T: usize = 52;
@@ -131,6 +142,53 @@ fn add_texture_ref(b: &mut Builder, name: &str) -> BlockId {
     b.add(Seg::Sys, w)
 }
 
+/// terrain_cb_w_4lyr.sps with the four layer diffuses (no bump maps yet).
+fn add_terrain_shader(b: &mut Builder, layers: &[String; 4]) -> BlockId {
+    const NAMES: [&str; 4] = ["TextureSampler_layer0", "TextureSampler_layer1", "TextureSampler_layer2", "TextureSampler_layer3"];
+    let vectors = [
+        ("specularFalloffMult", [32.0, 0.0, 0.0, 0.0]),
+        ("specularIntensityMult", [0.1, 0.0, 0.0, 0.0]),
+        ("bumpiness", [1.0, 0.0, 0.0, 0.0]),
+        ("bumpSelfShadowAmount", [0.3, 0.0, 0.0, 0.0]),
+        ("materialWetnessMultiplier", [1.0, 0.0, 0.0, 0.0]),
+    ];
+    let texs: Vec<BlockId> = layers.iter().map(|t| add_texture_ref(b, t)).collect();
+    let nt = texs.len();
+    let n = nt + vectors.len();
+    let base_size = 32 + 16 * n + 16 * vectors.len() + 4 * n;
+    let data_size = base_size + pad16(base_size);
+    let pb = b.reserve(Seg::Sys);
+    let mut w = W::new();
+    for (i, t) in texs.iter().enumerate() {
+        w.u8(0).u8((i + 2) as u8).u16(0).u32(0).ptr(Some(*t));
+    }
+    let mut voff = 16 * n;
+    for (i, _) in vectors.iter().enumerate() {
+        w.u8(1).u8((160 + (vectors.len() - 1 - i)) as u8).u16(0).u32(0).ptr_at(Some(pb), voff as u64);
+        voff += 16;
+    }
+    for (_, v) in &vectors {
+        w.v4(*v);
+    }
+    for name in NAMES {
+        w.u32(joaat(&name.to_ascii_lowercase()));
+    }
+    for (name, _) in &vectors {
+        w.u32(joaat(&name.to_ascii_lowercase()));
+    }
+    w.zeros(32 + data_size * 4);
+    b.set(pb, w);
+    let sname = "terrain_cb_w_4lyr";
+    let mut w = W::new();
+    w.ptr(Some(pb));
+    w.u32(joaat(sname)).u32(0);
+    w.u8(n as u8).u8(0).u16(32768);
+    w.u16((16 * n + 16 * vectors.len()) as u16).u16(data_size as u16);
+    w.u32(joaat(&format!("{sname}.sps"))).u32(0);
+    w.u32(1 | 0xFF00).u16(0).u8(0).u8(nt as u8).u64(0);
+    b.add(Seg::Sys, w)
+}
+
 fn add_shader(b: &mut Builder, texture: &str, kind: u8, normal: &str) -> BlockId {
     let (sname, bucket) = match kind {
         0 if !normal.is_empty() => ("normal_spec", 0u8),
@@ -139,6 +197,8 @@ fn add_shader(b: &mut Builder, texture: &str, kind: u8, normal: &str) -> BlockId
         3 => ("cutout", 3),
         // self-lit (lamps, signs, screens): emissive.sps, opaque bucket
         4 => ("emissive", 0),
+        // 6m glass families: glass_env.sps, alpha bucket
+        5 => ("glass_env", 1),
         _ => ("default", 0),
     };
     let mut vectors: Vec<(&str, [f32; 4])> = VECTORS.to_vec();
@@ -146,6 +206,21 @@ fn add_shader(b: &mut Builder, texture: &str, kind: u8, normal: &str) -> BlockId
         vectors.insert(0, ("emissiveMultiplier", [1.0, 0.0, 0.0, 0.0]));
     }
     let mut samplers = vec![("diffusesampler", texture)];
+    if sname == "glass_env" {
+        // exact legacy parameter set (CodeWalker ShadersGen9Conversion.xml glass_env "old" names)
+        samplers.push(("bumpsampler", if normal.is_empty() { FLAT_BUMP } else { normal }));
+        samplers.push(("specsampler", FLAT_SPEC));
+        vectors = vec![
+            ("globalAnimUV0", [1.0, 0.0, 0.0, 0.0]),
+            ("globalAnimUV1", [0.0, 1.0, 0.0, 0.0]),
+            ("specularFresnel", [0.97, 0.0, 0.0, 0.0]),
+            ("specularFalloffMult", [100.0, 0.0, 0.0, 0.0]),
+            ("specularIntensityMult", [1.0, 0.0, 0.0, 0.0]),
+            ("specMapIntMask", [1.0, 0.0, 0.0, 0.0]),
+            ("bumpiness", [1.0, 0.0, 0.0, 0.0]),
+            ("useTessellation", [0.0, 0.0, 0.0, 0.0]),
+        ];
+    }
     if sname == "normal_spec" {
         samplers.push(("bumpsampler", normal));
         samplers.push(("specsampler", FLAT_SPEC));
@@ -207,8 +282,18 @@ fn write_geom(b: &mut Builder, w: &mut W, g: &Geom) -> Result<(), String> {
     if g.normals.len() != nv || g.colours.len() != nv || g.uvs.len() != nv {
         return Err("geometry attribute arrays differ in length".into());
     }
-    let bump = !g.normal.is_empty() && g.kind == 0;
-    let (flags, stride) = if bump { (LAYOUT_FLAGS_T, STRIDE_T) } else { (LAYOUT_FLAGS, STRIDE) };
+    let terrain = g.layers.is_some();
+    if terrain && g.colours1.len() != nv {
+        return Err("terrain geometry needs colours1 per vertex".into());
+    }
+    let bump = terrain || ((!g.normal.is_empty() && g.kind == 0 || g.kind == 5));
+    let (flags, stride) = if terrain {
+        (LAYOUT_PNCCTX, STRIDE_PNCCTX)
+    } else if bump {
+        (LAYOUT_FLAGS_T, STRIDE_T)
+    } else {
+        (LAYOUT_FLAGS, STRIDE)
+    };
     let tangents = if bump {
         let idx: Vec<u32> = g.indices.iter().map(|&i| i as u32).collect();
         uv_tangents(&g.positions, &g.normals, &g.uvs, &idx)
@@ -221,6 +306,9 @@ fn write_geom(b: &mut Builder, w: &mut W, g: &Geom) -> Result<(), String> {
             vb.extend_from_slice(&f.to_le_bytes());
         }
         vb.extend_from_slice(&g.colours[i].to_le_bytes());
+        if terrain {
+            vb.extend_from_slice(&g.colours1[i].to_le_bytes());
+        }
         for f in &g.uvs[i] {
             vb.extend_from_slice(&f.to_le_bytes());
         }
@@ -232,7 +320,7 @@ fn write_geom(b: &mut Builder, w: &mut W, g: &Geom) -> Result<(), String> {
     }
     let vdata = b.sys_bytes(vb);
     let mut d = W::new();
-    d.u32(flags).u16(stride as u16).u8(0).u8(if bump { 5 } else { 4 }).u64(GTAV1);
+    d.u32(flags).u16(stride as u16).u8(0).u8(if terrain { 6 } else if bump { 5 } else { 4 }).u64(GTAV1);
     let decl = b.add(Seg::Sys, d);
     let mut v = W::new();
     v.u32(VFT_VB).u32(1).u16(stride as u16).u16(0).u32(0);
@@ -349,7 +437,7 @@ pub fn fill_drawable(b: &mut Builder, id: BlockId, mesh: &Mesh, lod_dist: f32, t
     let name = b.string(&mesh.name);
 
     // shader group
-    let shaders: Vec<BlockId> = mesh.geoms.iter().map(|g| add_shader(b, &g.texture, g.kind, &g.normal)).collect();
+    let shaders: Vec<BlockId> = mesh.geoms.iter().map(|g| match &g.layers { Some(l) => add_terrain_shader(b, l), None => add_shader(b, &g.texture, g.kind, &g.normal) }).collect();
     let mut pa = W::new();
     for &s in &shaders {
         pa.ptr(Some(s));

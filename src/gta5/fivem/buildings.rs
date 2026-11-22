@@ -77,11 +77,30 @@ fn rgba_dds(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
         u(0, &mut b);
     }
     for (px, lw, lh) in &levels {
-        let mut out = vec![0u8; fmt.compressed_size(*lw as usize, *lh as usize)];
-        fmt.compress(px, *lw as usize, *lh as usize, texpresso::Params::default(), &mut out);
-        b.extend_from_slice(&out);
+        b.extend_from_slice(&compress_par(fmt, px, *lw as usize, *lh as usize));
     }
     b
+}
+
+/// Block compression in parallel: strips of 16 block rows (64 px) are
+/// independent, so they compress on all cores and are concatenated.
+fn compress_par(fmt: texpresso::Format, px: &[u8], w: usize, h: usize) -> Vec<u8> {
+    const ROWS: usize = 64;
+    if h <= ROWS || h % 4 != 0 {
+        let mut out = vec![0u8; fmt.compressed_size(w, h)];
+        fmt.compress(px, w, h, texpresso::Params::default(), &mut out);
+        return out;
+    }
+    let strips: Vec<Vec<u8>> = (0..h.div_ceil(ROWS))
+        .into_par_iter()
+        .map(|i| {
+            let (y0, y1) = (i * ROWS, ((i + 1) * ROWS).min(h));
+            let mut out = vec![0u8; fmt.compressed_size(w, y1 - y0)];
+            fmt.compress(&px[y0 * w * 4..y1 * w * 4], w, y1 - y0, texpresso::Params::default(), &mut out);
+            out
+        })
+        .collect();
+    strips.concat()
 }
 
 /// Rejects decodes that cannot be a colour map: flat images (BCPack data
@@ -99,7 +118,9 @@ fn bad_colour(rgba: &[u8]) -> Option<&'static str> {
     }
     let m = s.map(|x| x / n);
     let var: f64 = (0..3).map(|k| q[k] / n - m[k] * m[k]).sum();
-    if var < 12.0 {
+    // Undecoded BCPack comes out as one solid colour (variance ~0). Real
+    // near-uniform maps exist: 6m glass diffusetex has variance ~10.
+    if var < 0.5 {
         return Some("flat decode (undecoded BCPack data)");
     }
     if m[2] > 200.0 && (100.0..160.0).contains(&m[0]) && (100.0..160.0).contains(&m[1]) {
@@ -117,9 +138,9 @@ fn bad_colour(rgba: &[u8]) -> Option<&'static str> {
         }
         if saa < 1.0 || sbb < 1.0 { 1.0 } else { sab / (saa * sbb).sqrt() }
     };
-    if corr(0, 1).min(corr(1, 2)).min(corr(0, 2)) < 0.2 {
-        return Some("mask/packed data, not a colour map");
-    }
+    // (no channel-correlation test: slots are chosen by hash, and colourful
+    // colour maps are decorrelated too)
+    let _ = corr;
     None
 }
 
@@ -163,11 +184,21 @@ fn promote_base_layer(mesh: &mut Mesh) {
     }
 }
 
+/// True when a cached DDS is (near) grayscale: mean per-pixel channel spread
+/// under 4 levels.
+fn near_gray(p: &std::path::Path) -> bool {
+    let Some((_, _, rgba)) = fs::read(p).ok().and_then(|b| crate::texture::dds_preview(&b).ok()) else { return false };
+    let n = (rgba.len() / 4).max(1) as f64;
+    let spread: f64 = rgba.chunks_exact(4).map(|px| (px[0].max(px[1]).max(px[2]) - px[0].min(px[1]).min(px[2])) as f64).sum();
+    spread / n < 4.0
+}
+
 /// Rejects (and deletes) a cached DDS that is not a usable colour map.
 fn check_dds(p: &std::path::Path) -> Result<(), String> {
     let bytes = fs::read(p).map_err(|e| e.to_string())?;
-    let (_, _, rgba) = crate::texture::dds_preview(&bytes).map_err(|e| e.to_string())?;
-    match bad_colour(&rgba) {
+    let (w, h, rgba) = crate::texture::dds_preview(&bytes).map_err(|e| e.to_string())?;
+    let why = if w <= 8 && h <= 8 { Some("placeholder (8 px or less)") } else { bad_colour(&rgba) };
+    match why {
         None => Ok(()),
         Some(why) => {
             let _ = fs::remove_file(p);
@@ -182,13 +213,13 @@ fn is_glass(shader_hash: u32) -> bool {
     sixng_core::material::classify(&format!("{shader_hash:08x}"), &[])["class"] == "glass"
 }
 
-/// Shared translucent pane texture for 6m glass (cool grey, ~35% opaque).
-fn glass_tex(pools: &Pools) -> Result<String, String> {
-    let p = pools.dir.join("glass6m.dds");
+/// Shared flat normal map (glass_env when the 6m bump slot is a placeholder).
+fn flat_bump(pools: &Pools) -> Result<String, String> {
+    let p = pools.dir.join(format!("{}.dds", &ydr::FLAT_BUMP[4..]));
     if !p.exists() {
-        write_atomic(&p, &rgba_dds(&[70u8, 82, 88, 90].repeat(16), 4, 4)).map_err(|e| e.to_string())?;
+        write_atomic(&p, &rgba_dds(&[128u8, 128, 255, 255].repeat(16 * 16), 16, 16)).map_err(|e| e.to_string())?;
     }
-    Ok("r6m_glass6m".into())
+    Ok(ydr::FLAT_BUMP.into())
 }
 
 fn is_emissive(shader_hash: u32) -> bool {
@@ -281,6 +312,27 @@ impl Pools {
         self.from_ttpf(hash, h64).and_then(|p| check_dds(&p).map(|_| p)).map_err(|e2| format!("{e1}; ttpf: {e2}"))
     }
 
+    /// Decoded RGBA of a data texture (no colour-map check), for maps that
+    /// are sampled at build time (4-layer lookup weights).
+    fn rgba(&self, hash: u32, key: u64, h64: u64) -> Result<(u32, u32, Vec<u8>), String> {
+        let e1 = match self.from_pools(hash, key).and_then(|p| fs::read(&p).map_err(|e| e.to_string())).and_then(|b| crate::texture::dds_preview(&b).map_err(|e| e.to_string())) {
+            Ok(x) => return Ok(x),
+            Err(e) => e,
+        };
+        if h64 == 0 {
+            return Err(e1);
+        }
+        let set = sixng_core::ttpf::global(&self.game);
+        let (store, t) = set.get(h64).ok_or_else(|| format!("{e1}; not in any ttpf store"))?;
+        if !t.decodable() {
+            return Err(format!("{e1}; ttpf format not decodable"));
+        }
+        let (data, skipped) = store.data_ex(t).map_err(|e| e.to_string())?;
+        let mip = if skipped == 0 { 0 } else { store.best_mip(t).ok_or("only BCPack mips")? };
+        let (rgba, w, h) = sixng_core::ttpf::decode_rgba(t, &data, mip).map_err(|e| e.to_string())?;
+        Ok((w, h, rgba))
+    }
+
     /// Cached tangent-space normal map `<hash>_n.dds` (texture
     /// `r6m_<hash>_n`), decoded once and reused by every later build; also
     /// makes sure the shared flat spec map exists. Flat decodes (undecoded
@@ -297,12 +349,18 @@ impl Pools {
             ytd::from_dds("check", &dds)?;
             write_atomic(&p, &dds).or_else(|e| if p.exists() { Ok(()) } else { Err(e.to_string()) })?;
         }
+        self.flat_spec()?;
+        Ok(name)
+    }
+
+    /// Makes sure the shared flat spec map exists.
+    fn flat_spec(&self) -> Result<(), String> {
         let sp = self.dir.join(format!("{}.dds", &ydr::FLAT_SPEC[4..]));
         if !sp.exists() {
             let px: Vec<u8> = (0..16 * 16).flat_map(|_| [32u8, 32, 32, 255]).collect();
             write_atomic(&sp, &rgba_dds(&px, 16, 16)).or_else(|e| if sp.exists() { Ok(()) } else { Err(e.to_string()) })?;
         }
-        Ok(name)
+        Ok(())
     }
 
     /// Decoded RGBA without the colour-map check: ttdb pools, then TTPF.
@@ -328,13 +386,6 @@ impl Pools {
         ttpf().map_err(|e2| format!("{e1}; ttpf: {e2}"))
     }
 
-    /// True when the TTPF copy of the texture is stored linear (UNORM):
-    /// masks, normals and packed data. Colour maps are *_SRGB.
-    fn linear(&self, h64: u64) -> bool {
-        const SRGB: [u32; 7] = [29, 72, 75, 78, 91, 93, 99];
-        h64 != 0 && sixng_core::ttpf::global(&self.game).get(h64).is_some_and(|(_, t)| !SRGB.contains(&t.dxgi_format))
-    }
-
     fn from_ttpf(&self, hash: u32, h64: u64) -> Result<PathBuf, String> {
         if h64 == 0 {
             return Err("no 64-bit hash".into());
@@ -347,6 +398,9 @@ impl Pools {
         let (data, skipped) = store.data_ex(t).map_err(|e| e.to_string())?;
         let mip = if skipped == 0 { 0 } else { store.best_mip(t).ok_or("only BCPack mips")? };
         let (rgba, w, h) = sixng_core::ttpf::decode_rgba(t, &data, mip).map_err(|e| e.to_string())?;
+        if w <= 8 && h <= 8 {
+            return Err("placeholder (8 px or less)".into());
+        }
         if let Some(why) = bad_colour(&rgba) {
             return Err(why.into());
         }
@@ -473,28 +527,271 @@ fn f3(v: &Value) -> V3 {
     std::array::from_fn(|k| v[k].as_f64().unwrap_or(0.0) as f32)
 }
 
-/// Placement JSON dir: given, else <work>/placements/levels, generated with
-/// the sixng library when it has no index.jsonl yet.
+/// Placement JSON dir: given, else <work>/placements/levels. Everything it
+/// depends on is prepared in-process from the sixng index and levels.rpf, so
+/// no `sixng interior-entities` / `lod-links` / `placements` runs are needed:
+/// each output is (re)built only when missing or older than its inputs, and
+/// placements also when they were made for a region not covering --bbox
+/// (recorded in .fivem_region.json).
 fn placements_dir(ctx: &Ctx, index: &ArchiveIndex) -> Result<PathBuf, Box<dyn Error>> {
-    let dir = ctx.o.placements.clone().unwrap_or_else(|| ctx.o.work.join("placements").join("levels"));
-    if dir.join("index.jsonl").exists() {
-        return Ok(dir);
+    if let Some(d) = &ctx.o.placements {
+        if d.join("index.jsonl").exists() {
+            return Ok(d.clone());
+        }
+        return Err(format!("{}: no index.jsonl", d.display()).into());
     }
-    if ctx.o.placements.is_some() {
-        return Err(format!("{}: no index.jsonl", dir.display()).into());
-    }
-    eprintln!("buildings: no placements in {}, running sixng placements", dir.display());
+    let dir = ctx.o.work.join("placements").join("levels");
     let ws = sixng_core::export::Workspace::new(&ctx.o.game, &ctx.o.work);
     let a = ws.resolve("levels.rpf")?;
-    if let Some(b) = ctx.o.bbox {
-        sixng_core::export::set_region(b);
+    let metas: Vec<&Entry> = index.entries.iter().filter(|e| e.kind == sixng_core::classify::Kind::Resource && e.sub == "7a").collect();
+    let ix = ctx.o.work.join("index");
+    let mtime = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
+    let stale = |p: &Path, deps: &[Option<std::time::SystemTime>]| match mtime(p) {
+        None => true,
+        Some(t) => t < ctx.input_time || deps.iter().flatten().any(|d| *d > t),
+    };
+    let ie = ix.join("interior_entities.jsonl");
+    if stale(&ie, &[]) {
+        let _p = super::Phase::new(ctx, "  prep interior-ents");
+        sixng_core::interiorents::build(&ws, &a, &metas, sixng_core::export::no_progress())?;
     }
-    let sel: Vec<&sixng_core::scan::Entry> = index.entries.iter().filter(|e| e.sub == "7a").collect();
-    sixng_core::export::export_placements(&ws, &a, &sel, &ctx.o.work, sixng_core::export::no_progress())?;
+    let lp = ix.join("lod_parents.jsonl");
+    if stale(&lp, &[mtime(&ie)]) || stale(&ix.join("archetype_lod.jsonl"), &[]) {
+        let _p = super::Phase::new(ctx, "  prep lod-links");
+        sixng_core::lodlinks::build(&ws, &a, &metas, sixng_core::export::no_progress())?;
+    }
+    let region_f = dir.join(".fivem_region.json");
+    let made_for: Option<Option<[f32; 4]>> = fs::read(&region_f).ok().and_then(|b| serde_json::from_slice(&b).ok());
+    let covers = match (made_for, ctx.o.bbox) {
+        (Some(None), _) => true,
+        (Some(Some(m)), Some(b)) => m[0] <= b[0] && m[1] <= b[1] && m[2] >= b[2] && m[3] >= b[3],
+        _ => false,
+    };
+    let pi = dir.join("index.jsonl");
+    if !covers || stale(&pi, &[mtime(&ie), mtime(&lp)]) {
+        let _p = super::Phase::new(ctx, "  prep placements");
+        // a region export is enough for this build; grown 1 km so nearby rebuilds reuse it
+        let reg = ctx.o.bbox.map(|b| [b[0] - 1000.0, b[1] - 1000.0, b[2] + 1000.0, b[3] + 1000.0]);
+        if let Some(r) = reg {
+            sixng_core::export::set_region(r);
+        }
+        // only the map files that can touch the region (+ interior-space
+        // files, few and needed by MLO instances): no whole-map export
+        let sp = meta_spatial(ctx, &a.path, &metas);
+        let want: Vec<&Entry> = metas
+            .iter()
+            .copied()
+            .filter(|e| match (sp.get(&e.off), reg) {
+                (None, _) => false,
+                (Some(_), None) => true,
+                (Some((world, b)), Some(r)) => !*world || (b[0] <= r[2] && b[2] >= r[0] && b[1] <= r[3] && b[3] >= r[1]),
+            })
+            .collect();
+        eprintln!("buildings: exporting {} of {} map files", want.len(), metas.len());
+        fast_export(&ws, &a.path, &want, &dir)?;
+        fs::create_dir_all(&dir)?;
+        fs::write(&region_f, serde_json::to_vec(&reg)?)?;
+    }
     Ok(dir)
 }
 
-fn load_places(ctx: &Ctx, dir: &Path) -> Result<Vec<Place>, Box<dyn Error>> {
+/// Per map file (entry offset): world-space flag and xy bbox of its entity
+/// positions, from the system page only. Cached in <work>/fivem_meta_xy.json
+/// per levels.rpf stamp; entries not in the cache are scanned, so this is a
+/// one-off scan per game version (files without entities are recorded too).
+fn meta_spatial(ctx: &Ctx, archive: &Path, metas: &[&Entry]) -> HashMap<u64, (bool, [f32; 4])> {
+    use sixng_core::meta7a::{Meta, ENTITY};
+    use serde::{Deserialize, Serialize};
+    #[derive(Serialize, Deserialize, Default)]
+    struct C {
+        stamp: String,
+        rows: Vec<(u64, u8, [f32; 4])>,
+    }
+    let p = ctx.o.work.join("fivem_meta_xy.json");
+    let mut c: C = fs::read(&p).ok().and_then(|b| serde_json::from_slice(&b).ok()).filter(|c: &C| c.stamp == ctx.input_stamp).unwrap_or_default();
+    c.stamp = ctx.input_stamp.clone();
+    let have: HashSet<u64> = c.rows.iter().map(|r| r.0).collect();
+    let todo: Vec<&&Entry> = metas.iter().filter(|e| !have.contains(&e.off)).collect();
+    if !todo.is_empty() {
+        let _p = super::Phase::new(ctx, "  prep map-file scan");
+        let Ok(map) = fs::File::open(archive).and_then(|f| unsafe { Mmap::map(&f) }) else { return HashMap::new() };
+        let new: Vec<(u64, u8, [f32; 4])> = todo
+            .par_iter()
+            .map(|e| {
+                let none = (e.off, 2u8, [0f32; 4]);
+                let Some(r) = sys_from_map(&map, e) else { return none };
+                let Some(m) = Meta::parse(&r) else { return none };
+                let ents = m.objects(ENTITY);
+                if ents.is_empty() {
+                    return none;
+                }
+                let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+                for &o in &ents {
+                    let (x, y) = (r.f32(o + 0x38), r.f32(o + 0x3C));
+                    b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)];
+                }
+                let world = sixng_core::interiorents::file_info(&m).space.starts_with("world");
+                (e.off, if world { 1 } else { 0 }, b)
+            })
+            .collect();
+        c.rows.extend(new);
+        let _ = write_atomic(&p, &serde_json::to_vec(&c).unwrap());
+    }
+    c.rows.into_iter().filter(|r| r.1 != 2).map(|r| (r.0, (r.1 == 1, r.2))).collect()
+}
+
+/// sixng_core::export::export_placements for `entries` only, reading through
+/// a memory map (sys_from_map) and loading only these files' LOD parents
+/// (lines of the 300+ MB lod_parents.jsonl parsed in parallel, filtered by
+/// map id first). Writes the same <offset>.json files and index.jsonl.
+fn fast_export(ws: &sixng_core::export::Workspace, archive: &Path, entries: &[&Entry], dir: &Path) -> Result<(), Box<dyn Error>> {
+    use sixng_core::{interiorents, meta7a};
+    fs::create_dir_all(dir)?;
+    let map = unsafe { Mmap::map(&fs::File::open(archive)?)? };
+    let names = sixng_core::export::model_names(ws);
+    let ix = ws.index_dir();
+    let ids: HashSet<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+    let par_lines = |f: &str| fs::read_to_string(ix.join(f)).unwrap_or_default();
+    let ptxt = par_lines("lod_parents.jsonl");
+    let parents: HashMap<String, HashMap<u64, Value>> = ptxt
+        .par_lines()
+        .filter(|l| l.find("\"map\":\"").and_then(|i| l[i + 7..].split('"').next()).is_some_and(|id| ids.contains(id)))
+        .filter_map(|l| {
+            let mut v: Value = serde_json::from_str(l).ok()?;
+            let id = v["map"].as_str()?.to_string();
+            let mut m = HashMap::new();
+            for p in v["parents"].as_array_mut()?.iter_mut() {
+                if let Some(i) = p["index"].as_u64() {
+                    if let Some(o) = p.as_object_mut() {
+                        o.remove("index");
+                    }
+                    m.insert(i, p.take());
+                }
+            }
+            Some((id, m))
+        })
+        .collect();
+    drop(ptxt);
+    let atxt = par_lines("archetype_lod.jsonl");
+    let arch_lod: HashMap<u32, (f32, f32)> = atxt
+        .par_lines()
+        .filter_map(|l| {
+            let v: Value = serde_json::from_str(l).ok()?;
+            let h = u32::from_str_radix(v["archetype"].as_str()?, 16).ok()?;
+            let f = |k: &str| v[k].as_f64().unwrap_or(-1.0) as f32;
+            Some((h, (f("lod_dist"), f("hd_texture_dist"))))
+        })
+        .collect();
+    drop(atxt);
+    let mut rows: Vec<Value> = entries
+        .par_iter()
+        .filter_map(|e| {
+            let r = sys_from_map(&map, e)?;
+            let mf = meta7a::map_file(&r, &names)?;
+            if mf.entities.is_empty() {
+                return None;
+            }
+            let fname = format!("{:x}.json", e.off);
+            let mut doc = serde_json::to_value(&mf).ok()?;
+            doc["id"] = json!(e.id);
+            let fi = meta7a::Meta::parse(&r).map(|m| interiorents::file_info(&m));
+            let space = fi.as_ref().map(|f| f.space).unwrap_or("world");
+            doc["space"] = json!(space);
+            if let Some(f) = fi.as_ref().filter(|f| !f.interiors.is_empty()) {
+                doc["interiors"] = json!(f.interiors);
+            }
+            if let Some(ents) = doc["entities"].as_array_mut() {
+                if let Some(f) = &fi {
+                    for (i, j) in ents.iter_mut().enumerate() {
+                        if let Some(v) = f.entities.get(&i) {
+                            let mut v = v.clone();
+                            if let Some(o) = v.as_object_mut() {
+                                o.remove("index");
+                            }
+                            j["interior"] = v;
+                        }
+                    }
+                }
+                let ps = parents.get(&e.id);
+                for (i, (j, en)) in ents.iter_mut().zip(&mf.entities).enumerate() {
+                    let lod = &mut j["lod"];
+                    if let Some(&(ld, htd)) = arch_lod.get(&en.archetype) {
+                        let own = lod["lod_dist"].as_f64().unwrap_or(-1.0);
+                        lod["archetype_lod_dist"] = json!(ld);
+                        lod["hd_texture_dist"] = json!(htd);
+                        lod["effective_lod_dist"] = json!(if own > 0.0 { own as f32 } else { ld });
+                    }
+                    if let Some(p) = ps.and_then(|m| m.get(&(i as u64))) {
+                        lod["parent"] = p.clone();
+                    }
+                }
+            }
+            fs::write(dir.join(&fname), serde_json::to_vec(&doc).ok()?).ok()?;
+            let mut lo = [f32::MAX; 3];
+            let mut hi = [f32::MIN; 3];
+            for en in &mf.entities {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(en.position[k]);
+                    hi[k] = hi[k].max(en.position[k]);
+                }
+            }
+            Some(json!({"id": e.id, "file": format!("placements/levels/{fname}"), "name_hash": format!("{:08x}", mf.name_hash), "parent_hash": format!("{:08x}", mf.parent_hash),
+                "entities": mf.entities.len(), "resolved": mf.entities.iter().filter(|x| x.name.is_some()).count(), "bbox": [lo, hi], "space": space}))
+        })
+        .collect();
+    rows.sort_by(|x, y| x["id"].as_str().cmp(&y["id"].as_str()));
+    let by_name: HashMap<String, String> = rows.iter().filter(|x| x["name_hash"] != "00000000").filter_map(|x| Some((x["name_hash"].as_str()?.to_string(), x["id"].as_str()?.to_string()))).collect();
+    let mut out = String::new();
+    for x in rows.iter_mut() {
+        let p = x["parent_hash"].as_str().filter(|h| *h != "00000000").and_then(|h| by_name.get(h)).cloned();
+        x["parent_id"] = json!(p);
+        out += &x.to_string();
+        out.push('\n');
+    }
+    fs::write(dir.join("index.jsonl"), out)?;
+    Ok(())
+}
+
+/// System page of a resource read from a memory-mapped archive, inflating
+/// each stream from exactly its compressed bytes (sixng's file reader pulls
+/// 4 MB per stream, which made whole-archive scans I/O-bound). Same sys
+/// stream rule as sixng_core::resource::read_sys.
+pub(crate) fn sys_from_map(map: &[u8], e: &Entry) -> Option<sixng_core::resource::Resource> {
+    use std::io::Read;
+    let inflate = |st: &[u64; 3]| -> Option<Vec<u8>> {
+        let src = map.get(st[0] as usize..(st[0] + st[1]) as usize)?;
+        let mut out = Vec::with_capacity(st[2] as usize);
+        flate2::read::ZlibDecoder::new(src).read_to_end(&mut out).ok()?;
+        Some(out)
+    };
+    let mut sys = inflate(e.streams.first()?)?;
+    let mut n = 1;
+    let pm = sys.get(8..16).map(|b| u64::from_le_bytes(b.try_into().unwrap())).unwrap_or(0);
+    if pm >> 28 == 5 {
+        let need = (pm & 0x0FFF_FFFF) as usize + 8;
+        while sys.len() < need && n < e.streams.len() {
+            sys.extend(inflate(&e.streams[n])?);
+            n += 1;
+        }
+    }
+    while n < e.streams.len() {
+        let len = sys.len();
+        let next = e.streams[n][2] as usize;
+        let hits = sys
+            .chunks_exact(8)
+            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+            .filter(|&p| p >> 28 == 5 && p & 3 == 0 && ((p & 0x0FFF_FFFF) as usize) >= len && ((p & 0x0FFF_FFFF) as usize) < len + next)
+            .count();
+        if hits < 2.max(next / 65536) {
+            break;
+        }
+        sys.extend(inflate(&e.streams[n])?);
+        n += 1;
+    }
+    Some(sixng_core::resource::Resource { sys, gfx: Vec::new(), gfx_base: 0 })
+}
+
+fn load_places(ctx: &Ctx, dir: &Path, index: &ArchiveIndex) -> Result<Vec<Place>, Box<dyn Error>> {
     let idx = fs::read_to_string(dir.join("index.jsonl"))?;
     let files: Vec<PathBuf> = idx
         .lines()
@@ -605,6 +902,9 @@ fn load_places(ctx: &Ctx, dir: &Path) -> Result<Vec<Place>, Box<dyn Error>> {
     if n_int > 0 {
         eprintln!("buildings: {n_int} interiors, {n_ent} interior entities placed in world space");
     }
+    for (e, pos, stored) in super::batches::props(ctx, index) {
+        push(&e, pos, stored, None, &mut out);
+    }
     Ok(out)
 }
 
@@ -656,16 +956,133 @@ fn archetype_lods(ctx: &Ctx, names: &[&String]) -> HashMap<String, f32> {
     out
 }
 
+/// Target texel density for building textures (px per metre; GTA V
+/// buildings are ~128-256).
+const TEXEL_DENSITY: f32 = 192.0;
+
+/// Texture size each texture of `mesh` needs: metres per UV unit (90th
+/// percentile over its triangles, sqrt(world area / UV area)) times
+/// TEXEL_DENSITY, rounded up to a power of two. Trim sheets map a strip of
+/// a few % of the texture onto a whole wall, so a radius-based cap blurred
+/// them; this follows the UVs instead.
+fn texel_px(mesh: &Mesh) -> BTreeMap<String, u16> {
+    let mut per: HashMap<&str, Vec<f32>> = HashMap::new();
+    for g in &mesh.geoms {
+        let v = per.entry(g.texture.as_str()).or_default();
+        for t in g.indices.chunks_exact(3) {
+            let [a, b, c] = [t[0], t[1], t[2]].map(|i| i as usize);
+            let (p, u) = (&g.positions, &g.uvs);
+            let e1 = [p[b][0] - p[a][0], p[b][1] - p[a][1], p[b][2] - p[a][2]];
+            let e2 = [p[c][0] - p[a][0], p[c][1] - p[a][1], p[c][2] - p[a][2]];
+            let cr = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+            let wa = (cr[0] * cr[0] + cr[1] * cr[1] + cr[2] * cr[2]).sqrt();
+            let ua = ((u[b][0] - u[a][0]) * (u[c][1] - u[a][1]) - (u[c][0] - u[a][0]) * (u[b][1] - u[a][1])).abs();
+            if wa > 1e-6 && ua > 1e-9 {
+                v.push((wa / ua).sqrt());
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    for g in &mesh.geoms {
+        let Some(v) = per.get_mut(g.texture.as_str()).filter(|v| !v.is_empty()) else { continue };
+        v.sort_by(|a, b| a.total_cmp(b));
+        let mpu = v[(v.len() * 9 / 10).min(v.len() - 1)];
+        let px = ((mpu * TEXEL_DENSITY).clamp(64.0, 4096.0) as u32).next_power_of_two().min(4096) as u16;
+        for t in [&g.texture, &g.normal].into_iter().filter(|t| !t.is_empty()) {
+            let e = out.entry(t.clone()).or_insert(0u16);
+            *e = (*e).max(px);
+        }
+    }
+    out
+}
+
 struct Arch {
     an: String,
     lo: V3,
     hi: V3,
+    /// texture -> size its UVs need at TEXEL_DENSITY (`texel_px`)
+    tpx: HashMap<String, u16>,
     texs: Vec<String>,
     /// textures on non-opaque geometry (their alpha is read)
     alpha: Vec<String>,
 }
 
 type Built = (Mesh, Vec<String>, Vec<String>, bool);
+
+/// 6m four-layer ground shaders (`standard_uber_4lyr_*_hbb`: 61e09df7,
+/// b21f1ba5, 360e396b). Slot names, lookup-weight channels and the 64x
+/// detail tiling are from SixNG (GPL-3.0, commits 1456a9b / 6046d19; uv3 variant da11771).
+const FOUR_LAYER: [u32; 4] = [0x61e0_9df7, 0xb21f_1ba5, 0x360e_396b, 0x27e5_c49d];
+const DETAIL_TILE: f32 = 64.0;
+/// Writer version of four-layer ground ydrs (in their cache key only).
+const LYR4_V: &str = "lyr4_1";
+
+/// Four-layer ground submesh as terrain_cb_w_4lyr geometries: the layer
+/// diffuses become the shader's four samplers, the section `lookuptexture`
+/// (R, G, B = layers 0-2, remainder = layer 3, sampled at TEXCOORD_0) is
+/// sampled per vertex and folded into GTA V's bilinear Colour1 blend
+/// (G: layers 2/3 over 0/1, B: 1/3 over 0/2). None (single-diffuse
+/// fallback) when fewer than two layers or the lookup do not resolve.
+fn four_layer_geoms(pools: &Pools, mat: &crate::model::Material, key_of: &dyn Fn(&crate::model::TexRef) -> u64, sm: &crate::model::Mesh) -> Option<(Vec<ydr::Geom>, Vec<String>)> {
+    let uvs = sm.uvs.as_deref()?;
+    let slot = |name: &str| mat.textures.iter().find(|t| t.param == crate::gta5::rsc::joaat(name));
+    let names: Vec<Option<String>> = (0..4)
+        .map(|i| {
+            let t = slot(&format!("diffusetexture_layer{i}"))?;
+            pools.get(t.hash, key_of(t), t.h64).ok().map(|_| format!("r6m_{:08x}", t.hash))
+        })
+        .collect();
+    let first = names.iter().flatten().next()?.clone();
+    if names.iter().flatten().count() < 2 {
+        return None;
+    }
+    let layers: [String; 4] = std::array::from_fn(|i| names[i].clone().unwrap_or_else(|| first.clone()));
+    let lt = slot("lookuptexture")?;
+    let (lw, lh, px) = pools.rgba(lt.hash, key_of(lt), lt.h64).ok()?;
+    if lw == 0 || lh == 0 || px.len() < (lw * lh * 4) as usize {
+        return None;
+    }
+    let sample = |uv: [f32; 2]| -> [f32; 3] {
+        // bilinear, clamped to the section
+        let x = (uv[0].clamp(0.0, 1.0) * lw as f32 - 0.5).clamp(0.0, (lw - 1) as f32);
+        let y = (uv[1].clamp(0.0, 1.0) * lh as f32 - 0.5).clamp(0.0, (lh - 1) as f32);
+        let (x0, y0) = (x.floor() as u32, y.floor() as u32);
+        let (x1, y1) = ((x0 + 1).min(lw - 1), (y0 + 1).min(lh - 1));
+        let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+        let at = |xx: u32, yy: u32, c: usize| px[((yy * lw + xx) * 4) as usize + c] as f32 / 255.0;
+        std::array::from_fn(|c| {
+            let top = at(x0, y0, c) * (1.0 - fx) + at(x1, y0, c) * fx;
+            let bot = at(x0, y1, c) * (1.0 - fx) + at(x1, y1, c) * fx;
+            top * (1.0 - fy) + bot * fy
+        })
+    };
+    let mut out = Vec::new();
+    push_geoms_n(&mut out, &sm.positions, &sm.indices, sm.normals.as_deref(), Some(uvs), sm.colors.as_deref(), &layers[0], 0);
+    for g in &mut out {
+        g.colours1 = g
+            .uvs
+            .iter()
+            .map(|&uv| {
+                let [r, gg, b] = sample(uv);
+                let s = (r + gg + b).max(1.0);
+                let (w1, w2, w3) = (gg / s, b / s, (1.0 - (r + gg + b) / s).max(0.0));
+                let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+                (q(w2 + w3) << 8) | (q(w1 + w3) << 16) | 0xFF00_0000
+            })
+            .collect();
+        for uv in &mut g.uvs {
+            *uv = [uv[0] * DETAIL_TILE, uv[1] * DETAIL_TILE];
+        }
+        g.layers = Some(layers.clone());
+    }
+    let mut texs: Vec<String> = Vec::new();
+    for l in &layers {
+        if !texs.contains(l) {
+            texs.push(l.clone());
+        }
+    }
+    Some((out, texs))
+}
 
 /// rpf9 decoder path; None when the model does not decode (or is skinned).
 fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: usize, entry: Option<&Entry>) -> Result<Option<Built>, String> {
@@ -688,22 +1105,33 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: us
     };
     let mut mesh = Mesh { name: an.clone(), geoms: Vec::new() };
     let (mut texs, mut missing) = (Vec::new(), Vec::new());
+    let key_of = |t: &crate::model::TexRef| m.embedded.as_ref().and_then(|e| e.by_hash(t.hash)).and_then(|x| x.asset_key).unwrap_or(t.key);
     for sm in &m.meshes {
+        if let Some(mat) = sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).filter(|mt| FOUR_LAYER.contains(&mt.shader_hash)) {
+            if let Some((geoms, lt)) = four_layer_geoms(pools, mat, &key_of, sm) {
+                mesh.geoms.extend(geoms);
+                for t in lt {
+                    if !texs.contains(&t) {
+                        texs.push(t);
+                    }
+                }
+                continue;
+            }
+        }
         // Colour slots in priority order, then every other texture: the first
         // one that decodes to a usable colour map wins (a colour slot can hold
         // a normal map or a 4x4 default).
         let tex = sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).map_or_else(
             || MISSING.to_string(),
             |mat| {
-                let mut cands: Vec<_> = COLOR_SLOTS.iter().filter_map(|slot| mat.textures.iter().find(|t| t.param == *slot)).collect();
-                cands.extend(mat.textures.iter().filter(|t| !COLOR_SLOTS.contains(&t.param) && t.param != TINT_PALETTE));
+                let cands: Vec<_> = COLOR_SLOTS.iter().filter_map(|slot| mat.textures.iter().find(|t| t.param == *slot)).collect();
                 let mut errs = Vec::new();
                 for t in cands {
                     let key = m.embedded.as_ref().and_then(|e| e.by_hash(t.hash)).and_then(|x| x.asset_key).unwrap_or(t.key);
                     match pools.get(t.hash, key, t.h64) {
-                        // fallback: colour maps are stored sRGB; a UNORM texture in a
-                        // non-colour slot is a packed mask (baggage loader: rainbow noise)
-                        Ok(_) if !COLOR_SLOTS.contains(&t.param) && pools.linear(t.h64) => errs.push(format!("{:08x}: linear (mask) texture in non-colour slot", t.hash)),
+                        // fallback (non-colour slot): AO/roughness maps are
+                        // grayscale and pass bad_colour; never use them as diffuse
+                        Ok(p) if !COLOR_SLOTS.contains(&t.param) && near_gray(&p) => errs.push(format!("{:08x}: grayscale map in non-colour slot", t.hash)),
                         Ok(_) => return format!("r6m_{:08x}", t.hash),
                         Err(e) => errs.push(format!("{:08x}: {e}", t.hash)),
                     }
@@ -712,16 +1140,15 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: us
                 MISSING.to_string()
             },
         );
-        // 6m glass shaders tint panes from shader constants over an opaque
-        // grey map: GTA V gets a translucent tinted pane (alpha.sps) instead.
+        // 6m glass families (sixng material.rs) -> glass_env.sps (alpha bucket)
+        // with the material's own diffusetex (its alpha is the pane opacity).
         let glass = sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).is_some_and(|mat| is_glass(mat.shader_hash));
-        let tex = if glass { glass_tex(pools).unwrap_or(tex) } else { tex };
         if tex != MISSING && !texs.contains(&tex) {
             texs.push(tex.clone());
         }
-        let kind = sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).map_or(0, |mat| if glass { 1 } else if kind_of(mat.bucket) == 0 && is_emissive(mat.shader_hash) { 4 } else { kind_of(mat.bucket) });
+        let kind = sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).map_or(0, |mat| if glass { 5 } else if kind_of(mat.bucket) == 0 && is_emissive(mat.shader_hash) { 4 } else { kind_of(mat.bucket) });
         // normal map (opaque only): normal_spec.sps with the material's bump texture
-        let nrm = if kind != 0 || tex == MISSING {
+        let nrm = if (kind != 0 && kind != 5) || tex == MISSING {
             None
         } else {
             sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).and_then(|mat| {
@@ -731,6 +1158,10 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: us
                 })
             })
         };
+        let nrm = if kind == 5 && tex != MISSING { nrm.or_else(|| flat_bump(pools).ok()) } else { nrm };
+        if kind == 5 && tex != MISSING {
+            let _ = pools.flat_spec();
+        }
         if let Some(n) = &nrm {
             for t in [n.clone(), ydr::FLAT_SPEC.to_string()] {
                 if !texs.contains(&t) {
@@ -815,8 +1246,7 @@ fn sixng_mesh(ctx: &Ctx, pools: &Pools, an: &str, e: &Entry) -> Result<Built, St
                 || MISSING.to_string(),
                 |sh| {
                     let ph = |t: &&sixng_core::drawable::TexRef| u32::from_str_radix(&t.param_hash, 16).ok();
-                    let mut cands: Vec<_> = COLOR_SLOTS.iter().filter_map(|slot| sh.textures.iter().find(|t| ph(t) == Some(*slot))).collect();
-                    cands.extend(sh.textures.iter().filter(|t| !ph(t).is_some_and(|h| COLOR_SLOTS.contains(&h))));
+                    let cands: Vec<_> = COLOR_SLOTS.iter().filter_map(|slot| sh.textures.iter().find(|t| ph(t) == Some(*slot))).collect();
                     let mut errs = Vec::new();
                     for t in cands {
                         let hash = u32::from_str_radix(&t.hash32, 16).unwrap_or(0);
@@ -853,12 +1283,17 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
     // fragment props become dynamic .yft (fivem/frags.rs); FRAG_V re-converts only them
     let frag = entry.is_some_and(|e| e.rtype.as_deref() == Some("ft"));
     let file = if frag { format!("{an}.yft") } else { format!("{an}.ydr") };
-    let fp = format!("{YDR_V}|bld|{off:x}|{name}");
+    // Four-layer ground models carry their own writer tag, so a change to
+    // that path re-converts only them (shader records: name hash + "atem").
+    let lyr4 = crate::model::system_page(&ctx.levels, off).is_some_and(|sys| sys.windows(8).any(|w| &w[4..] == b"atem" && FOUR_LAYER.contains(&u32::from_le_bytes([w[0], w[1], w[2], w[3]]))));
+    let fp = if lyr4 { format!("{YDR_V}|{LYR4_V}|bld|{off:x}|{name}") } else { format!("{YDR_V}|bld|{off:x}|{name}") };
+    let fp = if name.starts_with("b6m_") { format!("{}|{fp}", super::batches::BATCH_V) } else { fp };
     let fp = if frag { format!("{FRAG_V}|{fp}") } else { fp };
     let from_info = |i: &Value| Arch {
         an: an.clone(),
         lo: f3(&i["lo"]),
         hi: f3(&i["hi"]),
+        tpx: i["tpx"].as_object().map(|o| o.iter().filter_map(|(k, v)| Some((k.clone(), v.as_u64()? as u16))).collect()).unwrap_or_default(),
         texs: i["texs"].as_array().map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect()).unwrap_or_default(),
         alpha: i["alpha"].as_array().map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect()).unwrap_or_default(),
     };
@@ -871,7 +1306,11 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
         }
     }
     let src = format!("levels.rpf@{off:x}");
-    let (base, row) = split_tint(name);
+    let batch = super::batches::def(name);
+    let (base, row) = match &batch {
+        Some(d) => (d.model.as_str(), 0),
+        None => split_tint(name),
+    };
     let rpf = rpf9_mesh(ctx, pools, base, row, &an, off, entry)?;
     let (mesh, texs, missing, frag_out) = match (rpf, entry) {
         (Some(x), _) => x,
@@ -887,8 +1326,12 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
             return Ok(None);
         }
     };
-    let mut mesh = mesh;
+    let (mut mesh, mut texs) = (mesh, texs);
     promote_base_layer(&mut mesh);
+    if let Some(d) = &batch {
+        (mesh, texs) = super::batches::bake(d, &mesh, &|t, c| tinted(pools, t, c).unwrap_or_else(|_| t.to_string()));
+        texs.retain(|t| t != MISSING);
+    }
     let is_frag = entry.is_some_and(|e| e.rtype.as_deref() == Some("ft"));
     if frag_out {
         ctx.skip(name, "fragment geometry outside declared bounds (converted anyway, check placement)", json!({"source": src}));
@@ -907,19 +1350,24 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
     }
     .map_err(|e| format!("{file}: {e}"))?;
     let alpha: std::collections::BTreeSet<&String> = mesh.geoms.iter().filter(|g| g.kind != 0).map(|g| &g.texture).collect();
-    let info = json!({"lo": lo, "hi": hi, "texs": texs, "alpha": alpha});
+    let info = json!({"lo": lo, "hi": hi, "texs": texs, "alpha": alpha, "tpx": texel_px(&mesh)});
     let s = ctx.emit(&file, &fp, info.clone(), Some(bytes))?;
     ctx.report.lock().unwrap().converted.push(json!({"kind": "building", "name": an, "source": format!("levels.rpf@{off:x}"), "ydr": s, "textures": texs.len(), "fragment": is_frag}));
     Ok(Some(from_info(&info)))
 }
 
 pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
+    let p = super::Phase::new(ctx, "  placements");
     let dir = placements_dir(ctx, index)?;
-    let places = load_places(ctx, &dir)?;
+    let places = load_places(ctx, &dir, index)?;
     // interiors as MLOs (default; --interiors flattens them into world space instead)
     let mlos = if ctx.o.interiors { Vec::new() } else { interiors::load(ctx, &dir, index) };
     // archetype name -> model offset (first wins), most used first
+    let grass = super::batches::grass_archetypes(ctx, index);
     let mut use_count: HashMap<&str, (usize, usize)> = HashMap::new();
+    for (n, o) in &grass {
+        use_count.entry(n).or_insert((*o, 0));
+    }
     for p in &places {
         use_count.entry(&p.name).or_insert((p.off, 0)).1 += 1;
     }
@@ -937,6 +1385,8 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     let ttdb = ctx.o.game.join("data").join("ttdb");
     let pools = Pools { game: ctx.o.game.clone(), catalog: crate::texture::Catalog::build(&ttdb).map_err(|e| eprintln!("{}: {e}", ttdb.display())).ok(), maps: Mutex::new(HashMap::new()), dir: cache.clone() };
     let by_off: HashMap<usize, &Entry> = index.entries.iter().map(|e| (e.off as usize, e)).collect();
+    drop(p);
+    let p = super::Phase::new(ctx, "  models (ydr)");
     let res: Vec<(String, Result<Option<Arch>, String>)> =
         arch.par_iter().map(|&(n, off)| (n.to_string(), convert(ctx, &pools, n, off, by_off.get(&off).copied()))).collect();
     let mut done: BTreeMap<String, Arch> = BTreeMap::new();
@@ -960,16 +1410,16 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     let mut tcap: HashMap<String, u16> = HashMap::new();
     for a in done.values() {
         let rad = (0..3).map(|k| (a.hi[k] - a.lo[k]).powi(2)).sum::<f32>().sqrt() / 2.0;
-        let cap: u16 = if rad < 1.5 { 128 } else if rad < 4.0 { 256 } else if rad < 12.0 { 512 } else if rad < 40.0 { 1024 } else { 2048 };
+        // models cached before texel_px fall back to the radius rule
+        let cap: u16 = if rad < 1.5 { 128 } else if rad < 4.0 { 256 } else if rad < 12.0 { 512 } else { 1024 };
         for t in &a.texs {
             let e = tcap.entry(t.clone()).or_insert(0);
-            *e = (*e).max(cap);
+            *e = (*e).max(a.tpx.get(t).copied().unwrap_or(cap));
         }
     }
     let cap_of = |t: &str| -> u16 {
         let c = tcap.get(t).copied().unwrap_or(4096);
-        // --max-tex caps props; big walls (cap >= 1024) keep at least 1024 px
-        ctx.o.max_tex.map_or(c, |m| if c >= 1024 { c.min(m.max(1024)) } else { c.min(m) })
+        ctx.o.max_tex.map_or(c, |m| c.min(m))
     };
     let tsize = |t: &str| fs::metadata(cache.join(format!("{}.dds", &t[4..]))).map(|m| m.len()).unwrap_or(0);
     let mut fam: BTreeMap<String, Vec<&Arch>> = BTreeMap::new();
@@ -1040,6 +1490,8 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     let total: usize = dicts.iter().map(|d| d.1.len()).sum();
     eprintln!("buildings: {} textures ({} shared) in {} dictionaries", total, shared.len(), dicts.len());
     let alpha_tex: HashSet<&String> = done.values().flat_map(|a| &a.alpha).collect();
+    drop(p);
+    let p = super::Phase::new(ctx, "  textures (ytd)");
     let results: Vec<Result<String, String>> = dicts
         .par_iter()
         .map(|(stem, list, _)| {
@@ -1051,11 +1503,26 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
                 return ctx.emit(&file, &fp, json!({"textures": sorted.len()}), None);
             }
             let mut texs = vec![placeholder()];
-            for t in &sorted {
-                let p = cache.join(format!("{}.dds", &t[4..]));
-                let mut tex = texopt::load(t, &p, alpha_tex.contains(t))?;
-                tex.limit_size(cap_of(t));
-                texs.push(tex);
+            // per texture in parallel too: a few big dictionaries otherwise leave cores idle
+            let loaded: Vec<Result<_, String>> = sorted
+                .par_iter()
+                .map(|t| {
+                    let p = cache.join(format!("{}.dds", &t[4..]));
+                    if !p.exists() {
+                        // recorded by a cached model but gone from the texture cache
+                        // (cache dir version bump, concurrent cleanup): placeholder
+                        ctx.skip(t, "texture missing from texture cache (placeholder used)", json!({"dds": p}));
+                        let mut ph = placeholder();
+                        ph.name = t.clone();
+                        return Ok(ph);
+                    }
+                    let mut tex = texopt::load(t, &p, alpha_tex.contains(t))?;
+                    tex.limit_size(cap_of(t));
+                    Ok(tex)
+                })
+                .collect();
+            for t in loaded {
+                texs.push(t?);
             }
             let bytes = ytd::build_ytd(&texs).map_err(|e| format!("{file}: {e}"))?;
             ctx.emit(&file, &fp, json!({"textures": sorted.len()}), Some(bytes))
@@ -1064,6 +1531,8 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     for r in results {
         r?;
     }
+    drop(p);
+    let _p = super::Phase::new(ctx, "  meta (ytyp/ymap)");
     // gtxd.meta (CMapParentTxds), referenced from fxmanifest.lua
     let gp = ctx.o.out.join("gtxd.meta");
     let rel: Vec<(&String, &String)> = dicts.iter().filter_map(|(c, _, p)| p.as_ref().map(|p| (p, c))).collect();
@@ -1195,6 +1664,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     // index of each entity within its level's ymap, top level first
     let mut slot = vec![0usize; kept.len()];
     let lvl_name = |l: u8| format!("t6m_lod{l}");
+    let mut loads: Vec<(String, usize, [[f32; 3]; 2])> = Vec::new();
     for lvl in (1..=top).rev() {
         let ids: Vec<usize> = (0..kept.len()).filter(|&i| alive[i] && kept[i].level == lvl).collect();
         if ids.is_empty() {
@@ -1210,13 +1680,25 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         ctx.layout.lock().unwrap().lod_ymaps.insert(name.clone(), ids.iter().map(|&i| done[&kept[i].name].an.clone()).collect());
         let pname = if has_parent { lvl_name(lvl + 1) } else { String::new() };
         let map = MapData { entities, ..serde_json::from_value(json!({"name": name, "parent": pname, "flags": 2, "content_flags": 2, "exported_by": "6ixpack fivem"})).unwrap() };
+        if let Ok((st, _)) = meta::compute_extents(&map.entities, &archetypes) {
+            loads.push((name.clone(), map.entities.len(), st));
+        }
         emit_meta(ctx, &format!("{name}.ymap"), meta::build_ymap_with(&map, &archetypes)?)?;
     }
-    let mut cells: BTreeMap<(i64, i64), Vec<usize>> = BTreeMap::new();
+    // HD cells: entities with lodDist <= NEAR_DIST (clutter, small props:
+    // ~90% of them) go in 128 m t6m_bn_XXX_YYY ymaps whose streaming extents
+    // reach only NEAR_DIST past the cell, so only the cells around the player
+    // load; the rest in 512 m t6m_bld_XX_YY ymaps. One mixed ymap per 512 m
+    // cell made every cell's extents span kilometres (a few 1500 m buildings),
+    // so the whole airport (~68k entities) loaded at once: "Building Pool Full".
+    const NEAR_DIST: f32 = 150.0;
+    let mut cells: BTreeMap<(bool, i64, i64), Vec<usize>> = BTreeMap::new();
     for i in 0..kept.len() {
         if alive[i] && kept[i].level == 0 {
             let p = kept[i];
-            cells.entry(((p.pos[0] / 512.0).floor() as i64, (p.pos[1] / 512.0).floor() as i64)).or_default().push(i);
+            let near = ent(i, 0, -1).lod_dist <= NEAR_DIST;
+            let s = if near { NEAR_CELL } else { 512.0 };
+            cells.entry((near, (p.pos[0] / s).floor() as i64, (p.pos[1] / s).floor() as i64)).or_default().push(i);
         }
     }
     // Wide ground-anchored models (asphalt tiles, aprons, pads, buildings):
@@ -1249,17 +1731,68 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     }
     let links_n = (0..kept.len()).filter(|&i| alive[i] && parent[i].is_some()).count();
     eprintln!("buildings: {} entities, {links_n} LOD links, {top} LOD levels", alive.iter().filter(|x| **x).count());
-    for ((cx, cy), ids) in cells {
-        let name = format!("t6m_bld_{:02}_{:02}", cx + 50, cy + 50);
+    for ((near, cx, cy), ids) in cells {
+        let name = if near { format!("t6m_bn_{:03}_{:03}", cx + 200, cy + 200) } else { format!("t6m_bld_{:02}_{:02}", cx + 50, cy + 50) };
         ctx.layout.lock().unwrap().ymaps.insert(name.clone(), ids.iter().map(|&i| done[&kept[i].name].an.clone()).collect());
         let has_parent = ids.iter().any(|&i| parent[i].is_some());
         let entities: Vec<Entity> = ids.iter().enumerate().map(|(j, &i)| ent(i, j + 1, parent[i].map_or(-1, |q| slot[q] as i32))).collect();
         let pname = if has_parent { lvl_name(1) } else { String::new() };
         let map = MapData { entities, ..serde_json::from_value(json!({"name": name, "parent": pname, "exported_by": "6ixpack fivem"})).unwrap() };
+        if let Ok((st, _)) = meta::compute_extents(&map.entities, &archetypes) {
+            loads.push((name.clone(), map.entities.len(), st));
+        }
         let ym = meta::build_ymap_with(&map, &archetypes)?;
         emit_meta(ctx, &format!("{name}.ymap"), ym)?;
     }
+    entity_load(ctx, &loads);
+    // HD cell ymaps from an earlier layout would place their entities twice
+    let keep: HashSet<String> = loads.iter().map(|l| format!("{}.ymap", l.0)).collect(); // (LOD names never match the HD prefixes)
+    for e in fs::read_dir(&ctx.stream)?.flatten() {
+        let f = e.file_name().to_string_lossy().into_owned();
+        if (f.starts_with("t6m_bld_") || f.starts_with("t6m_bn_")) && f.ends_with(".ymap") && !keep.contains(&f) {
+            let _ = fs::remove_file(e.path());
+        }
+    }
     Ok(())
+}
+
+/// HD near-cell size (metres); split.rs maps these names back to 512 m cells.
+pub const NEAR_CELL: f32 = 128.0;
+
+/// Report entities per ymap and the most loaded at once: at each 128 m grid
+/// point, the sum over ymaps (HD cells and LOD/SLOD levels) whose streaming
+/// extents contain it. Warns above 40k (GTA V's building pool
+/// is 65k including the base game's own entities).
+fn entity_load(ctx: &Ctx, loads: &[(String, usize, [[f32; 3]; 2])]) {
+    let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for (_, _, e) in loads {
+        for k in 0..2 {
+            lo[k] = lo[k].min(e[0][k]);
+            hi[k] = hi[k].max(e[1][k]);
+        }
+    }
+    let (mut worst, mut at) = (0usize, [0.0f32; 2]);
+    let mut x = lo[0];
+    while x <= hi[0] {
+        let mut y = lo[1];
+        while y <= hi[1] {
+            let n: usize = loads.iter().filter(|(_, _, e)| x >= e[0][0] && x <= e[1][0] && y >= e[0][1] && y <= e[1][1]).map(|l| l.1).sum();
+            if n > worst {
+                (worst, at) = (n, [x, y]);
+            }
+            y += NEAR_CELL;
+        }
+        x += NEAR_CELL;
+    }
+    let total: usize = loads.iter().map(|l| l.1).sum();
+    let biggest = loads.iter().max_by_key(|l| l.1);
+    eprintln!("buildings: {total} entities in {} ymaps; at most {worst} streamed at once (near {:.0},{:.0}); biggest ymap {}", loads.len(), at[0], at[1], biggest.map_or(String::new(), |b| format!("{} ({})", b.0, b.1)));
+    if worst > 40_000 {
+        eprintln!("WARNING: {worst} entities streamed at once near {:.0},{:.0}: over 40k risks \"Building Pool Full\" (65k incl. the base game)", at[0], at[1]);
+        ctx.report.lock().unwrap().warnings.push(json!({"warning": "entities streamed at once over 40k", "count": worst, "at": at}));
+    }
+    ctx.report.lock().unwrap().outputs.push(json!({"file": "(entity load)", "status": "stats", "max_at_once": worst, "at": at, "total": total,
+        "per_ymap": loads.iter().map(|l| (l.0.clone(), json!(l.1))).collect::<serde_json::Map<_, _>>()}));
 }
 
 /// Meta files are cheap to rebuild: rewrite only when the bytes differ.

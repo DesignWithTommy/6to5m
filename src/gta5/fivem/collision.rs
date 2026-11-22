@@ -124,7 +124,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         .par_iter()
         .map(|((cx, cy), es)| {
             let file = format!("t6m_cc_{:03}_{:03}.ybn", cx + 200, cy + 200);
-            let fp = sha(&format!("{YBN_V}|col|{mats_fp}|{}|{}", ctx.o.weapon_collision, es.iter().map(|e| e.id.as_str()).collect::<Vec<_>>().join(",")));
+            let fp = sha(&format!("{YBN_V}|col|{mats_fp}|{}|{}{}", ctx.o.weapon_collision, es.iter().map(|e| e.id.as_str()).collect::<Vec<_>>().join(","), ctx.o.offset_fp()));
             if let Some(info) = ctx.up_to_date(&file, &fp) {
                 ctx.emit(&file, &fp, info, None)?;
                 return Ok(());
@@ -145,6 +145,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
             let raw = tris.len();
             let (verts, tris, tm) = weld(&verts, &tris, &tm);
             let (verts, tris, tm) = simplify(verts, &tris, &tm);
+            let verts: Vec<[f32; 3]> = verts.iter().map(|v| ctx.o.shift(*v)).collect();
             let bytes = ybn::build_ybn_mats(&verts, &tris, &tm).map_err(|e| format!("{file}: {e}"))?;
             let info = json!({"bounds": es.len(), "triangles": tris.len(), "raw_triangles": raw});
             let s = ctx.emit(&file, &fp, info, Some(bytes))?;

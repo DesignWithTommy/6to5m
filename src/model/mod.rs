@@ -847,7 +847,7 @@ fn skeleton_text(joints: &[skeleton::Joint]) -> String {
 
 // ---------------------------------------------------------------- GUI API
 
-pub use decode::{Mesh, Model as Drawable, V3};
+pub use decode::{Material, Mesh, Model as Drawable, TexRef, V3};
 
 /// One recovered model, without its geometry.
 pub struct ModelIndex {
@@ -890,6 +890,13 @@ pub fn index_models(data: &[u8]) -> Vec<ModelIndex> {
 /// Re-decode model `child` of the resource at `at`.
 pub fn load_model(data: &[u8], at: usize, child: usize) -> Option<Drawable> {
     recover(data, at)?.models.into_iter().nth(child)
+}
+
+/// The first (system page) stream of the resource at `at`, inflated only.
+pub fn system_page(data: &[u8], at: usize) -> Option<Vec<u8>> {
+    let mut inflater = Inflater::new();
+    inflater.inflate(data.get(at..)?)?;
+    Some(inflater.out)
 }
 
 /// Every model of the resource at `at` (empty when it no longer decodes).

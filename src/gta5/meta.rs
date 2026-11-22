@@ -564,6 +564,20 @@ pub(crate) fn arr(w: &mut W, p: u64, n: u16) {
 
 // ---------------------------------------------------------------- ymap
 
+/// World offset added to every ymap entity position and extent (`fivem build
+/// --offset`): GTA VI's map reaches y 9474, past GTA V's ~+-8000 limit.
+static WORLD_OFFSET: [std::sync::atomic::AtomicU32; 3] = [const { std::sync::atomic::AtomicU32::new(0) }; 3];
+
+pub fn set_world_offset(o: [f32; 3]) {
+    for k in 0..3 {
+        WORLD_OFFSET[k].store(o[k].to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+pub fn world_offset() -> [f32; 3] {
+    std::array::from_fn(|k| f32::from_bits(WORLD_OFFSET[k].load(std::sync::atomic::Ordering::Relaxed)))
+}
+
 pub fn build_ymap(m: &MapData) -> Result<Vec<u8>, String> {
     build_ymap_with(m, &[])
 }
@@ -580,13 +594,16 @@ pub fn build_ymap_with(m: &MapData, archetypes: &[Archetype]) -> Result<Vec<u8>,
             (e.unwrap_or(ce), s.unwrap_or(cs))
         }
     };
+    let off = world_offset();
+    let sh = |b: [[f32; 3]; 2]| b.map(|v| std::array::from_fn(|k| v[k] + off[k]));
+    let (ee, se) = (sh(ee), sh(se));
     let mut mb = MB::default();
     mb.ensure(T_CMAPDATA); // root = block 1
     let mut items = Vec::with_capacity(m.entities.len());
     for e in &m.entities {
         let mut w = W::new();
         w.u32(0).u32(0).u32(hash(&e.archetype_name)?).u32(e.flags).u32(e.guid).zeros(12);
-        w.v3(e.position).f32(0.0).v4(e.rotation);
+        w.v3(std::array::from_fn(|k| e.position[k] + off[k])).f32(0.0).v4(e.rotation);
         w.f32(e.scale_xy).f32(e.scale_z).i32(e.parent_index).f32(e.lod_dist).f32(e.child_lod_dist);
         w.i32(enum_val(&e.lod_level, LOD_TYPES)?).u32(e.num_children).i32(enum_val(&e.priority_level, PRI_LEVELS)?);
         arr(&mut w, 0, 0); // extensions
@@ -825,4 +842,99 @@ pub fn cli(args: &[String]) -> Result<(), String> {
     std::fs::write(&args[2], &data).map_err(|e| format!("{}: {e}", args[2]))?;
     println!("meta ok: {} ({} bytes)", args[2], data.len());
     Ok(())
+}
+
+// ---------------------------------------------------------------- grass ymap
+
+const GRASSLIST: SInfo = SInfo { name: 0x7c475b5d, key: 0x3822da24, unk8: 0x400, size: 96, entries: GRASSLIST_E };
+const GRASSLIST_E: &[(u32, i32, u8, u8, i16, u32)] = &[
+    (0x6eceba6e, 0, 0x05, 0, 0, 0xf377e8c8),
+    (0xa0664ee6, 32, 0x33, 0, 0, 0),
+    (0xa023a02c, 48, 0x4a, 0, 0, 0),
+    (0xbf74dfa7, 52, 0x15, 0, 0, 0),
+    (0x8419a4aa, 56, 0x21, 0, 0, 0),
+    (0x53cdbf13, 60, 0x21, 0, 0, 0),
+    (0xc72adefa, 64, 0x21, 0, 0, 0),
+    (0x00000100, 0, 0x05, 0, 0, 0xed86f522),
+    (0x1c080bb9, 72, 0x52, 0, 7, 0),
+];
+const GRASSINST: SInfo = SInfo { name: 0xed86f522, key: 0xa356dafd, unk8: 0x100, size: 16, entries: GRASSINST_E };
+const GRASSINST_E: &[(u32, i32, u8, u8, i16, u32)] = &[
+    (0x00000100, 0, 0x13, 0, 0, 0),
+    (0x0c928991, 0, 0x50, 0, 0, 3),
+    (0xbb0b13f0, 6, 0x11, 0, 0, 0),
+    (0x1051be7c, 7, 0x11, 0, 0, 0),
+    (0x00000100, 0, 0x11, 0, 0, 0),
+    (0x4e036667, 8, 0x50, 0, 4, 3),
+    (0x3cba3fe6, 11, 0x11, 0, 0, 0),
+    (0xb2991bc4, 12, 0x11, 0, 0, 0),
+    (0x00000100, 0, 0x11, 0, 0, 0),
+    (0x5eefefd6, 13, 0x50, 0, 8, 3),
+];
+const SPDAABB: SInfo = SInfo { name: 0xf377e8c8, key: 0x4507ca0b, unk8: 0x400, size: 32, entries: &[(0xfe30e6f3, 0, 0x34, 0, 0, 0), (0x606068c4, 16, 0x34, 0, 0, 0)] };
+
+/// One GTA V `GrassInstanceList` (instances: 16-byte InstanceData,
+/// position u16x3 quantised in `aabb`).
+pub struct GrassList {
+    pub aabb: [[f32; 3]; 2],
+    pub scale_range: [f32; 3],
+    pub archetype: String,
+    pub lod_dist: u32,
+    pub fade_start: f32,
+    pub fade_range: f32,
+    pub orient: f32,
+    pub instances: Vec<[u8; 16]>,
+}
+
+/// A ymap holding only instancedData.GrassInstanceList.
+pub fn build_grass_ymap(name: &str, lists: &[GrassList]) -> Result<Vec<u8>, String> {
+    let mut mb = MB::default();
+    mb.ensure(T_CMAPDATA);
+    mb.sinfo(&SPDAABB);
+    mb.sinfo(&GRASSINST);
+    mb.sinfo(&GRASSLIST);
+    let mut lw = W::new();
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    let mut n = 0u16;
+    for l in lists {
+        for c in l.instances.chunks(0xFFFF) {
+            let (ip, ic) = (mb.add_item(GRASSINST.name, c.concat()), c.len() as u16);
+            lw.v3(l.aabb[0]).f32(0.0).v3(l.aabb[1]).f32(0.0).v3(l.scale_range).f32(0.0);
+            lw.u32(hash(&l.archetype)?).u32(l.lod_dist).f32(l.fade_start).f32(l.fade_range).f32(l.orient).u32(0);
+            arr(&mut lw, ip, ic);
+            lw.zeros(8);
+            n = n.checked_add(1).ok_or("too many grass lists")?;
+        }
+        for k in 0..3 {
+            lo[k] = lo[k].min(l.aabb[0][k] - l.lod_dist as f32);
+            hi[k] = hi[k].max(l.aabb[1][k] + l.lod_dist as f32);
+        }
+    }
+    let lp = if n > 0 { mb.add_item(GRASSLIST.name, lw.b) } else { 0 };
+    mb.sinfo(&INSTANCED);
+    mb.sinfo(&LODLIGHT);
+    mb.sinfo(&DISTLODLIGHT);
+    let sp = mb.add_string(name);
+    mb.sinfo(&BLOCKDESC);
+    mb.sinfo(&CMAPDATA);
+    let mut w = W::new();
+    w.u32(0).u32(0).u32(hash(name)?).u32(0).u32(0).u32(1088).u32(0).u32(0);
+    w.v3(lo).f32(0.0).v3(hi).f32(0.0).v3(lo).f32(0.0).v3(hi).f32(0.0);
+    for _ in 0..5 {
+        arr(&mut w, 0, 0); // entities, containerLods, boxOccluders, occludeModels, physicsDictionaries
+    }
+    w.u32(0).u32(0).u32(0).u32(0); // instancedData: pad, ImapLink, pad
+    arr(&mut w, 0, 0); // PropInstanceList
+    arr(&mut w, lp, n); // GrassInstanceList
+    arr(&mut w, 0, 0); // timeCycleModifiers
+    arr(&mut w, 0, 0); // carGenerators
+    w.zeros(136).zeros(48);
+    w.u32(0).u32(0);
+    arr(&mut w, sp.0, sp.1);
+    for _ in 0..3 {
+        arr(&mut w, 0, 0);
+    }
+    debug_assert_eq!(w.len(), 512);
+    mb.blocks[0].1.extend_from_slice(&w.b);
+    mb.build()
 }

@@ -19,10 +19,14 @@
 //!   CEntityDef stores too, so it is copied as is (like buildings_port.py).
 //!   Not verified in game; `--conjugate-rot` writes the conjugate instead.
 
+mod batches;
 mod buildings;
 pub mod ped;
 mod collision;
 mod geom;
+mod lsremove;
+mod minimap;
+mod nav;
 pub mod split;
 mod terrain;
 mod vehicles;
@@ -48,8 +52,13 @@ usage: 6ixpack fivem build --game <dir> --out <resource dir> [options]
   --game <dir>         GTA VI install (levels.rpf, data/ttdb)
   --out <dir>          FiveM resource directory (stream/, fxmanifest.lua, water.xml)
   --bbox x0,y0,x1,y1   world region (metres); default: everything
+  --offset dx,dy[,dz]  shift every output by this (metres; --bbox stays in 6m
+                       coordinates). GTA VI reaches y 9474, past GTA V's ~8000
+                       limit: e.g. --offset 0,-1500 for the north
   --name <substr>      only building archetypes whose name contains this
-  --only <list>        terrain,buildings,collision,water (default: all)
+  --only <list>        terrain,buildings,collision,water,lsremove,paths,navmesh (default: all)
+                       lsremove: empty stand-ins for vanilla _citye/_cityw/_hills
+                       ymaps/ybns in the region, read from GTA V ($GTA5_DIR or Steam)
   --report <file>      JSON report: converted / skipped with reason / outputs
   --work <dir>         sixng work dir with index/levels.json (default $SIXNG_WORK or ./work)
   --placements <dir>   sixng placement JSON dir with index.jsonl, or its parent
@@ -68,6 +77,7 @@ usage: 6ixpack fivem build --game <dir> --out <resource dir> [options]
                        (rounded to 512 m cells) plus <name>_common (ytyps, LOD/SLOD
                        ymaps, shared txds, terrain, water); see ensure.cfg there
   --split-max <MB>     quarter any region resource bigger than this (default 1024)
+  --verify             re-parse every new output (resource layout checks); off by default
   --bake               whole-map pass (no --bbox) that only fills the output cache
                        <work>/fivem_out_cache; --out defaults to <work>/fivem_bake.
                        Later regional builds then hardlink from the cache
@@ -104,9 +114,22 @@ pub struct Opts {
     pub split: Option<f32>,
     pub split_max: u64,
     pub bake: bool,
+    pub verify: bool,
+    pub offset: [f32; 3],
 }
 
 impl Opts {
+    /// `v` moved by --offset (world-space geometry: collision, terrain ybn).
+    pub fn shift(&self, v: [f32; 3]) -> [f32; 3] {
+        std::array::from_fn(|k| v[k] + self.offset[k])
+    }
+
+    /// Cache-key part for world-space outputs ("" without --offset, so
+    /// existing caches stay valid).
+    pub fn offset_fp(&self) -> String {
+        if self.offset == [0.0; 3] { String::new() } else { format!("|off{:?}", self.offset) }
+    }
+
     pub fn in_bbox(&self, lo: [f32; 3], hi: [f32; 3]) -> bool {
         self.bbox.is_none_or(|b| hi[0] >= b[0] && lo[0] <= b[2] && hi[1] >= b[1] && lo[1] <= b[3])
     }
@@ -142,6 +165,10 @@ pub struct Report {
     pub skipped_counts: BTreeMap<String, usize>,
     pub warnings: Vec<Value>,
     pub outputs: Vec<Value>,
+    pub timings: Vec<Value>,
+    /// per extension: [from stream (kept), from output cache, converted]
+    pub cache: BTreeMap<String, [usize; 3]>,
+    pub diagnostics: Value,
 }
 
 /// Shared build state.
@@ -159,7 +186,7 @@ pub struct Ctx {
     /// <work>/fivem_out_cache
     cache: PathBuf,
     /// levels.rpf size and mtime, part of every cache key
-    input_stamp: String,
+    pub input_stamp: String,
 }
 
 impl Ctx {
@@ -182,6 +209,7 @@ impl Ctx {
         let key = self.cache_key(fp);
         if let Some(e) = self.manifest.lock().unwrap().files.get(file).cloned() {
             if e.fp == key && self.stream.join(file).is_file() {
+                self.count(file, 0);
                 return Some(e.info);
             }
         }
@@ -191,8 +219,14 @@ impl Ctx {
             return None;
         }
         link_into(&c, &self.stream.join(file)).ok()?;
+        self.count(file, 1);
         self.manifest.lock().unwrap().files.insert(file.to_string(), MEntry { fp: key, info: ce.info.clone(), summary: ce.summary });
         Some(ce.info)
+    }
+
+    fn count(&self, file: &str, k: usize) {
+        let ext = file.rsplit_once('.').map_or("", |x| x.1).to_string();
+        self.report.lock().unwrap().cache.entry(ext).or_default()[k] += 1;
     }
 
     /// Write (or keep) a stream file. New bytes are verified, stored in the
@@ -208,13 +242,14 @@ impl Ctx {
                 if file.len() > 63 + 5 {
                     return Err(format!("{file}: name too long"));
                 }
-                let summary = verify::verify(file, &b)?;
+                let summary = if self.o.verify { verify::verify(file, &b)? } else { format!("{} bytes", b.len()) };
                 let same = fs::metadata(&path).is_ok_and(|m| m.len() == b.len() as u64) && fs::read(&path).is_ok_and(|x| x == b);
                 if meta {
                     if !same {
                         write_atomic(&path, &b).map_err(|e| format!("{}: {e}", path.display()))?;
                     }
                 } else {
+                    self.count(file, 2);
                     let c = self.cache_path(file, &key);
                     write_atomic(&c, &b).map_err(|e| format!("{}: {e}", c.display()))?;
                     let j = serde_json::to_vec(&CEntry { info: info.clone(), summary: summary.clone() }).unwrap();
@@ -230,7 +265,8 @@ impl Ctx {
                 let len = fs::metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?.len();
                 let summary = match known {
                     Some(s) => s,
-                    None => verify::verify(file, &fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?)?,
+                    None if self.o.verify => verify::verify(file, &fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?)?,
+                    None => format!("{len} bytes"),
                 };
                 ("up-to-date", summary, len)
             }
@@ -277,7 +313,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         out: PathBuf::new(),
         bbox: None,
         name: None,
-        only: vec!["terrain".into(), "buildings".into(), "collision".into(), "water".into()],
+        only: vec!["terrain".into(), "buildings".into(), "collision".into(), "water".into(), "lsremove".into(), "paths".into(), "navmesh".into()],
         report: None,
         work: std::env::var_os("SIXNG_WORK").map(PathBuf::from).unwrap_or_else(|| "work".into()),
         placements: None,
@@ -290,6 +326,8 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         split: None,
         split_max: 1024,
         bake: false,
+        verify: false,
+        offset: [0.0; 3],
     };
     let mut it = args.iter();
     let val = |it: &mut std::slice::Iter<String>, k: &str| it.next().cloned().ok_or(format!("{k} needs a value"));
@@ -307,6 +345,14 @@ fn parse(args: &[String]) -> Result<Opts, String> {
                 let [a, b, c, d] = v[..] else { return Err("--bbox needs minx,miny,maxx,maxy".into()) };
                 o.bbox = Some([a.min(c), b.min(d), a.max(c), b.max(d)]);
             }
+            "--offset" => {
+                let v: Vec<f32> = val(&mut it, a)?.split(',').map(|s| s.trim().parse::<f32>()).collect::<Result<_, _>>().map_err(|e| format!("--offset: {e}"))?;
+                o.offset = match v[..] {
+                    [x, y] => [x, y, 0.0],
+                    [x, y, z] => [x, y, z],
+                    _ => return Err("--offset needs dx,dy[,dz]".into()),
+                };
+            }
             "--conjugate-rot" => o.conjugate = true,
             "--interiors" => o.interiors = true,
             "--no-lod" => o.no_lod = true,
@@ -316,6 +362,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "--max-tex" => o.max_tex = Some(val(&mut it, a)?.parse().map_err(|e| format!("--max-tex: {e}"))?),
             "--split" => o.split = Some(val(&mut it, a)?.parse().map_err(|e| format!("--split: {e}"))?),
             "--bake" => o.bake = true,
+            "--verify" => o.verify = true,
             "--split-max" => o.split_max = val(&mut it, a)?.parse().map_err(|e| format!("--split-max: {e}"))?,
             _ => return Err(format!("unknown argument {a}\n{USAGE}")),
         }
@@ -335,7 +382,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
     if let Some(p) = o.placements.take() {
         o.placements = Some(resolve_placements(&p)?);
     }
-    if let Some(k) = o.only.iter().find(|k| !["terrain", "buildings", "collision", "water"].contains(&k.as_str())) {
+    if let Some(k) = o.only.iter().find(|k| !["terrain", "buildings", "collision", "water", "lsremove", "paths", "navmesh"].contains(&k.as_str())) {
         return Err(format!("--only: unknown part {k}"));
     }
     Ok(o)
@@ -369,6 +416,7 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
         Some("build") => {}
         Some("ped") => return ped::run(&args[1..]),
         Some("vehicle") => return vehicles::run(&args[1..]),
+        Some("gta5") => return lsremove::gta5_cli(&args[1..]),
         Some("weapon") => return weapons::run(&args[1..]),
         _ => {
             println!("{USAGE}");
@@ -376,6 +424,7 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
         }
     }
     let o = parse(&args[1..])?;
+    crate::gta5::meta::set_world_offset(o.offset);
     let t0 = std::time::Instant::now();
     let stream = o.out.join("stream");
     fs::create_dir_all(&stream)?;
@@ -397,7 +446,8 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
     let part = |p: &str| ctx.o.only.iter().any(|x| x == p);
 
     let result = (|| -> Result<(), Box<dyn Error>> {
-        let needs_index = part("terrain") || part("buildings") || part("collision");
+        let needs_index = part("terrain") || part("buildings") || part("collision") || part("paths");
+        let _p = Phase::new(&ctx, "index load");
         let index = if needs_index {
             let ip = ctx.o.work.join("index").join("levels.json");
             eprintln!("loading {}", ip.display());
@@ -405,34 +455,67 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
         } else {
             None
         };
+        drop(_p);
         // buildings first: it records the flat ground tiles (asphalt, pads)
         // that terrain must sink below (<work>/fivem_ground.json)
         if part("buildings") {
+            let _p = Phase::new(&ctx, "buildings (total)");
             buildings::build(&ctx, index.as_ref().unwrap())?;
+            let done: std::collections::HashSet<String> = ctx.report.lock().unwrap().converted.iter().filter_map(|v| v["name"].as_str().map(str::to_string)).collect();
+            batches::grass(&ctx, index.as_ref().unwrap(), &done)?;
             ctx.save_manifest()?;
             split::save(&ctx)?;
+            minimap::zones(&ctx)?;
+            check_gtxd(&ctx);
         }
         if part("terrain") {
+            let _p = Phase::new(&ctx, "terrain");
             terrain::build(&ctx, index.as_ref().unwrap())?;
             ctx.save_manifest()?;
         }
         if part("collision") {
+            let _p = Phase::new(&ctx, "collision");
             collision::build(&ctx, index.as_ref().unwrap())?;
             ctx.save_manifest()?;
         }
         if part("water") {
+            let _p = Phase::new(&ctx, "water");
             water(&ctx)?;
         }
-        if ["terrain", "buildings", "collision", "water"].iter().all(|p| part(p)) && ctx.o.name.is_none() {
+        if part("lsremove") {
+            let _p = Phase::new(&ctx, "lsremove");
+            lsremove::build(&ctx)?;
+            ctx.save_manifest()?;
+        }
+        if part("paths") {
+            let _p = Phase::new(&ctx, "paths");
+            nav::build_paths(&ctx, index.as_ref().unwrap())?;
+            ctx.save_manifest()?;
+        }
+        if part("navmesh") {
+            let _p = Phase::new(&ctx, "navmesh");
+            nav::build_navmesh(&ctx)?;
+            ctx.save_manifest()?;
+        }
+        if ["terrain", "buildings", "collision", "water", "lsremove", "paths", "navmesh"].iter().all(|p| part(p)) && ctx.o.name.is_none() {
             prune(&ctx)?;
         }
         fxmanifest(&ctx)?;
+        if ctx.o.split.is_none() {
+            let r = ctx.report.lock().unwrap();
+            let ch = r.outputs.iter().any(|v| v["status"] == "written" || (v["status"] == "pruned" && v["files"].as_u64().unwrap_or(0) > 0));
+            drop(r);
+            let name = ctx.o.out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            live_report(&ctx, &if ch { vec![name] } else { vec![] });
+        }
         if let Some(m) = ctx.o.split {
+            let _p = Phase::new(&ctx, "split");
             split::split(&ctx, m, ctx.o.split_max)?;
         }
         Ok(())
     })();
     ctx.save_manifest()?;
+    diagnostics(&ctx, t0.elapsed().as_secs_f64());
     let r = ctx.report.lock().unwrap();
     let written = r.outputs.iter().filter(|v| v["status"] == "written").count();
     println!(
@@ -450,6 +533,91 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
         fs::write(p, serde_json::to_vec_pretty(&*r)?).map_err(|e| format!("{}: {e}", p.display()))?;
     }
     result
+}
+
+/// End-of-run diagnostics: stage timings, cache hits, largest files and
+/// files over 16 MB (FiveM warns about oversized streaming files), skip
+/// reasons with sample names, entity load. Printed, stored in the report
+/// (`diagnostics`) and written to <out>/fivem-build-<unix time>.log.
+fn diagnostics(ctx: &Ctx, total: f64) {
+    let mut t = String::new();
+    let r = ctx.report.lock().unwrap();
+    t += &format!("fivem build: {total:.1}s total
+stages:
+");
+    for v in &r.timings {
+        t += &format!("  {:<22} {:>7}s wall {:>8}s cpu {:>5} cores
+", v["phase"].as_str().unwrap_or(""), v["wall"], v["cpu"], v["cores"]);
+    }
+    t += "cache (kept in stream / from output cache / converted):
+";
+    for (ext, c) in &r.cache {
+        t += &format!("  {ext:<5} {:>6} {:>6} {:>6}
+", c[0], c[1], c[2]);
+    }
+    let mut files: Vec<(String, u64)> = fs::read_dir(&ctx.stream).into_iter().flatten().flatten().filter_map(|e| Some((e.file_name().to_string_lossy().into_owned(), e.metadata().ok()?.len()))).collect();
+    files.sort_by(|a, b| b.1.cmp(&a.1));
+    let over: Vec<&(String, u64)> = files.iter().filter(|f| f.1 > 16 << 20).collect();
+    let mb = |b: u64| b as f64 / 1048576.0;
+    t += &format!("stream: {} files, {:.0} MB; largest:
+", files.len(), mb(files.iter().map(|f| f.1).sum()));
+    for (n, b) in files.iter().take(20) {
+        t += &format!("  {:>8.1} MB {n}
+", mb(*b));
+    }
+    if !over.is_empty() {
+        t += &format!("WARNING: {} files over 16 MB (FiveM warns / may fail to stream them): {}
+", over.len(), over.iter().take(10).map(|f| f.0.as_str()).collect::<Vec<_>>().join(", "));
+    }
+    let mut samples: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for v in &r.skipped {
+        let e = samples.entry(v["reason"].as_str().unwrap_or("?")).or_default();
+        if e.len() < 5 {
+            e.push(v["name"].as_str().unwrap_or("?"));
+        }
+    }
+    t += "skipped / placeholders:
+";
+    for (reason, n) in &r.skipped_counts {
+        t += &format!("  {n:>6} {reason}: {}
+", samples.get(reason.as_str()).map(|s| s.join(", ")).unwrap_or_default());
+    }
+    if let Some(l) = r.outputs.iter().find(|v| v["file"] == "(entity load)") {
+        t += &format!("entities: {}, at most {} streamed at once near {}
+", l["total"], l["max_at_once"], l["at"]);
+        if let Some(m) = l["per_ymap"].as_object() {
+            let mut v: Vec<(&String, u64)> = m.iter().map(|(k, n)| (k, n.as_u64().unwrap_or(0))).collect();
+            v.sort_by(|a, b| b.1.cmp(&a.1));
+            t += &format!("  largest ymaps: {}
+", v.iter().take(10).map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(", "));
+        }
+    }
+    let diag = json!({"largest": files.iter().take(20).map(|f| json!({"file": f.0, "bytes": f.1})).collect::<Vec<_>>(), "over_16mb": over.iter().map(|f| f.0.clone()).collect::<Vec<_>>(),
+        "skip_samples": samples});
+    drop(r);
+    eprint!("{t}");
+    let secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let _ = fs::write(ctx.o.out.join(format!("fivem-build-{secs}.log")), &t);
+    ctx.report.lock().unwrap().diagnostics = diag;
+}
+
+/// gtxd.meta parent chain check after the buildings stage (see
+/// verify::gtxd_chain): printed and stored in the report; problems are
+/// warnings, since partial (--name) builds legitimately miss txds.
+fn check_gtxd(ctx: &Ctx) {
+    let texs: Vec<(String, Vec<String>)> = ctx.manifest.lock().unwrap().files.iter()
+        .filter(|(f, _)| f.ends_with(".ydr"))
+        .filter_map(|(f, e)| Some((f.trim_end_matches(".ydr").to_string(), e.info["texs"].as_array()?.iter().filter_map(|t| t.as_str().map(String::from)).collect())))
+        .collect();
+    let txd = ctx.layout.lock().unwrap().txd.clone();
+    let (s, bad) = verify::gtxd_chain(&ctx.o.out, &ctx.stream, &txd, &texs);
+    eprintln!("{s}");
+    for b in &bad {
+        eprintln!("gtxd WARNING: {b}");
+    }
+    let mut r = ctx.report.lock().unwrap();
+    r.warnings.extend(bad.iter().map(|b| json!({"gtxd": b})));
+    r.outputs.push(json!({"file": "gtxd.meta", "status": "checked", "summary": s, "problems": bad}));
 }
 
 /// Water cell size (water_port.py).
@@ -512,12 +680,13 @@ fn water(ctx: &Ctx) -> Result<(), Box<dyn Error>> {
                 i += 1;
             }
             q += &format!(
-                "  <Item><minX value=\"{}\" /><maxX value=\"{}\" /><minY value=\"{}\" /><maxY value=\"{}\" /><Type value=\"0\" /><IsInvisible value=\"false\" /><HasLimitedDepth value=\"false\" /><z value=\"{z:.1}\" /><a1 value=\"26\" /><a2 value=\"26\" /><a3 value=\"26\" /><a4 value=\"26\" /><NoStencil value=\"false\" /></Item>
+                "  <Item><minX value=\"{}\" /><maxX value=\"{}\" /><minY value=\"{}\" /><maxY value=\"{}\" /><Type value=\"0\" /><IsInvisible value=\"false\" /><HasLimitedDepth value=\"false\" /><z value=\"{:.1}\" /><a1 value=\"26\" /><a2 value=\"26\" /><a3 value=\"26\" /><a4 value=\"26\" /><NoStencil value=\"false\" /></Item>
 ",
-                a * s,
-                i * s,
-                j * s,
-                (j + 1) * s
+                (a * s) as f32 + ctx.o.offset[0],
+                (i * s) as f32 + ctx.o.offset[0],
+                (j * s) as f32 + ctx.o.offset[1],
+                ((j + 1) * s) as f32 + ctx.o.offset[1],
+                z + ctx.o.offset[2]
             );
             n += 1;
         }
@@ -552,6 +721,10 @@ fn fxmanifest(ctx: &Ctx) -> Result<(), Box<dyn Error>> {
         t += &format!("data_file 'DLC_ITYP_REQUEST' 'stream/{y}'\n");
     }
     let files: Vec<&str> = ["water.xml", "gtxd.meta"].into_iter().filter(|f| ctx.o.out.join(f).exists()).collect();
+    if ctx.o.out.join("t6m_zones.lua").exists() {
+        t += "client_script 't6m_zones.lua'
+";
+    }
     if !files.is_empty() {
         t += &format!("files {{ {} }}\n", files.iter().map(|f| format!("'{f}'")).collect::<Vec<_>>().join(", "));
     }
@@ -563,6 +736,73 @@ fn fxmanifest(ctx: &Ctx) -> Result<(), Box<dyn Error>> {
     }
     fs::write(ctx.o.out.join("fxmanifest.lua"), t)?;
     Ok(())
+}
+
+/// Live reload: print (and write to <out>/.fivem-changed.txt) the resources
+/// whose files changed this run and the FXServer console line that reloads
+/// just those. With --out inside the server's resources folder that is all a
+/// rebuild needs: unchanged resources keep their files and hashes.
+pub fn live_report(ctx: &Ctx, changed: &[String]) {
+    let line = if changed.is_empty() { String::new() } else { format!("refresh; {}", changed.iter().map(|r| format!("ensure {r}")).collect::<Vec<_>>().join("; ")) };
+    if changed.is_empty() {
+        eprintln!("live: nothing changed");
+    } else {
+        eprintln!("live: {} resource(s) changed; FXServer console: {line}", changed.len());
+    }
+    let _ = fs::write(ctx.o.out.join(".fivem-changed.txt"), format!("{}
+{line}
+", changed.join("
+")));
+    ctx.report.lock().unwrap().outputs.push(json!({"file": ".fivem-changed.txt", "status": "live", "changed": changed, "command": line}));
+}
+
+/// Process CPU time (user + kernel) in seconds.
+#[cfg(windows)]
+pub fn cpu_secs() -> f64 {
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct Ft(u32, u32);
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> isize;
+        fn GetProcessTimes(h: isize, c: *mut Ft, e: *mut Ft, k: *mut Ft, u: *mut Ft) -> i32;
+    }
+    let (mut c, mut e, mut k, mut u) = (Ft::default(), Ft::default(), Ft::default(), Ft::default());
+    // SAFETY: plain Win32 call with valid out pointers.
+    if unsafe { GetProcessTimes(GetCurrentProcess(), &mut c, &mut e, &mut k, &mut u) } == 0 {
+        return 0.0;
+    }
+    let t = |f: Ft| ((f.1 as u64) << 32 | f.0 as u64) as f64 / 1e7;
+    t(k) + t(u)
+}
+#[cfg(not(windows))]
+pub fn cpu_secs() -> f64 {
+    0.0
+}
+
+/// Stage timer: prints wall time, CPU time and average cores in use on drop,
+/// and records them in the report (`timings`).
+pub struct Phase<'a> {
+    ctx: &'a Ctx,
+    name: String,
+    t0: std::time::Instant,
+    c0: f64,
+}
+
+impl<'a> Phase<'a> {
+    pub fn new(ctx: &'a Ctx, name: &str) -> Self {
+        Phase { ctx, name: name.to_string(), t0: std::time::Instant::now(), c0: cpu_secs() }
+    }
+}
+
+impl Drop for Phase<'_> {
+    fn drop(&mut self) {
+        let wall = self.t0.elapsed().as_secs_f64();
+        let cpu = cpu_secs() - self.c0;
+        let cores = if wall > 0.0 { cpu / wall } else { 0.0 };
+        eprintln!("time {:<22} {wall:7.1}s wall {cpu:8.1}s cpu {cores:5.1} cores", self.name);
+        self.ctx.report.lock().unwrap().timings.push(json!({"phase": self.name, "wall": (wall * 10.0).round() / 10.0, "cpu": (cpu * 10.0).round() / 10.0, "cores": (cores * 10.0).round() / 10.0}));
+    }
 }
 
 /// Sidecar json of a cache file.

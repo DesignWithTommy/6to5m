@@ -226,3 +226,124 @@ fn meta(r: &Res, ext: &str) -> Result<String, String> {
 pub fn field(summary: &str, key: &str) -> Option<u64> {
     summary.split_whitespace().find_map(|t| t.strip_prefix(key)?.strip_prefix('=')?.parse().ok())
 }
+
+/// Texture name hashes of a ytd file (empty when unreadable).
+fn ytd_hashes(bytes: &[u8]) -> Option<Vec<u32>> {
+    if bytes.len() < 16 || u32_at(bytes, 0).ok()? != 0x3743_5352 {
+        return None;
+    }
+    let ss = flags_size(u32_at(bytes, 8).ok()?) as usize;
+    let mut raw = Vec::new();
+    flate2::read::DeflateDecoder::new(&bytes[16..]).read_to_end(&mut raw).ok()?;
+    let r = Res { sys: raw.get(..ss)?, gfx: raw.get(ss..)? };
+    let d = r.need(0x5000_0000, 64, "dictionary").ok()?;
+    let (hp, hn) = (u64_at(d, 0x20).ok()?, u16_at(d, 0x28).ok()? as usize);
+    let h = r.at(hp, 4 * hn).ok()?.unwrap_or(&[]);
+    Some((0..hn).filter_map(|i| u32_at(h, 4 * i).ok()).collect())
+}
+
+/// gtxd.meta parent chain check (CMapParentTxds in `out`): every child and
+/// parent is a ytd in `stream`, each child has one parent, no cycles; every
+/// archetype txd (`txd`: ydr stem -> txd) exists; every texture a drawable
+/// uses (`texs`: ydr stem -> texture names) is found in its txd or one of its
+/// parents; no texture is stored both in a txd and in one of its parents.
+/// Returns (summary, problems).
+pub fn gtxd_chain(out: &std::path::Path, stream: &std::path::Path, txd: &std::collections::BTreeMap<String, String>, texs: &[(String, Vec<String>)]) -> (String, Vec<String>) {
+    use std::collections::{HashMap, HashSet};
+    let mut bad = Vec::new();
+    let mut parent: HashMap<String, String> = HashMap::new();
+    if let Ok(x) = std::fs::read_to_string(out.join("gtxd.meta")) {
+        for item in x.split("<Item>").skip(1) {
+            let tag = |t: &str| item.split(&format!("<{t}>")).nth(1).and_then(|s| s.split(&format!("</{t}>")).next()).map(|s| s.trim().to_lowercase());
+            match (tag("parent"), tag("child")) {
+                (Some(p), Some(c)) => {
+                    if let Some(old) = parent.insert(c.clone(), p.clone()) {
+                        if old != p {
+                            bad.push(format!("{c}: two parents ({old}, {p})"));
+                        }
+                    }
+                }
+                _ => bad.push("gtxd.meta: item without parent/child".into()),
+            }
+        }
+    }
+    let mut dicts: HashMap<String, Option<HashSet<u32>>> = HashMap::new();
+    let mut load = |n: &str, dicts: &mut HashMap<String, Option<HashSet<u32>>>| -> bool {
+        dicts.entry(n.to_string()).or_insert_with(|| std::fs::read(stream.join(format!("{n}.ytd"))).ok().and_then(|b| ytd_hashes(&b)).map(|v| v.into_iter().collect())).is_some()
+    };
+    let mut depth_max = 0;
+    for (c, p) in &parent {
+        for n in [c, p] {
+            if !load(n, &mut dicts) {
+                bad.push(format!("{n}.ytd missing from stream/ (gtxd.meta)"));
+            }
+        }
+        let (mut cur, mut seen, mut d) = (c.clone(), HashSet::new(), 0);
+        while let Some(p) = parent.get(&cur) {
+            if !seen.insert(cur.clone()) {
+                bad.push(format!("{c}: parent cycle"));
+                break;
+            }
+            cur = p.clone();
+            d += 1;
+        }
+        depth_max = depth_max.max(d);
+    }
+    let chain = |t: &str| -> Vec<String> {
+        let mut v = vec![t.to_string()];
+        while let Some(p) = parent.get(v.last().unwrap()) {
+            if v.contains(p) {
+                break;
+            }
+            v.push(p.clone());
+        }
+        v
+    };
+    // duplicates between a txd and its ancestors
+    let mut dup = 0usize;
+    for c in parent.keys() {
+        let ch = chain(c);
+        if let Some(Some(own)) = dicts.get(c) {
+            for a in &ch[1..] {
+                if let Some(Some(up)) = dicts.get(a) {
+                    dup += own.intersection(up).count();
+                }
+            }
+        }
+    }
+    if dup > 0 {
+        bad.push(format!("{dup} textures stored both in a txd and in one of its parents"));
+    }
+    let (mut unresolved, mut checked, mut missing_txd) = (0usize, 0usize, 0usize);
+    let mut sample = Vec::new();
+    for (stem, ts) in texs {
+        let Some(t) = txd.get(stem) else { continue };
+        let t = t.to_lowercase();
+        let ch = chain(&t);
+        for n in &ch {
+            load(n, &mut dicts);
+        }
+        if dicts.get(&t).is_none_or(|d| d.is_none()) {
+            missing_txd += 1;
+            continue;
+        }
+        for x in ts {
+            checked += 1;
+            let h = crate::gta5::rsc::joaat(&x.to_lowercase());
+            if !ch.iter().any(|n| dicts.get(n).and_then(|d| d.as_ref()).is_some_and(|d| d.contains(&h))) {
+                unresolved += 1;
+                if sample.len() < 5 {
+                    sample.push(format!("{stem}:{x}"));
+                }
+            }
+        }
+    }
+    if missing_txd > 0 {
+        bad.push(format!("{missing_txd} drawables point at a txd missing from stream/"));
+    }
+    if unresolved > 0 {
+        bad.push(format!("{unresolved} of {checked} drawable textures not in their txd chain (e.g. {})", sample.join(", ")));
+    }
+    let summary = format!("gtxd: {} parent links, chain depth <= {depth_max}, {checked} drawable textures checked, {} problems", parent.len(), bad.len());
+    (summary, bad)
+}

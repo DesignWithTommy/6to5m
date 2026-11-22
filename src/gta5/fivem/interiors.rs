@@ -132,6 +132,7 @@ pub fn load(ctx: &Ctx, dir: &Path, index: &ArchiveIndex) -> Vec<Interior> {
         if !ctx.o.in_bbox(ip, ip) {
             continue;
         }
+        let ip = ctx.o.shift(ip);
         let Some(h) = hx(&inst["archetype"]) else { continue };
         let ri = q4(&inst["rotation_world"]).unwrap_or([0.0, 0.0, 0.0, 1.0]);
         if let Some(i) = by_hash.get_mut(&h) {

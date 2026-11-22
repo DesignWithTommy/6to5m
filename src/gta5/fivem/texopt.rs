@@ -28,10 +28,24 @@ pub fn load(name: &str, src: &Path, alpha: bool) -> Result<Tex, String> {
     }
     let (w, h) = (tex.width as usize, tex.height as usize);
     let top = tex.format.pitch(w, h).1;
-    let mut px = vec![0u32; w * h];
-    if top > tex.data.len() || texture2ddecoder::decode_bc7(&tex.data[..top], w, h, &mut px).is_err() {
+    if top > tex.data.len() || w % 4 != 0 || h % 4 != 0 {
         return Ok(tex);
     }
+    // decode strips of 16 block rows in parallel (16 bytes per BC7 block)
+    use rayon::prelude::*;
+    let strip = (w / 4) * 16 * 16;
+    let parts: Vec<Option<Vec<u32>>> = tex.data[..top]
+        .par_chunks(strip)
+        .map(|c| {
+            let rows = c.len() / ((w / 4) * 16) * 4;
+            let mut p = vec![0u32; w * rows];
+            texture2ddecoder::decode_bc7(c, w, rows, &mut p).ok().map(|_| p)
+        })
+        .collect();
+    if parts.iter().any(|p| p.is_none()) {
+        return Ok(tex);
+    }
+    let px: Vec<u32> = parts.into_iter().flatten().flatten().collect();
     let rgba: Vec<u8> = px.iter().flat_map(|p| {
         let [b, g, r, _] = p.to_le_bytes();
         [r, g, b, 255]

@@ -184,6 +184,8 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         eprintln!("terrain: {sunk_n} vertices sunk below {} ground tiles", ground.len());
     }
     let sunk: std::collections::HashMap<usize, (Vec<V3>, u64)> = sunk.into_iter().map(|(i, v, n)| (i, (v, n))).collect();
+    let land: Vec<(&[V3], &[[u32; 3]])> = sel.iter().map(|&(i, t)| (sunk[&i].0.as_slice(), t.tris.as_slice())).collect();
+    super::minimap::build(ctx, &land)?;
     if sel.is_empty() {
         return Ok(());
     }
@@ -193,7 +195,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
             let name = format!("t6m_terrain_{i:03}");
             let (verts, n_sunk) = &sunk[&i];
             let t = &Tile { off: t.off, child: t.child, verts: verts.clone(), tris: t.tris.clone() };
-            let fp = format!("{TERRAIN_V}|terrain|{:x}|{:x}|{}|{}|{:x}", t.off, t.child, t.verts.len(), n_sunk, t.verts.iter().fold(0u64, |h, v| h.rotate_left(5) ^ (v[2].to_bits() as u64)));
+            let fp = format!("{TERRAIN_V}|terrain|{:x}|{:x}|{}|{}|{:x}", t.off, t.child, t.verts.len(), n_sunk, t.verts.iter().fold(0u64, |h, v| h.rotate_left(5) ^ (v[2].to_bits() as u64))) + &ctx.o.offset_fp();
             let (ydr_f, ybn_f) = (format!("{name}.ydr"), format!("{name}.ybn"));
             let (lo, hi) = aabb(t.verts.iter());
             let c: V3 = std::array::from_fn(|k| (lo[k] + hi[k]) / 2.0);
@@ -215,7 +217,8 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
                 let texs = [tex];
                 let embed = |b: &mut crate::gta5::rsc::Builder| ytd::add_dict(b, &texs);
                 let yd = ydr::build_ydr(&mesh, 9998.0, Some(&embed)).map_err(|e| format!("{ydr_f}: {e}"))?;
-                let yb = ybn::build_ybn(&t.verts, &t.tris, 0).map_err(|e| format!("{ybn_f}: {e}"))?;
+                let wv: Vec<V3> = t.verts.iter().map(|v| ctx.o.shift(*v)).collect();
+                let yb = ybn::build_ybn(&wv, &t.tris, 0).map_err(|e| format!("{ybn_f}: {e}"))?;
                 (Some(yd), Some(yb))
             };
             let s1 = ctx.emit(&ydr_f, &fp, info.clone(), yd)?;

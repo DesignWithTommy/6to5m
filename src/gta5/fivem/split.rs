@@ -63,6 +63,13 @@ fn cell_of(stem: &str) -> Option<(i64, i64)> {
     if let Some((a, b)) = stem.strip_prefix("t6m_cc_").and_then(|r| r.split_once('_')) {
         return Some(((a.parse::<i64>().ok()? - 200).div_euclid(CELL / 128), (b.parse::<i64>().ok()? - 200).div_euclid(CELL / 128)));
     }
+    // 128 m near cells (t6m_bn_XXX_YYY, XXX = cell + 200) -> their 512 m cell
+    if let Some(rest) = stem.strip_prefix("t6m_bn_") {
+        let (a, b) = rest.split_once('_')?;
+        let k = (super::buildings::NEAR_CELL as i64).max(1);
+        let f = CELL / k;
+        return Some(((a.parse::<i64>().ok()? - 200).div_euclid(f), (b.parse::<i64>().ok()? - 200).div_euclid(f)));
+    }
     let rest = stem.strip_prefix("t6m_bld_").or_else(|| stem.strip_prefix("t6m_col_"))?;
     let (a, b) = rest.split_once('_')?;
     Some((a.parse::<i64>().ok()? - 50, b.parse::<i64>().ok()? - 50))
@@ -153,7 +160,9 @@ pub fn split(ctx: &Ctx, metres: f32, max_mb: u64) -> Result<(), Box<dyn Error>> 
         let mut names = Vec::new();
         let mut summary = Vec::new();
         let ytyps: Vec<&str> = files.iter().map(|f| f.0.as_str()).filter(|n| n.ends_with(".ytyp")).collect();
+        let mut changed: Vec<String> = Vec::new();
         for (r, v) in &groups {
+            let mut ch = false;
             let name = match r {
                 None => common.clone(),
                 Some((s, x, y)) => format!("{base}_{s}_{}_{}", idx(*x), idx(*y)),
@@ -165,6 +174,7 @@ pub fn split(ctx: &Ctx, metres: f32, max_mb: u64) -> Result<(), Box<dyn Error>> 
             for e in fs::read_dir(&st)?.flatten() {
                 if !want.contains(e.file_name().to_string_lossy().as_ref()) {
                     fs::remove_file(e.path())?;
+                    ch = true;
                 }
             }
             for (f, _) in v {
@@ -172,6 +182,7 @@ pub fn split(ctx: &Ctx, metres: f32, max_mb: u64) -> Result<(), Box<dyn Error>> 
                 let stamp = |p: &Path| fs::metadata(p).ok().map(|m| (m.len(), m.modified().ok()));
                 if stamp(&dst).is_none() || stamp(&dst) != stamp(&src) {
                     super::link_into(&src, &dst)?;
+                    ch = true;
                 }
             }
             let mut t = String::from("fx_version 'cerulean'\ngame 'gta5'\nthis_is_a_map 'yes'\n");
@@ -183,7 +194,7 @@ pub fn split(ctx: &Ctx, metres: f32, max_mb: u64) -> Result<(), Box<dyn Error>> 
                 }
                 let extra: Vec<&str> = ["water.xml", "gtxd.meta"].into_iter().filter(|f| ctx.o.out.join(f).exists()).collect();
                 for f in &extra {
-                    write_if_changed(&dir.join(f), &fs::read(ctx.o.out.join(f))?)?;
+                    ch |= write_if_changed(&dir.join(f), &fs::read(ctx.o.out.join(f))?)?;
                 }
                 if !extra.is_empty() {
                     t += &format!("files {{ {} }}\n", extra.iter().map(|f| format!("'{f}'")).collect::<Vec<_>>().join(", "));
@@ -197,13 +208,16 @@ pub fn split(ctx: &Ctx, metres: f32, max_mb: u64) -> Result<(), Box<dyn Error>> 
             } else {
                 t += &format!("dependency '{common}'\n");
             }
-            write_if_changed(&dir.join("fxmanifest.lua"), t.as_bytes())?;
+            ch |= write_if_changed(&dir.join("fxmanifest.lua"), t.as_bytes())?;
             let bytes = size(v);
             let mb = bytes as f64 / 1048576.0;
             if bytes > cap {
                 eprintln!("split: {name} is {mb:.0} MB, over --split-max {max_mb} MB");
             }
             summary.push(json!({"resource": name, "files": v.len(), "mb": (mb * 10.0).round() / 10.0}));
+            if ch {
+                changed.push(name.clone());
+            }
             names.push(name);
         }
         if !names.contains(&common) {
@@ -216,6 +230,7 @@ pub fn split(ctx: &Ctx, metres: f32, max_mb: u64) -> Result<(), Box<dyn Error>> 
         names.sort_by_key(|n| *n != common);
         let cfg: String = names.iter().map(|n| format!("ensure {n}\n")).collect();
         write_if_changed(&root.join("ensure.cfg"), cfg.as_bytes())?;
+        super::live_report(ctx, &changed);
         // resources from an earlier split layout
         for e in fs::read_dir(&root)?.flatten() {
             if e.path().is_dir() && !names.iter().any(|n| e.file_name().to_string_lossy() == n.as_str()) {
@@ -230,9 +245,10 @@ pub fn split(ctx: &Ctx, metres: f32, max_mb: u64) -> Result<(), Box<dyn Error>> 
     }
 }
 
-fn write_if_changed(p: &Path, b: &[u8]) -> std::io::Result<()> {
+/// True when the file was (re)written.
+fn write_if_changed(p: &Path, b: &[u8]) -> std::io::Result<bool> {
     if fs::read(p).is_ok_and(|x| x == b) {
-        return Ok(());
+        return Ok(false);
     }
-    fs::write(p, b)
+    fs::write(p, b).map(|_| true)
 }
