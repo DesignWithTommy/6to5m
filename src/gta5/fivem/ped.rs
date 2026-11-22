@@ -15,6 +15,9 @@
 //! bone frames (so GTA V clips play) with the 6m joint positions (so the
 //! character keeps its proportions).
 
+#[path = "ped_groom.rs"]
+mod groom;
+
 use crate::gta5::ped::{self as gp, ShaderDef, SkelBone, Skeleton, SkinDrawable, SkinGeom, SkinVert};
 use crate::gta5::{meta, ped_bones, ytd};
 use serde_json::json;
@@ -33,6 +36,13 @@ usage: 6ixpack fivem ped <name> --game <6m dir> --out <resource dir> [options]
   --work <dir>       sixng work dir with index/packs.json (default $SIXNG_WORK or work)
   --ped <model>      GTA V model name for the output (default: <name>)
   --list             list the candidate drawables and their components, write nothing
+  --hair <id>        strand groom for the hair (packs.rpf@<hex>; see --grooms), drawn as cards
+  --beard <id>       strand groom for the beard / moustache
+  --grooms [scalp|face|brows|all]
+                     list grooms whose roots fit this ped's head (no resource links
+                     peds to grooms, so pick one by eye), write nothing
+  --hair-color r,g,b card colour (default 40,28,20)
+  --hair-width <m>   card half-width at the root (default 0.012)
   --all              every part of the character, not just the default look
   --only <a,b>       keep only drawables whose name contains one of these words
   --max-tex <px>     cap texture size (default 1024)";
@@ -46,6 +56,11 @@ pub struct PedOpts {
     pub list: bool,
     pub only: Vec<String>,
     pub all: bool,
+    pub hair: Option<String>,
+    pub beard: Option<String>,
+    pub grooms: Option<String>,
+    pub hair_color: [u8; 3],
+    pub hair_width: f32,
     pub max_tex: u16,
 }
 
@@ -59,6 +74,11 @@ fn parse(args: &[String]) -> Result<PedOpts, String> {
         list: false,
         only: Vec::new(),
         all: false,
+        hair: None,
+        beard: None,
+        grooms: None,
+        hair_color: [40, 28, 20],
+        hair_width: 0.012,
         max_tex: 1024,
     };
     let mut it = args.iter();
@@ -71,14 +91,23 @@ fn parse(args: &[String]) -> Result<PedOpts, String> {
             "--ped" => o.ped = val(&mut it, a)?.to_lowercase(),
             "--list" => o.list = true,
             "--all" => o.all = true,
+            "--hair" => o.hair = Some(val(&mut it, a)?),
+            "--beard" => o.beard = Some(val(&mut it, a)?),
+            "--grooms" => o.grooms = Some(it.clone().next().filter(|v| ["scalp", "face", "brows", "all"].contains(&v.to_lowercase().as_str())).map(|v| v.to_lowercase()).unwrap_or_else(|| "scalp".into())),
+            "--hair-width" => o.hair_width = val(&mut it, a)?.parse().map_err(|e| format!("--hair-width: {e}"))?,
+            "--hair-color" => {
+                let v: Vec<u8> = val(&mut it, a)?.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                o.hair_color = <[u8; 3]>::try_from(v.as_slice()).map_err(|_| "--hair-color: expected r,g,b")?;
+            }
             "--only" => o.only = val(&mut it, a)?.split(',').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect(),
             "--max-tex" => o.max_tex = val(&mut it, a)?.parse().map_err(|e| format!("--max-tex: {e}"))?,
             s if s.starts_with('-') => return Err(format!("unknown argument {s}\n{USAGE}")),
+            s if o.grooms.as_deref() == Some(s) && ["scalp", "face", "brows", "all"].contains(&s) => {}
             s if o.name.is_empty() => o.name = s.to_lowercase(),
             s => return Err(format!("unexpected argument {s}\n{USAGE}")),
         }
     }
-    if o.name.is_empty() || o.game.as_os_str().is_empty() || (o.out.as_os_str().is_empty() && !o.list) {
+    if o.name.is_empty() || o.game.as_os_str().is_empty() || (o.out.as_os_str().is_empty() && !o.list && o.grooms.is_none()) {
         return Err(USAGE.into());
     }
     if o.ped.is_empty() {
@@ -680,6 +709,51 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
         match best {
             Some(h) => h.geoms.extend(e.geoms),
             None => parts.push(e),
+        }
+    }
+    // strand grooms: list candidates, or add hair / beard cards
+    if o.grooms.is_some() || o.hair.is_some() || o.beard.is_some() {
+        let head_box = parts.iter().filter(|p| p.slot == 0).flat_map(|p| p.geoms.iter().flat_map(|g| g.0.verts.iter().map(|v| v.pos))).fold(None, |b: Option<[[f32; 3]; 2]>, p| {
+            Some(match b {
+                None => [p, p],
+                Some([lo, hi]) => [std::array::from_fn(|i| lo[i].min(p[i])), std::array::from_fn(|i| hi[i].max(p[i]))],
+            })
+        });
+        if let Some(cat) = &o.grooms {
+            let names: HashMap<u32, String> = six.bones.iter().map(|b| (sixng_core::meta7a::joaat(&b.name), b.name.clone())).collect();
+            let all = groom::catalog(&o.game, &o.work, &ix)?;
+            let fits = |b: &[[f32; 3]; 2]| head_box.is_none_or(|h| (0..3).all(|i| b[0][i] >= h[0][i] - 0.03 && b[1][i] <= h[1][i] + 0.03));
+            let mut v: Vec<_> = all.iter().filter(|g| g.lod == 0 && fits(&g.root_box)).map(|g| (groom::category(&g.bones, &g.root_box, &names), g)).filter(|(c, _)| cat == "all" || c == cat).collect();
+            v.sort_by_key(|(_, g)| std::cmp::Reverse(g.strands));
+            println!("{} grooms of {} ({}) fit the head of {}{}:", v.len(), all.len(), cat, o.name, if head_box.is_none() { " (no head decoded: unfiltered)" } else { "" });
+            for (c, g) in v.iter().take(60) {
+                println!("  {}  {:<6} strands={:<5} roots z {:.2}..{:.2} y {:.2}..{:.2}", g.id, c, g.strands, g.root_box[0][2], g.root_box[1][2], g.root_box[0][1], g.root_box[1][1]);
+            }
+            println!("use: --hair <id> / --beard <id> (cards are a stand-in: nothing in the game files says which groom a ped wears)");
+            return Ok(());
+        }
+        let head_bone = skel.bones.iter().position(|b| b.name.eq_ignore_ascii_case("SKEL_Head")).unwrap_or(0) as u8;
+        let rgba = [o.hair_color[0], o.hair_color[1], o.hair_color[2], 255];
+        for (id, slot) in [(&o.hair, 2usize), (&o.beard, 1usize)] {
+            let Some(id) = id else { continue };
+            let g = groom::load(&o.game, &ix, id)?;
+            parts.retain(|p| p.slot != slot); // the 3-vertex placeholders, if any
+            let mut geoms = Vec::new();
+            let per = (60000 / (g.k * 4)).max(1);
+            let mut s0 = 0;
+            while s0 < g.strands {
+                let s1 = (s0 + per).min(g.strands);
+                let (pos, nrm, uv, idx) = g.ribbons(o.hair_width, s0..s1);
+                s0 = s1;
+                if idx.is_empty() {
+                    continue;
+                }
+                let tangents = uv_tangents(&pos, &nrm, &uv, &idx);
+                let verts = (0..pos.len()).map(|i| SkinVert { pos: pos[i], normal: nrm[i], uv: uv[i], tangent: tangents[i], weights: [255, 0, 0, 0], bones: [head_bone, 0, 0, 0] }).collect();
+                geoms.push((SkinGeom { verts, indices: idx.iter().map(|&x| x as u16).collect(), shader: 0 }, false));
+            }
+            report.push(json!({"source": id, "slot": SLOTS[slot], "groom_strands": g.strands, "points_per_strand": g.k, "geometries": geoms.len()}));
+            parts.push(Part { src: format!("groom {id}"), slot, geoms, diffuse: Some((rgba.repeat(16 * 16), 16, 16)), warnings: Vec::new() });
         }
     }
     if parts.is_empty() {

@@ -42,7 +42,7 @@ Loads in CodeWalker; not yet tested in game.
 - Some clothing vertices name bones in neither the 6m ped skeleton nor the drawable (e.g. cs_lucia tshirtcrop: 6681 influences dropped). Find those palette bones.
 - Part selection is SixNG's default look (one part per outfit slot; `--all` for every part). Characters without their own head (cs_jason) use the legacy head and whole-body copies. No props, no texture variations, no base body under clothing.
 - Facial bones keep GTA V reference positions (only 78 of 101 bones are placed from 6m).
-- Hair, brows, lashes and beards are 3-vertex stub drawables (skipped); the strands are unnamed type-3 resources (GTA6-Asset-Info formats/19 §19.2). Convert strands to cards for a `hair` component.
+- Hair and beards: `--hair` / `--beard <groom id>` draw a strand groom as crossed cards (flat `--hair-color`, rigid on SKEL_Head), and `--grooms` lists the grooms that fit the head. Nothing in the game files links a ped to its grooms, so you pick one by eye. Still to do: brows and lashes, an alpha strand texture, card UVs from the root UVs (A2), and skinning beards to the jaw.
 - Head faces: heads bind no textures; albedo/normal come from a "heads" material preset (formats/07 §7.5). cs_lucia's head is in no preset, so it stays grey. Wire presets for tagged heads.
 - Head skin variant 0x8c (slot 9 as 4 x u32 joints) is not decoded by sixng-core; cs_lucia's head uses the ordinary 4+4 x u8 layout.
 
