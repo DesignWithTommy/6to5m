@@ -73,6 +73,10 @@ fn map_index(ctx: &Ctx, a: &sixng_core::game::ArchiveInfo, index: &sixng_core::s
 /// the cells touching the region; each cell is exported once per input from
 /// the map files centred in it.
 fn tables(ctx: &Ctx, index: &sixng_core::scan::ArchiveIndex) -> Result<Vec<PathBuf>, String> {
+    // opt-in (--only ...,batches) until the map-file index is bbox-scoped
+    if !ctx.o.only.iter().any(|p| p == "batches") {
+        return Ok(Vec::new());
+    }
     let ws = sixng_core::export::Workspace::new(&ctx.o.game, &ctx.o.work);
     let a = ws.resolve("levels.rpf").map_err(|e| e.to_string())?;
     let maps = map_index(ctx, &a, index)?;

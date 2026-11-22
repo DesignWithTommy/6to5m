@@ -56,7 +56,8 @@ usage: 6ixpack fivem build --game <dir> --out <resource dir> [options]
                        coordinates). GTA VI reaches y 9474, past GTA V's ~8000
                        limit: e.g. --offset 0,-1500 for the north
   --name <substr>      only building archetypes whose name contains this
-  --only <list>        terrain,buildings,collision,water,lsremove,paths,navmesh (default: all)
+  --only <list>        terrain,buildings,collision,water,lsremove,paths,navmesh (default: all);
+                       batches (instanced prop/grass batches, opt-in)
                        lsremove: empty stand-ins for vanilla _citye/_cityw/_hills
                        ymaps/ybns in the region, read from GTA V ($GTA5_DIR or Steam)
   --report <file>      JSON report: converted / skipped with reason / outputs
@@ -382,7 +383,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
     if let Some(p) = o.placements.take() {
         o.placements = Some(resolve_placements(&p)?);
     }
-    if let Some(k) = o.only.iter().find(|k| !["terrain", "buildings", "collision", "water", "lsremove", "paths", "navmesh"].contains(&k.as_str())) {
+    if let Some(k) = o.only.iter().find(|k| !["terrain", "buildings", "collision", "water", "lsremove", "paths", "navmesh", "batches"].contains(&k.as_str())) {
         return Err(format!("--only: unknown part {k}"));
     }
     Ok(o)
