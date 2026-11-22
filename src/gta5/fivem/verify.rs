@@ -48,6 +48,7 @@ pub fn verify(file: &str, bytes: &[u8]) -> Result<String, String> {
     let want = match ext.as_str() {
         "ytd" => 13,
         "ydr" => 165,
+        "yft" => 162,
         "ybn" => 43,
         "ymap" | "ytyp" => 2,
         _ => return Err(format!("{file}: unknown output type")),
@@ -77,6 +78,7 @@ pub fn verify(file: &str, bytes: &[u8]) -> Result<String, String> {
     let body = match ext.as_str() {
         "ytd" => dict(&r, 0x5000_0000).map(|(n, mb)| format!("textures={n} tex_mb={:.1}", mb as f64 / 1048576.0)),
         "ydr" => drawable(&r),
+        "yft" => Ok("fragment".to_string()),
         "ybn" => bounds(&r),
         _ => meta(&r, &ext),
     }

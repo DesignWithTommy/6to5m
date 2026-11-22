@@ -27,6 +27,7 @@ pub mod split;
 mod terrain;
 mod vehicles;
 mod weapons;
+mod frags;
 pub mod verify;
 
 use memmap2::Mmap;
@@ -77,6 +78,8 @@ also: 6ixpack fivem vehicle <name> --game <dir> --out <dir>   (one 6m vehicle ->
 /// other outputs stay cached (each goes into its own outputs' fingerprints).
 pub const TEX_V: &str = "tex1";
 pub const YDR_V: &str = "ydr6";
+/// Fragment props as dynamic .yft (fivem/frags.rs).
+pub const FRAG_V: &str = "frag1";
 pub const YBN_V: &str = "ybn1";
 pub const TERRAIN_V: &str = "terrain2";
 /// Meta files (ymap/ytyp) and water.xml are rebuilt every run and compared

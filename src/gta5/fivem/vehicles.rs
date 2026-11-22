@@ -65,6 +65,9 @@ const PAINT: &str = "r6m_paint";
 /// `diffusetex` on 6m vehicle shaders: an engine-default white that the
 /// runtime paint colour tints (GTA VI format notes, vehicle paint).
 const PAINT_SLOT: u32 = 0xc8e8_c282;
+/// Packed material slot (roughness/metal/AO) and the synthesized-map id salt.
+const PACKED_SLOT: u32 = 0x739e_3d0d;
+const SYNTH: u32 = 0x5e17_0001;
 const WHEELS: [&str; 4] = ["wheel_lf", "wheel_rf", "wheel_lr", "wheel_rr"];
 
 /// Diffuse/colour parameter hashes in priority order (buildings.rs).
@@ -191,6 +194,67 @@ impl Pools {
         write_atomic(&p, &dds).map_err(|e| e.to_string())?;
         Ok(p)
     }
+    /// Decoded RGBA of any texture (no colour-map check): pools, else TTPF.
+    fn raw(&mut self, _hash: u32, key: u64, h64: u64) -> Result<(Vec<u8>, u32, u32), String> {
+        let pooled = (|| -> Result<Vec<u8>, String> {
+            let cat = self.catalog.as_ref().ok_or("no pool catalog")?;
+            let loc = cat.find(key).iter().find(|l| l.extractable).ok_or("not in pools")?;
+            let (lp, li) = (loc.path.clone(), loc.index);
+            if !self.maps.contains_key(&lp) {
+                let f = fs::File::open(&lp).map_err(|e| e.to_string())?;
+                // SAFETY: read-only map of a game file.
+                self.maps.insert(lp.clone(), unsafe { Mmap::map(&f) }.map_err(|e| e.to_string())?);
+            }
+            let pool = crate::texture::Pool::open(&self.maps[&lp]).map_err(|e| e.to_string())?;
+            let t = pool.textures.get(li).ok_or("pool index out of range")?;
+            pool.create_dds(t).map_err(|e| e.to_string())
+        })();
+        if let Ok(dds) = pooled.as_ref().map_err(|_| ()).and_then(|d| crate::texture::dds_preview(d).map_err(|_| ())) {
+            return Ok((dds.2, dds.0, dds.1));
+        }
+        let set = sixng_core::ttpf::global(&self.game);
+        let (store, t) = set.get(h64).ok_or("not in pools or any ttpf store")?;
+        let (data, skipped) = store.data_ex(t).map_err(|e| e.to_string())?;
+        let mip = if skipped == 0 { 0 } else { store.best_mip(t).ok_or("only BCPack mips")? };
+        let (rgba, w, h) = sixng_core::ttpf::decode_rgba(t, &data, mip).map_err(|e| e.to_string())?;
+        Ok((rgba, w, h))
+    }
+
+    /// Material shaders with no colour map (6m weapons, e68a4a98): a
+    /// gunmetal colour map shaded by the packed material texture (slot
+    /// 739e3d0d, R/G/B likely roughness/metal/AO; the darkest-mean channel
+    /// is used as occlusion). Cached as `<packed ^ SYNTH>.dds`.
+    fn synth(&mut self, packed: u32, key: u64, h64: u64) -> Result<u32, String> {
+        let id = packed ^ SYNTH;
+        if self.path(id).exists() {
+            return Ok(id);
+        }
+        let (rgba, w, h) = self.raw(packed, key, h64)?;
+        let n = (rgba.len() / 4).max(1) as f64;
+        let mean = |c: usize| rgba.chunks_exact(4).map(|p| p[c] as f64).sum::<f64>() / n;
+        // R-only maps with small values are material ids (0, 1, 2 ...): one
+        // weapon finish per id. Otherwise shade gunmetal by the brightest
+        // channel as occlusion.
+        const FINISH: [[u8; 3]; 6] = [[0x2c, 0x2d, 0x2f], [0x55, 0x57, 0x5b], [0x3a, 0x38, 0x34], [0x6a, 0x6c, 0x70], [0x1f, 0x20, 0x21], [0x4a, 0x42, 0x36]];
+        let ids = mean(1) < 4.0 && mean(2) < 4.0;
+        let ao = (0..3).max_by(|&a, &b| mean(a).total_cmp(&mean(b))).unwrap_or(2);
+        let out: Vec<u8> = rgba
+            .chunks_exact(4)
+            .flat_map(|p| {
+                if ids {
+                    let [r, g, b] = FINISH[if p[0] > 64 { p[0] as usize / 64 } else { p[0] as usize } % FINISH.len()];
+                    [r, g, b, 255]
+                } else {
+                    let k = 0.35 + 0.65 * p[ao] as f32 / 255.0;
+                    [(0x4a as f32 * k) as u8, (0x4c as f32 * k) as u8, (0x50 as f32 * k) as u8, 255]
+                }
+            })
+            .collect();
+        let dds = rgba_dds(&out, w, h);
+        write_atomic(&self.path(id), &dds).map_err(|e| e.to_string())?;
+        Ok(id)
+    }
+
     fn from_pools(&mut self, hash: u32, key: u64) -> Result<PathBuf, String> {
         let p = self.path(hash);
         if p.exists() {
@@ -433,6 +497,14 @@ pub(super) fn load_source(rpf: &Path, e: &Entry, pools: &mut Pools, texs: &mut V
                                     // the paint slot's white is in no store: the body colour
                                     Err(_) if ph(&t) == Some(PAINT_SLOT) || sixng_core::material::is_paint(&sh.name_hash) => return PAINT.to_string(),
                                     Err(e) => errs.push(format!("{hash:08x}: {e}")),
+                                }
+                            }
+                            if let Some(t) = sh.textures.iter().find(|t| ph(t) == Some(PACKED_SLOT)) {
+                                let hash = u32::from_str_radix(&t.hash32, 16).unwrap_or(0);
+                                let key = emb.as_ref().and_then(|e| e.by_hash(hash)).and_then(|x| x.asset_key).unwrap_or_else(|| key_of(sh, t.param));
+                                match pools.synth(hash, key, u64::from_str_radix(&t.hash64, 16).unwrap_or(0)) {
+                                    Ok(id) => return format!("r6m_{id:08x}"),
+                                    Err(e) => errs.push(format!("{hash:08x} (packed): {e}")),
                                 }
                             }
                             missing.extend(errs.into_iter().take(1));

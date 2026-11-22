@@ -329,6 +329,11 @@ fn convert(o: &Opts, rpf: &std::path::Path, by_name: &HashMap<&str, &Entry>, poo
     }
     let ytd = ytd::build_ytd(&tx)?;
     write_atomic(&stream.join(format!("{w}.ytd")), &ytd).map_err(|e| e.to_string())?;
+    if !missing.is_empty() {
+        missing.sort();
+        missing.dedup();
+        eprintln!("weapon: {w}: textures missing (grey placeholder): {}", missing.join("; "));
+    }
     let tris: usize = asm.lods[0].iter().map(|g| g.indices.len() / 3).sum();
     Ok(format!("{} parts, {tris} tris, {} textures{}, bones {:?}", asm.parts.len(), tx.len(), if missing.is_empty() { String::new() } else { format!(" ({} missing)", missing.len()) }, bones.iter().map(|b| b.name.as_str()).collect::<Vec<_>>()))
 }

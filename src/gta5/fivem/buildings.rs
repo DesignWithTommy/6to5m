@@ -7,7 +7,7 @@ use super::geom::{aabb, push_geoms, push_geoms_n, V3};
 mod interiors;
 #[path = "texopt.rs"]
 mod texopt;
-use super::{safe_name, sha, write_atomic, Ctx, TEX_V, YDR_V};
+use super::{safe_name, sha, write_atomic, Ctx, FRAG_V, TEX_V, YDR_V};
 use crate::gta5::{
     meta::{self, Archetype, Entity, MapData, MapTypes},
     ydr::{self, Mesh},
@@ -850,8 +850,11 @@ fn sixng_mesh(ctx: &Ctx, pools: &Pools, an: &str, e: &Entry) -> Result<Built, St
 
 fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entry>) -> Result<Option<Arch>, String> {
     let an = safe_name(name);
-    let file = format!("{an}.ydr");
+    // fragment props become dynamic .yft (fivem/frags.rs); FRAG_V re-converts only them
+    let frag = entry.is_some_and(|e| e.rtype.as_deref() == Some("ft"));
+    let file = if frag { format!("{an}.yft") } else { format!("{an}.ydr") };
     let fp = format!("{YDR_V}|bld|{off:x}|{name}");
+    let fp = if frag { format!("{FRAG_V}|{fp}") } else { fp };
     let from_info = |i: &Value| Arch {
         an: an.clone(),
         lo: f3(&i["lo"]),
@@ -898,7 +901,11 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
         ctx.skip(name, "missing textures (placeholder used)", json!({"textures": missing}));
     }
     let (lo, hi) = aabb(mesh.geoms.iter().flat_map(|g| g.positions.iter()));
-    let bytes = ydr::build_ydr(&mesh, 9998.0, None).map_err(|e| format!("{file}: {e}"))?;
+    let bytes = match entry.filter(|_| frag) {
+        Some(e) => super::frags::build_prop_yft(&mesh, super::frags::collider_mass(&ctx.o.game.join("levels.rpf"), e), 9998.0),
+        None => ydr::build_ydr(&mesh, 9998.0, None),
+    }
+    .map_err(|e| format!("{file}: {e}"))?;
     let alpha: std::collections::BTreeSet<&String> = mesh.geoms.iter().filter(|g| g.kind != 0).map(|g| &g.texture).collect();
     let info = json!({"lo": lo, "hi": hi, "texs": texs, "alpha": alpha});
     let s = ctx.emit(&file, &fp, info.clone(), Some(bytes))?;

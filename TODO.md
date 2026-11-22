@@ -3,7 +3,7 @@
 Done: Rust writers (`6ixpack convert`) and `6ixpack fivem build` (terrain, buildings incl. fragments, interiors and LOD chains, water, shared txds, incremental, self-check, --report); items 1-3, 7, 8 and most of 5 below.
 
 Open gaps found:
-- Fragments convert as static ydr (no breakage). Textures missing from the ttdb pools come from the TTPF stores (re-encoded DXT1/DXT5); 3 in the test district are in neither.
+- Fragment props convert as dynamic yft (fivem/frags.rs: one piece, box bound, 6m collider mass; no breakage into parts yet). Textures missing from the ttdb pools come from the TTPF stores (re-encoded DXT1/DXT5); 3 in the test district are in neither.
 - Interiors convert to MLOs by default (`src/gta5/fivem/interiors.rs`; checked with CodeWalker, not yet in game). Portals are decoded from the 6m archetype and entities sit in their rooms; entity sets are written off by default. Interior collision linked by sixng (exact, high or medium) is written per instance as `t6m_intcol_<hash>_<n>.ybn` with each polygon's room id picked by room bbox (6m bounds carry none; checked in CodeWalker, not in game). Interiors without linked collision keep only the world collision cells, so the player may count as outside there (`T6M_MLO_LIMBO=1` is the fallback). Interior lights are decoded from the interiors' own meta files during the build (archetypes defined in other meta files get no lights; `T6M_NO_LIGHTS=1` skips); intensity (1:1, `T6M_LIGHT_SCALE`) needs an in-game check. `--interiors` keeps the old world-space flattening. LOD parents that are prop batches (`*_batchlod`) are ignored.
 - Terrain tile numbering differs from the Python run (153 vs 158 tiles).
 - Nothing is checked in game yet; quaternion convention unverified (`--conjugate-rot`).
@@ -31,7 +31,7 @@ Next, from the FiveM port's requests:
 ## fivem weapon (`src/gta5/fivem/weapons.rs`, `yft::build_ydr_skel`)
 
 - [ ] Test in game (give WEAPON_W_PI_SCORPIO_01): grip/muzzle sockets, hand IK, animations.
-- [ ] Missing weapon textures (24 of 26 on w_pi_scorpio_01): find the store that holds them.
+- [x] Weapon textures: 6m weapon shaders (e68a4a98) carry only normal + packed material (739e3d0d, R = material id); the colour map is synthesized per id. Real finish colours per id are unknown.
 - [ ] Real stats from 6m weapon data instead of GTA V class defaults; component variants (mags, sights) as GTA V components.
 
 ## fivem vehicle (`src/gta5/fivem/vehicles.rs`, `src/gta5/yft.rs`)
