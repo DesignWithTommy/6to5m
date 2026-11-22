@@ -75,8 +75,12 @@ fn step(b: &Blk, c: usize, r: [u32; 4]) -> ([u32; 4], f64) {
     let st = if reg == 2 {
         [w << ws, x10, y << sh, z << sh]
     } else {
-        let v = (w & md as u32) ^ if trans { 1 << (dc - 1) } else { 0 };
-        let low_y = if dc >= 6 { v >> (dc - 6) } else { v << sh };
+        let low_y = if trans {
+            let v = (w & md as u32) ^ (1 << (dc - 1));
+            if dc >= 6 { v >> (dc - 6) } else { v << sh }
+        } else {
+            (w << ws) >> 10
+        };
         [w << ws, x10, low_y, x10 >> 4]
     };
     let wv = bp::b6_stream_w(mode, w) as i64;

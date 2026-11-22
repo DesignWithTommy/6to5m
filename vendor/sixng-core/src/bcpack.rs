@@ -99,7 +99,7 @@ pub(crate) fn decode_lanes(codec: u8, comp: &[u8], out_len: usize) -> Result<Vec
 /// Fitted preset ("built-in") history; see `bcpack_calib`.
 /// Bump on every change to decoded BCPack output: keys derived texture
 /// caches (fivem_tex_cache_v{N}) so stale ones invalidate themselves.
-pub const BCPACK_DECODER_VERSION: u32 = 1;
+pub const BCPACK_DECODER_VERSION: u32 = 2;
 /// Bump when the history calibration/refinement changes: keys the cached
 /// `bcpack-history-*.bin`.
 pub const BCPACK_HISTORY_VERSION: u32 = 1;
@@ -929,8 +929,15 @@ fn bc6h(lanes: &[&[u16]], n: usize) -> Decoded {
                 stb[c] = [w << w_shift, x10, y << sh, z << sh];
                 f[c] = [b6_stream_w(mode, w), x, y, z];
             } else {
-                let v = (w & md as u32) ^ if trans { 1 << (dc - 1) } else { 0 };
-                let low_y = if dc >= 6 { v >> (dc - 6) } else { v << sh };
+                // y state left for a following two-region block: untransformed
+                // modes copy w; transformed ones write w's low bits into the
+                // delta width, offset by half its range (SixNG a4063d3).
+                let low_y = if trans {
+                    let v = (w & md as u32) ^ (1 << (dc - 1));
+                    if dc >= 6 { v >> (dc - 6) } else { v << sh }
+                } else {
+                    (w << w_shift) >> 10
+                };
                 stb[c] = [w << w_shift, x10, low_y, x10 >> 4];
                 f[c] = [b6_stream_w(mode, w), x, 0, 0];
             }
