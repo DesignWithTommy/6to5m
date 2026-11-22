@@ -101,7 +101,62 @@ fn bad_colour(rgba: &[u8]) -> Option<&'static str> {
     if m[2] > 200.0 && (100.0..160.0).contains(&m[0]) && (100.0..160.0).contains(&m[1]) {
         return Some("normal map, not a colour map");
     }
+    // Packed masks (blend weights, noise) have independent channels; colour
+    // maps are luminance-dominated, with R/G/B strongly correlated.
+    let corr = |a: usize, b: usize| {
+        let (mut sab, mut saa, mut sbb) = (0f64, 0f64, 0f64);
+        for px in rgba.chunks_exact(4) {
+            let (x, y) = (px[a] as f64 - m[a], px[b] as f64 - m[b]);
+            sab += x * y;
+            saa += x * x;
+            sbb += y * y;
+        }
+        if saa < 1.0 || sbb < 1.0 { 1.0 } else { sab / (saa * sbb).sqrt() }
+    };
+    if corr(0, 1).min(corr(1, 2)).min(corr(0, 2)) < 0.2 {
+        return Some("mask/packed data, not a colour map");
+    }
     None
+}
+
+/// 6m paints ground tiles as stacked decal layers blended by alpha masks.
+/// GTA needs an opaque surface underneath: the decal texture covering the
+/// most area becomes opaque (when it covers at least half the footprint and
+/// the mesh has no opaque ground already); every other layer stays an
+/// alpha-blended decal.
+fn promote_base_layer(mesh: &mut Mesh) {
+    let area = |g: &ydr::Geom| -> f64 {
+        g.indices
+            .chunks_exact(3)
+            .map(|t| {
+                let (a, b, c) = (g.positions[t[0] as usize], g.positions[t[1] as usize], g.positions[t[2] as usize]);
+                let (u, v) = ([b[0] - a[0], b[1] - a[1]], [c[0] - a[0], c[1] - a[1]]);
+                ((u[0] * v[1] - u[1] * v[0]) as f64).abs() / 2.0
+            })
+            .sum()
+    };
+    let mut by_tex: HashMap<String, f64> = HashMap::new();
+    let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for g in &mesh.geoms {
+        for p in &g.positions {
+            for k in 0..2 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+        if g.kind == 2 && g.texture != MISSING {
+            *by_tex.entry(g.texture.clone()).or_default() += area(g);
+        }
+    }
+    let foot = ((hi[0] - lo[0]) * (hi[1] - lo[1])).max(0.0) as f64;
+    let opaque: f64 = mesh.geoms.iter().filter(|g| g.kind == 0).map(area).sum();
+    if let Some((t, a)) = by_tex.into_iter().max_by(|a, b| a.1.total_cmp(&b.1)) {
+        if a >= foot * 0.5 && opaque < foot * 0.5 {
+            for g in mesh.geoms.iter_mut().filter(|g| g.kind == 2 && g.texture == t) {
+                g.kind = 0;
+            }
+        }
+    }
 }
 
 /// Rejects (and deletes) a cached DDS that is not a usable colour map.
@@ -181,34 +236,9 @@ struct Pools {
     catalog: Option<crate::texture::Catalog>,
     maps: Mutex<HashMap<PathBuf, Arc<Mmap>>>,
     dir: PathBuf,
-    alpha: Mutex<HashMap<String, bool>>,
 }
 
 impl Pools {
-    /// 6m draws road/asphalt surfaces in the decal bucket; GTA blends decals
-    /// by texture alpha, which on those textures is a blend mask, so they
-    /// vanish. A decal whose texture is >= 40% opaque (asphalt layers; road
-    /// markings are far sparser) becomes an opaque
-    /// (still lifted) surface: kind 4 (see geom::push_geoms).
-    fn decal_kind(&self, tex: &str) -> u8 {
-        if tex == MISSING || tex.len() < 4 {
-            return 2;
-        }
-        if let Some(&o) = self.alpha.lock().unwrap().get(tex) {
-            return if o { 4 } else { 2 };
-        }
-        let o = fs::read(self.dir.join(format!("{}.dds", &tex[4..])))
-            .ok()
-            .and_then(|b| crate::texture::dds_preview(&b).ok())
-            .map(|(_, _, px)| {
-                let n = (px.len() / 4).max(1);
-                px.chunks_exact(4).filter(|p| p[3] >= 128).count() * 10 >= n * 4
-            })
-            .unwrap_or(false);
-        self.alpha.lock().unwrap().insert(tex.to_string(), o);
-        if o { 4 } else { 2 }
-    }
-
     fn path(&self, hash: u32) -> PathBuf {
         self.dir.join(format!("{hash:08x}.dds"))
     }
@@ -511,28 +541,30 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, an: &str, off: usize) -> Resu
     let mut mesh = Mesh { name: an.clone(), geoms: Vec::new() };
     let (mut texs, mut missing) = (Vec::new(), Vec::new());
     for sm in &m.meshes {
-        let tex = sm
-            .shader
-            .and_then(|s| m.materials.as_ref()?.get(s))
-            .and_then(|mat| COLOR_SLOTS.iter().find_map(|slot| mat.textures.iter().find(|t| t.param == *slot)))
-            .map(|t| {
-                let key = m.embedded.as_ref().and_then(|e| e.by_hash(t.hash)).and_then(|x| x.asset_key).unwrap_or(t.key);
-                match pools.get(t.hash, key, t.h64) {
-                    Ok(_) => format!("r6m_{:08x}", t.hash),
-                    Err(e) => {
-                        missing.push(format!("{:08x}: {e}", t.hash));
-                        MISSING.to_string()
+        // Colour slots in priority order, then every other texture: the first
+        // one that decodes to a usable colour map wins (a colour slot can hold
+        // a normal map or a 4x4 default).
+        let tex = sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).map_or_else(
+            || MISSING.to_string(),
+            |mat| {
+                let mut cands: Vec<_> = COLOR_SLOTS.iter().filter_map(|slot| mat.textures.iter().find(|t| t.param == *slot)).collect();
+                cands.extend(mat.textures.iter().filter(|t| !COLOR_SLOTS.contains(&t.param)));
+                let mut errs = Vec::new();
+                for t in cands {
+                    let key = m.embedded.as_ref().and_then(|e| e.by_hash(t.hash)).and_then(|x| x.asset_key).unwrap_or(t.key);
+                    match pools.get(t.hash, key, t.h64) {
+                        Ok(_) => return format!("r6m_{:08x}", t.hash),
+                        Err(e) => errs.push(format!("{:08x}: {e}", t.hash)),
                     }
                 }
-            })
-            .unwrap_or_else(|| MISSING.to_string());
+                missing.extend(errs.into_iter().take(1));
+                MISSING.to_string()
+            },
+        );
         if tex != MISSING && !texs.contains(&tex) {
             texs.push(tex.clone());
         }
-        let mut kind = sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).map_or(0, |mat| kind_of(mat.bucket));
-        if kind == 2 {
-            kind = pools.decal_kind(&tex);
-        }
+        let kind = sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).map_or(0, |mat| kind_of(mat.bucket));
         push_geoms(&mut mesh.geoms, &sm.positions, &sm.indices, sm.uvs.as_deref(), sm.colors.as_deref(), &tex, kind);
     }
     Ok(Some((mesh, texs, missing, frag_out)))
@@ -573,31 +605,31 @@ fn sixng_mesh(ctx: &Ctx, pools: &Pools, an: &str, e: &Entry) -> Result<Built, St
                 continue;
             }
             let sh = md.shader_indices.get(k).and_then(|&s| info.shaders.get(s as usize));
-            let tex = sh
-                .and_then(|sh| {
-                    COLOR_SLOTS.iter().find_map(|slot| sh.textures.iter().find(|t| u32::from_str_radix(&t.param_hash, 16).ok() == Some(*slot)).map(|t| (sh, t)))
-                })
-                .map(|(sh, t)| {
-                    let hash = u32::from_str_radix(&t.hash32, 16).unwrap_or(0);
-                    let key = emb.as_ref().and_then(|e| e.by_hash(hash)).and_then(|x| x.asset_key).unwrap_or_else(|| key_of(sh, t.param));
-                    match pools.get(hash, key, u64::from_str_radix(&t.hash64, 16).unwrap_or(0)) {
-                        Ok(_) => format!("r6m_{hash:08x}"),
-                        Err(e) => {
-                            missing.push(format!("{hash:08x}: {e}"));
-                            MISSING.to_string()
+            let tex = sh.map_or_else(
+                || MISSING.to_string(),
+                |sh| {
+                    let ph = |t: &&sixng_core::drawable::TexRef| u32::from_str_radix(&t.param_hash, 16).ok();
+                    let mut cands: Vec<_> = COLOR_SLOTS.iter().filter_map(|slot| sh.textures.iter().find(|t| ph(t) == Some(*slot))).collect();
+                    cands.extend(sh.textures.iter().filter(|t| !ph(t).is_some_and(|h| COLOR_SLOTS.contains(&h))));
+                    let mut errs = Vec::new();
+                    for t in cands {
+                        let hash = u32::from_str_radix(&t.hash32, 16).unwrap_or(0);
+                        let key = emb.as_ref().and_then(|e| e.by_hash(hash)).and_then(|x| x.asset_key).unwrap_or_else(|| key_of(sh, t.param));
+                        match pools.get(hash, key, u64::from_str_radix(&t.hash64, 16).unwrap_or(0)) {
+                            Ok(_) => return format!("r6m_{hash:08x}"),
+                            Err(e) => errs.push(format!("{hash:08x}: {e}")),
                         }
                     }
-                })
-                .unwrap_or_else(|| MISSING.to_string());
+                    missing.extend(errs.into_iter().take(1));
+                    MISSING.to_string()
+                },
+            );
             if tex != MISSING && !texs.contains(&tex) {
                 texs.push(tex.clone());
             }
             let uv = m.uvs.iter().find(|u| u.0 == 3).map(|u| u.1.as_slice());
             let col: Option<Vec<u32>> = m.colors.as_ref().map(|c| c.iter().map(|x| u32::from_le_bytes(*x)).collect());
-            let mut kind = sh.map_or(0, |sh| kind_of(sh.flags.get(4).copied().unwrap_or(0)));
-            if kind == 2 {
-                kind = pools.decal_kind(&tex);
-            }
+            let kind = sh.map_or(0, |sh| kind_of(sh.flags.get(4).copied().unwrap_or(0)));
             push_geoms(&mut mesh.geoms, &m.positions, &m.indices, uv, col.as_deref(), &tex, kind);
         }
     }
@@ -644,6 +676,8 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
             return Ok(None);
         }
     };
+    let mut mesh = mesh;
+    promote_base_layer(&mut mesh);
     let is_frag = entry.is_some_and(|e| e.rtype.as_deref() == Some("ft"));
     if frag_out {
         ctx.skip(name, "fragment geometry outside declared bounds (converted anyway, check placement)", json!({"source": src}));
@@ -680,7 +714,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     let cache = ctx.o.work.join("fivem_tex_cache");
     fs::create_dir_all(&cache)?;
     let ttdb = ctx.o.game.join("data").join("ttdb");
-    let pools = Pools { game: ctx.o.game.clone(), catalog: crate::texture::Catalog::build(&ttdb).map_err(|e| eprintln!("{}: {e}", ttdb.display())).ok(), maps: Mutex::new(HashMap::new()), dir: cache.clone(), alpha: Mutex::new(HashMap::new()) };
+    let pools = Pools { game: ctx.o.game.clone(), catalog: crate::texture::Catalog::build(&ttdb).map_err(|e| eprintln!("{}: {e}", ttdb.display())).ok(), maps: Mutex::new(HashMap::new()), dir: cache.clone() };
     let by_off: HashMap<usize, &Entry> = index.entries.iter().map(|e| (e.off as usize, e)).collect();
     let res: Vec<(String, Result<Option<Arch>, String>)> =
         arch.par_iter().map(|&(n, off)| (n.to_string(), convert(ctx, &pools, n, off, by_off.get(&off).copied()))).collect();
