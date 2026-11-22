@@ -13,6 +13,9 @@
 //! per instance as t6m_intcol_<hash>_<n>.ybn in world space, each polygon
 //! carrying the room id of the room whose bounds contain it (6m bounds have
 //! no room ids; limbo when none), so the game knows the player is inside.
+//! Lights: the 6m light sets (`sixng lights` -> <work>/lights/levels/
+//! sets.jsonl) of each interior entity's archetype and of the entity itself
+//! become a CExtensionDefLightEffect on that MLO entity.
 //! Entity-set entities go in CMloEntitySets, off by default
 //! (ActivateInteriorEntitySet turns them on).
 
@@ -43,6 +46,11 @@ pub struct Child {
     lod: f32,
     room: u32,
     set: Option<u32>,
+    /// 6m lights (sixng `lights` sets: the archetype's plus the entity's),
+    /// entity-local
+    lights: Vec<Value>,
+    /// (meta file offset, entity index in that file): finds entity lights
+    src: (String, usize),
 }
 
 pub struct Interior {
@@ -147,7 +155,7 @@ pub fn load(ctx: &Ctx, dir: &Path, index: &ArchiveIndex) -> Vec<Interior> {
         }
         let mut children = Vec::new();
         for ix in inst["entities"].as_array().into_iter().flatten().chain(inst["entity_set_entities"].as_array().into_iter().flatten()) {
-            let Some(e) = ix.as_u64().and_then(|i| ents.get(i as usize)) else { continue };
+            let Some((ei, e)) = ix.as_u64().and_then(|i| Some((i as usize, ents.get(i as usize)?))) else { continue };
             let (Some(name), Some(off)) = (e["name"].as_str(), e["model_id"].as_str().and_then(|m| m.strip_prefix("levels.rpf@")).and_then(|h| usize::from_str_radix(h, 16).ok())) else {
                 continue;
             };
@@ -162,6 +170,8 @@ pub fn load(ctx: &Ctx, dir: &Path, index: &ArchiveIndex) -> Vec<Interior> {
                 lod: e["lod"]["lod_dist"].as_f64().unwrap_or(-1.0) as f32,
                 room: hx(&e["interior"]["room"]).unwrap_or(0),
                 set: hx(&e["interior"]["entity_set"]),
+                lights: Vec::new(),
+                src: (file.to_string(), ei),
             });
         }
         let bbox = serde_json::from_value(inst["bbox"].clone()).unwrap_or([[-1.0; 3], [1.0; 3]]);
@@ -179,7 +189,11 @@ pub fn load(ctx: &Ctx, dir: &Path, index: &ArchiveIndex) -> Vec<Interior> {
     if missing > 0 {
         ctx.skip(&format!("({missing} interior instances)"), "interior archetype file missing", json!({"count": missing}));
     }
-    let out: Vec<Interior> = by_hash.into_values().collect();
+    let mut out: Vec<Interior> = by_hash.into_values().collect();
+    let (arch_lights, ent_lights) = light_sets(ctx, &out);
+    for c in out.iter_mut().flat_map(|i| i.children.iter_mut()) {
+        c.lights = arch_lights.get(&crate::gta5::rsc::joaat(&c.name)).into_iter().chain(ent_lights.get(&c.src)).flatten().cloned().collect();
+    }
     if !out.is_empty() {
         let n: usize = out.iter().map(|i| i.instances.len()).sum();
         let np = out.iter().filter(|i| i.portals.is_some()).count();
@@ -292,6 +306,60 @@ const TCM_E: &[(u32, i32, u8, u8, i16, u32)] = &[
     (0x2543dc07, 40, 0x15, 0, 0, 0),
     (0x16af8fb2, 44, 0x15, 0, 0, 0),
 ];
+/// CExtensionDefLightEffect / CLightAttrDef (CodeWalker MetaTypes.cs).
+const LIGHTEXT: SInfo = SInfo { name: 0x27922c43, key: 0x913575d9, unk8: 0x400, size: 48, entries: LIGHTEXT_E };
+const LIGHTEXT_E: &[(u32, i32, u8, u8, i16, u32)] = &[
+    (0xe6e17f14, 8, 0x4a, 0, 0, 0),
+    (0xd8950703, 16, 0x33, 0, 0, 0),
+    (0x00000100, 0, 0x05, 0, 0, 0xf54b227b),
+    (0x10579df2, 32, 0x52, 0, 2, 0),
+];
+const LIGHTATTR: SInfo = SInfo { name: 0xf54b227b, key: 0x8cdc7d6c, unk8: 0x300, size: 160, entries: LIGHTATTR_E };
+const LIGHTATTR_E: &[(u32, i32, u8, u8, i16, u32)] = &[
+    (0x00000100, 0, 0x21, 0, 0, 0),
+    (0x39a625e4, 8, 0x50, 0, 0, 3),
+    (0x00000100, 0, 0x11, 0, 0, 0),
+    (0x5bdc13e3, 20, 0x50, 0, 2, 3),
+    (0xe4447b12, 23, 0x11, 0, 0, 0),
+    (0xefcd993d, 24, 0x21, 0, 0, 0),
+    (0x67d26872, 28, 0x15, 0, 0, 0),
+    (0x29d7f7b0, 32, 0x12, 0, 0, 0),
+    (0x1cbbbe30, 34, 0x11, 0, 0, 0),
+    (0x951bdd14, 35, 0x11, 0, 0, 0),
+    (0x8609d52c, 36, 0x15, 0, 0, 0),
+    (0xcc6806e8, 40, 0x21, 0, 0, 0),
+    (0x2bb342ba, 44, 0x21, 0, 0, 0),
+    (0x00000100, 0, 0x21, 0, 0, 0),
+    (0x64b51e10, 48, 0x50, 0, 13, 4),
+    (0xdae93379, 64, 0x11, 0, 0, 0),
+    (0xbd94be3a, 65, 0x11, 0, 0, 0),
+    (0x8bd6dabf, 66, 0x12, 0, 0, 0),
+    (0xd1e766df, 68, 0x15, 0, 0, 0),
+    (0x291d3720, 72, 0x21, 0, 0, 0),
+    (0x78f8388f, 76, 0x21, 0, 0, 0),
+    (0x00000100, 0, 0x11, 0, 0, 0),
+    (0x8822fbce, 80, 0x50, 0, 21, 3),
+    (0x26542706, 83, 0x11, 0, 0, 0),
+    (0xb34d77f7, 84, 0x21, 0, 0, 0),
+    (0x65a03c8b, 88, 0x21, 0, 0, 0),
+    (0xa470b2e2, 92, 0x21, 0, 0, 0),
+    (0x4df55f03, 96, 0x11, 0, 0, 0),
+    (0x73e32c64, 97, 0x11, 0, 0, 0),
+    (0xf7698288, 98, 0x11, 0, 0, 0),
+    (0x7b33e620, 99, 0x11, 0, 0, 0),
+    (0x38e6c28a, 100, 0x21, 0, 0, 0),
+    (0x88a2b1fb, 104, 0x21, 0, 0, 0),
+    (0x9639a173, 108, 0x21, 0, 0, 0),
+    (0x00000100, 0, 0x21, 0, 0, 0),
+    (0x34df9828, 112, 0x50, 0, 34, 3),
+    (0x00000100, 0, 0x21, 0, 0, 0),
+    (0x8e6f0ba9, 124, 0x50, 0, 36, 3),
+    (0x455c3938, 136, 0x21, 0, 0, 0),
+    (0xf8d9e344, 140, 0x21, 0, 0, 0),
+    (0x00000100, 0, 0x21, 0, 0, 0),
+    (0x2d3f79c0, 144, 0x50, 0, 40, 3),
+    (0x402d6d92, 156, 0x15, 0, 0, 0),
+];
 const T_UINT: u32 = 0x15;
 /// MetaTypeName.VECTOR4 (padded Vector3 arrays)
 const T_VEC4: u32 = 0x33;
@@ -307,11 +375,16 @@ fn infos(mb: &mut MB, s: &[&'static SInfo], e: &[&'static EInfo]) {
 
 /// CEntityDef / CMloInstanceDef head (128 bytes).
 fn entity(w: &mut W, arch: u32, guid: u32, pos: V3, rot: Q, sxy: f32, sz: f32, lod: f32) {
+    entity_ext(w, arch, guid, pos, rot, sxy, sz, lod, (0, 0));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn entity_ext(w: &mut W, arch: u32, guid: u32, pos: V3, rot: Q, sxy: f32, sz: f32, lod: f32, ext: (u64, u16)) {
     w.u32(0).u32(0).u32(arch).u32(32).u32(guid).zeros(12);
     w.v3(pos).f32(0.0).v4(rot);
     w.f32(sxy).f32(sz).i32(-1).f32(lod).f32(0.0);
     w.i32(5).u32(0).i32(0); // ORPHANHD, numChildren, PRI_REQUIRED
-    arr(w, 0, 0);
+    arr(w, ext.0, ext.1);
     w.i32(255).i32(255).u32(0).u32(0);
 }
 
@@ -364,6 +437,7 @@ pub fn emit(ctx: &Ctx, ints: &[Interior], an: &HashMap<String, String>, archetyp
     mb.ensure(meta::T_CMAPTYPES);
     let (mut ptrs, mut dropped, mut kept) = (Vec::new(), 0usize, Vec::new());
     let mut sets_report = Vec::new();
+    let mut n_lights = 0usize;
     for it in ints {
         let mut main: Vec<Vec<u8>> = Vec::new();
         let mut sets: BTreeMap<u32, Vec<Vec<u8>>> = BTreeMap::new();
@@ -379,8 +453,10 @@ pub fn emit(ctx: &Ctx, ints: &[Interior], an: &HashMap<String, String>, archetyp
                 continue;
             };
             let lod = if c.lod > 0.0 { c.lod } else { a.lod_dist };
+            let (ext, nl) = light_ext(&mut mb, &c.lights);
+            n_lights += nl;
             let mut w = W::new();
-            entity(&mut w, meta::hash(&a.name)?, guid, c.pos, c.rot, c.sxy, c.sz, lod);
+            entity_ext(&mut w, meta::hash(&a.name)?, guid, c.pos, c.rot, c.sxy, c.sz, lod, ext);
             guid += 1;
             let ori = [-c.rot[0], -c.rot[1], -c.rot[2], c.rot[3]];
             placed(a.bb_min, a.bb_max, c.pos, ori, [c.sxy, c.sxy, c.sz], rbox.entry(c.room).or_insert(EMPTY));
@@ -477,6 +553,9 @@ pub fn emit(ctx: &Ctx, ints: &[Interior], an: &HashMap<String, String>, archetyp
     if cols > 0 {
         eprintln!("interiors: {cols} collision ybns with room ids");
     }
+    if n_lights > 0 {
+        eprintln!("interiors: {n_lights} lights");
+    }
     if dropped > 0 {
         ctx.skip(&format!("({dropped} interior entities)"), "interior entity archetype not converted", json!({"count": dropped}));
     }
@@ -491,7 +570,7 @@ pub fn emit(ctx: &Ctx, ints: &[Interior], an: &HashMap<String, String>, archetyp
     let n = ptrs.len() as u16;
     let pb: Vec<u8> = ptrs.iter().flat_map(|p| p.to_le_bytes()).collect();
     let ap = mb.add_item(meta::T_POINTER, pb);
-    infos(&mut mb, &[&meta::CENTITYDEF, &ROOM, &PORTAL, &ESET, &TCM, &MLOARCH, &meta::CMAPTYPES], &[&meta::E_LODTYPE, &meta::E_PRIORITY, &meta::E_ASSETTYPE]);
+    infos(&mut mb, &[&meta::CENTITYDEF, &ROOM, &PORTAL, &ESET, &TCM, &MLOARCH, &LIGHTEXT, &LIGHTATTR, &meta::CMAPTYPES], &[&meta::E_LODTYPE, &meta::E_PRIORITY, &meta::E_ASSETTYPE]);
     let mut w = W::new();
     w.u32(0).u32(0);
     arr(&mut w, 0, 0);
@@ -558,9 +637,11 @@ pub fn emit(ctx: &Ctx, ints: &[Interior], an: &HashMap<String, String>, archetyp
     Ok(())
 }
 
-/// MLO lodDist from the interior's bounding radius (100..500 m).
+/// MLO lodDist from the interior's bounding radius (60..200 m): the
+/// interior's contents only stream (and fill the building pool) when the
+/// player is inside or near, as vanilla interiors do.
 fn lod_of(r: f32) -> f32 {
-    (r * 10.0).clamp(100.0, 500.0)
+    (r * 2.0 + 50.0).clamp(60.0, 200.0)
 }
 
 /// 6m surface id -> GTA V material (as collision.rs; DEFAULT when unknown).
@@ -639,4 +720,108 @@ fn collision(ctx: &Ctx, levels: &Path, e: &Entry, it: &Interior, order: &[u32], 
         n += 1;
     }
     Ok(n)
+}
+
+type LightMaps = (HashMap<u32, Vec<Value>>, HashMap<(String, usize), Vec<Value>>);
+
+/// 6m light sets from `<work>/lights/levels/sets.jsonl` (`sixng lights`)
+/// that `ints`' children use: by archetype hash, and by (meta file offset,
+/// entity index). Each light gets its set's offset added to its position.
+/// Empty when absent.
+fn light_sets(ctx: &Ctx, ints: &[Interior]) -> LightMaps {
+    let (mut by_arch, mut by_ent): LightMaps = Default::default();
+    let kids = || ints.iter().flat_map(|i| i.children.iter());
+    let want_arch: std::collections::HashSet<String> = kids().map(|c| format!("\"archetype\":\"{:08x}\"", crate::gta5::rsc::joaat(&c.name))).collect();
+    let want_file: std::collections::HashSet<String> = kids().map(|c| format!("\"id\":\"levels.rpf@{}\"", c.src.0)).collect();
+    if want_arch.is_empty() {
+        return (by_arch, by_ent);
+    }
+    let Ok(text) = fs::read_to_string(ctx.o.work.join("lights").join("levels").join("sets.jsonl")) else { return (by_arch, by_ent) };
+    let field = |l: &str, k: &str| -> Option<String> {
+        let i = l.find(k)?;
+        let rest = &l[i + k.len()..];
+        let s = rest.find('"')? + 1;
+        let e = s + rest[s..].find('"')?;
+        Some(format!("{k}\"{}\"", &rest[s..e]))
+    };
+    for l in text.lines() {
+        let arch_hit = field(l, "\"archetype\":").is_some_and(|a| want_arch.contains(&a));
+        let file_hit = l.contains("\"owner\":\"entity\"") && field(l, "\"id\":").is_some_and(|a| want_file.contains(&a));
+        if !arch_hit && !file_hit {
+            continue;
+        }
+        let Ok(s) = serde_json::from_str::<Value>(l) else { continue };
+        let off = f3(&s["ext_offset"]);
+        let lights: Vec<Value> = s["lights"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|v| {
+                let mut v = v.clone();
+                let p = f3(&v["position"]);
+                v["position"] = json!([p[0] + off[0], p[1] + off[1], p[2] + off[2]]);
+                v
+            })
+            .collect();
+        match (s["owner"].as_str(), hx(&s["archetype"])) {
+            (Some("archetype"), Some(h)) => {
+                by_arch.entry(h).or_insert(lights);
+            }
+            (Some("entity"), _) => {
+                let (Some(id), Some(i)) = (s["id"].as_str().and_then(|f| f.strip_prefix("levels.rpf@")), s["entity_index"].as_u64()) else { continue };
+                by_ent.entry((id.to_string(), i as usize)).or_default().extend(lights);
+            }
+            _ => {}
+        }
+    }
+    (by_arch, by_ent)
+}
+
+/// One CExtensionDefLightEffect holding `lights` as CLightAttrDefs (6m
+/// light type 1/2/4 = GTA point/spot/capsule; others dropped). Returns
+/// the entity's extensions array and the light count.
+fn light_ext(mb: &mut MB, lights: &[Value]) -> ((u64, u16), usize) {
+    let rgb = |v: &Value| {
+        let x = v.as_str().and_then(|s| u32::from_str_radix(s, 16).ok()).unwrap_or(0xffffff);
+        [(x >> 16) as u8, (x >> 8) as u8, x as u8]
+    };
+    // 6m intensities run ~25x GTA's (median 50 vs ~2); T6M_LIGHT_SCALE overrides
+    let scale = std::env::var("T6M_LIGHT_SCALE").ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.04);
+    let mut items = Vec::new();
+    for l in lights {
+        let ty = l["light_type"].as_u64().unwrap_or(0) as u8;
+        if !matches!(ty, 1 | 2 | 4) {
+            continue;
+        }
+        let fl = |k: &str, h: &str, d: f32| l[k].as_f64().or_else(|| l["fields"][h].as_f64()).map(|x| x as f32).unwrap_or(d);
+        let byte = |k: &str| l[k].as_u64().unwrap_or(0) as u8;
+        let (c, oc) = (rgb(&l["colour"]), rgb(&l["colour2"]));
+        let time = l["time_flags"].as_str().and_then(|s| u32::from_str_radix(s, 16).ok()).unwrap_or(0xffffff);
+        let mut w = W::new();
+        w.zeros(8).v3(f3(&l["position"]));
+        w.u8(c[0]).u8(c[1]).u8(c[2]).u8(byte("flashiness"));
+        w.f32(fl("intensity", "efcd993d", 1.0) * scale).u32(0).u16(0).u8(ty).u8(0).u32(time);
+        w.f32(fl("range", "cc6806e8", 5.0)).f32(fl("falloff_exponent", "2bb342ba", 8.0));
+        w.zeros(16); // cullingPlane
+        w.u8(0).u8(0).u16(0).u32(0); // shadowBlur, padding
+        w.f32(fl("vol_intensity", "291d3720", 0.0)).f32(fl("", "78f8388f", 1.0));
+        w.u8(oc[0]).u8(oc[1]).u8(oc[2]).u8(0);
+        w.f32(fl("", "b34d77f7", 1.0)).f32(fl("corona_size", "65a03c8b", 0.0)).f32(fl("", "a470b2e2", 1.0));
+        w.u8(byte("light_fade_distance")).u8(byte("shadow_fade_distance")).u8(0).u8(0);
+        w.f32(fl("", "38e6c28a", 0.01)).f32(fl("corona_intensity", "88a2b1fb", 0.0)).f32(fl("", "9639a173", 0.1));
+        w.v3(f3(&l["direction"])).v3(f3(&l["tangent"]));
+        w.f32(fl("cone_inner", "455c3938", 5.0)).f32(fl("cone_outer", "f8d9e344", 60.0));
+        w.v3([0.0; 3]).u32(0); // extents, projectedTextureKey
+        debug_assert_eq!(w.len(), 160);
+        items.push(w.b);
+    }
+    if items.is_empty() {
+        return ((0, 0), 0);
+    }
+    let n = items.len();
+    let lp = mb.add_item(LIGHTATTR.name, items.concat());
+    let mut w = W::new();
+    w.u32(0).u32(0).u32(0).u32(0).v3([0.0; 3]).f32(0.0);
+    arr(&mut w, lp, n as u16);
+    (mb.ptr_array(LIGHTEXT.name, vec![w.b]), n)
 }
