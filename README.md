@@ -67,6 +67,7 @@ What works today:
 - [x] Quality audit: UVs no longer V-flipped (6m is DirectX top-left), COLOR0 mapped to GTA V ambient (r,r,255,255) so buildings are not black under artificial light
 - [x] Buildings use `normal_spec.sps` with their real 6m normal maps (7624a1a)
 - [x] Colour textures picked by 6m slot hash, glass on glass_env with its real diffuse, texture size from texel density (77ad6e2)
+- [x] standard_dirt grime layer (diffusetex2) as a COLOR0.a-gated decal pass, using the vendored SixNG ShaderConst reader (1fd492e)
 - [x] Decals keep 6m vertex alpha (edge fades, 9c4c3cd)
 - [x] Collision in 128 m cells, welded 5 cm and simplified per material (fa3e66f)
 - [x] Per-placement tint rows: placements with `tintValue` > 0 use an archetype variant `<name>__tint<row>`, shared by every placement with that row
