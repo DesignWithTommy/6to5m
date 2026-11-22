@@ -67,6 +67,7 @@ What works today:
 - [x] Quality audit: UVs no longer V-flipped (6m is DirectX top-left), COLOR0 mapped to GTA V ambient (r,r,255,255) so buildings are not black under artificial light
 - [x] Buildings use `normal_spec.sps` with their real 6m normal maps (7624a1a)
 - [x] Packed masks no longer used as diffuse (linear-stored slots rejected), big walls 1024-2048 px textures, 6m glass to translucent alpha.sps (ad84899)
+- [x] Decals keep 6m vertex alpha (edge fades, 9c4c3cd)
 - [x] Per-placement tint rows: placements with `tintValue` > 0 use an archetype variant `<name>__tint<row>`, shared by every placement with that row
 - [ ] Prop batch per-instance tint (`ba049770` +0x34 RGBA)
 - [x] Fragments with physics: fragment props become dynamic `.yft` (one rigid piece, box bound, 6m collider mass; breakable multi-part props stay one piece)
