@@ -5,18 +5,21 @@
 //! t6m_int_X_Y.ymap cells. Entity archetypes come from t6m_bld.ytyp
 //! (converted by buildings.rs).
 //!
-//! Portals are not decoded from 6m yet, and converted interior collision
-//! carries no room ids, so the game never puts the player "inside" a room:
-//! every entity is attached to limbo (room 0, drawn from outside). The
-//! decoded rooms are still written (name, bounds from their entities) so
-//! the structure is there once portals decode. Entity-set entities go in
-//! CMloEntitySets, off by default (ActivateInteriorEntitySet turns them on).
+//! Rooms and portals are read from the 6m CMloArchetypeDef (`995072ca`
+//! portals: roomFrom/roomTo indices, 4 corners) and each entity goes in its
+//! 6m room. Interiors whose portals do not decode keep every entity in
+//! limbo (room 0, drawn from outside); T6M_MLO_LIMBO=1 forces that for all.
+//! Converted interior collision carries no room ids yet, so in game the
+//! player may count as outside and see rooms only through portals.
+//! Entity-set entities go in CMloEntitySets, off by default
+//! (ActivateInteriorEntitySet turns them on).
 
 use super::super::Ctx;
 use super::emit_meta;
 use crate::gta5::meta::{self, arr, Archetype, EInfo, SInfo, MB};
 use crate::gta5::rsc::W;
 use serde_json::{json, Value};
+use sixng_core::{meta7a, resource::Resource, scan::ArchiveIndex};
 use std::{
     collections::{BTreeMap, HashMap},
     fs,
@@ -48,6 +51,40 @@ pub struct Interior {
     pub children: Vec<Child>,
     /// (position, rotation as stored: world orientation, not inverted)
     instances: Vec<(V3, Q)>,
+    /// decoded 6m portals; None = not decoded (entities stay in limbo)
+    portals: Option<Vec<Portal>>,
+}
+
+#[derive(Clone)]
+struct Portal {
+    from: u32,
+    to: u32,
+    corners: [V3; 4],
+}
+
+/// Portals of every interior archetype in one 6m meta file, by name hash.
+fn file_portals(levels: &Path, index: &ArchiveIndex, off: u64) -> HashMap<u32, Vec<Portal>> {
+    let mut out = HashMap::new();
+    let Some(e) = index.entries.iter().find(|e| e.off == off) else { return out };
+    let Ok(r) = Resource::load_sys(levels, e) else { return out };
+    let Some(m) = meta7a::Meta::parse(&r) else { return out };
+    let get = |v: &Value, h: u32| v.get(meta7a::field_name(h)).or_else(|| v.get(format!("{h:08x}"))).cloned();
+    for (mlo, o) in meta7a::mlos(&m).iter().zip(m.objects(meta7a::MLO_ARCHETYPE)) {
+        let Some(v) = m.object(meta7a::MLO_ARCHETYPE, o, 4) else { continue };
+        let Some(list) = get(&v, 0x89f7_e992).and_then(|x| x.as_array().cloned()) else { continue };
+        let mut ps = Vec::new();
+        for p in &list {
+            let n = |h| get(p, h).and_then(|x| x.as_u64()).map(|x| x as u32);
+            let cs: Vec<V3> = get(p, 0x4f42_aeb3).and_then(|x| x.as_array().cloned()).unwrap_or_default().iter().map(f3).collect();
+            if let (Some(from), Some(to), Ok(corners)) = (n(0xf470_d2fd), n(0x9b64_9621), <[V3; 4]>::try_from(cs)) {
+                ps.push(Portal { from, to, corners });
+            }
+        }
+        if ps.len() == list.len() {
+            out.insert(mlo.name, ps);
+        }
+    }
+    out
 }
 
 fn f3(v: &Value) -> V3 {
@@ -67,7 +104,10 @@ fn qrot(q: Q, v: V3) -> V3 {
 }
 
 /// Interiors whose instances fall in the region, one per archetype.
-pub fn load(ctx: &Ctx, dir: &Path) -> Vec<Interior> {
+pub fn load(ctx: &Ctx, dir: &Path, index: &ArchiveIndex) -> Vec<Interior> {
+    let levels = ctx.o.game.join("levels.rpf");
+    let limbo = std::env::var_os("T6M_MLO_LIMBO").is_some();
+    let mut meta: HashMap<String, HashMap<u32, Vec<Portal>>> = HashMap::new();
     let Ok(text) = fs::read_to_string(dir.join("interiors.jsonl")) else { return Vec::new() };
     let mut files: HashMap<String, Option<Arc<Value>>> = HashMap::new();
     let mut by_hash: BTreeMap<u32, Interior> = BTreeMap::new();
@@ -120,7 +160,13 @@ pub fn load(ctx: &Ctx, dir: &Path) -> Vec<Interior> {
             });
         }
         let bbox = serde_json::from_value(inst["bbox"].clone()).unwrap_or([[-1.0; 3], [1.0; 3]]);
-        by_hash.insert(h, Interior { hash: h, bbox, rooms, children, instances: vec![(ip, ri)] });
+        let portals = if limbo {
+            None
+        } else {
+            let off = u64::from_str_radix(file, 16).unwrap_or(0);
+            meta.entry(file.to_string()).or_insert_with(|| file_portals(&levels, index, off)).get(&h).cloned().filter(|p| p.iter().all(|p| (p.from as usize) < rooms.len() && (p.to as usize) < rooms.len()))
+        };
+        by_hash.insert(h, Interior { hash: h, bbox, rooms, children, instances: vec![(ip, ri)], portals });
     }
     if missing > 0 {
         ctx.skip(&format!("({missing} interior instances)"), "interior archetype file missing", json!({"count": missing}));
@@ -128,7 +174,8 @@ pub fn load(ctx: &Ctx, dir: &Path) -> Vec<Interior> {
     let out: Vec<Interior> = by_hash.into_values().collect();
     if !out.is_empty() {
         let n: usize = out.iter().map(|i| i.instances.len()).sum();
-        eprintln!("interiors: {} MLO archetypes, {n} instances, {} entities", out.len(), out.iter().map(|i| i.children.len()).sum::<usize>());
+        let np = out.iter().filter(|i| i.portals.is_some()).count();
+        eprintln!("interiors: {} MLO archetypes ({np} with portals), {n} instances, {} entities", out.len(), out.iter().map(|i| i.children.len()).sum::<usize>());
     }
     out
 }
@@ -238,6 +285,8 @@ const TCM_E: &[(u32, i32, u8, u8, i16, u32)] = &[
     (0x16af8fb2, 44, 0x15, 0, 0, 0),
 ];
 const T_UINT: u32 = 0x15;
+/// MetaTypeName.VECTOR4 (padded Vector3 arrays)
+const T_VEC4: u32 = 0x33;
 
 fn infos(mb: &mut MB, s: &[&'static SInfo], e: &[&'static EInfo]) {
     for x in e {
@@ -308,6 +357,10 @@ pub fn emit(ctx: &Ctx, ints: &[Interior], an: &HashMap<String, String>, archetyp
         let mut sets: BTreeMap<u32, Vec<Vec<u8>>> = BTreeMap::new();
         let mut rbox: HashMap<u32, [V3; 2]> = HashMap::new();
         let mut guid = 1u32;
+        let room_ix: HashMap<u32, u32> = it.rooms.iter().enumerate().map(|(i, r)| (r.0, i as u32)).collect();
+        let roomed = it.portals.is_some();
+        let mut att: Vec<Vec<u32>> = vec![Vec::new(); it.rooms.len()];
+        let mut set_loc: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
         for c in &it.children {
             let Some(a) = an.get(&c.name).and_then(|n| by_an.get(n.as_str())) else {
                 dropped += 1;
@@ -319,18 +372,24 @@ pub fn emit(ctx: &Ctx, ints: &[Interior], an: &HashMap<String, String>, archetyp
             guid += 1;
             let ori = [-c.rot[0], -c.rot[1], -c.rot[2], c.rot[3]];
             placed(a.bb_min, a.bb_max, c.pos, ori, [c.sxy, c.sxy, c.sz], rbox.entry(c.room).or_insert(EMPTY));
+            let ri = if roomed { room_ix.get(&c.room).copied().unwrap_or(0) } else { 0 };
             match c.set {
-                Some(s) => sets.entry(s).or_default().push(w.b),
-                None => main.push(w.b),
+                Some(s) => {
+                    sets.entry(s).or_default().push(w.b);
+                    set_loc.entry(s).or_default().push(ri);
+                }
+                None => {
+                    att[ri as usize].push(main.len() as u32);
+                    main.push(w.b);
+                }
             }
         }
         if main.is_empty() && sets.is_empty() {
             continue;
         }
         kept.push(it);
-        let n_main = main.len() as u32;
         let (ep, en) = mb.ptr_array(meta::CENTITYDEF.name, main);
-        // rooms: limbo (index 0) holds every entity, see module doc
+        let ports = it.portals.clone().unwrap_or_default();
         let mut all = EMPTY;
         for b in rbox.values() {
             grow(&mut all, b[0]);
@@ -339,24 +398,36 @@ pub fn emit(ctx: &Ctx, ints: &[Interior], an: &HashMap<String, String>, archetyp
         let mut rooms = Vec::new();
         for (i, (h, nm)) in it.rooms.iter().enumerate() {
             let label = nm.clone().unwrap_or_else(|| if i == 0 { "limbo".into() } else { format!("room_{h:08x}") });
-            let bb = if i == 0 { all } else { rbox.get(h).copied().filter(|b| b[0][0] <= b[1][0]).unwrap_or(it.bbox) };
+            let bb = if i == 0 && !roomed { all } else { rbox.get(h).copied().filter(|b| b[0][0] <= b[1][0]).unwrap_or(it.bbox) };
             let (sp, sn) = mb.add_string(&label);
-            let att: Vec<u32> = if i == 0 { (0..n_main).collect() } else { Vec::new() };
-            let (ap, an_) = uints(&mut mb, T_UINT, &att);
+            let (ap, an_) = uints(&mut mb, T_UINT, &att[i]);
+            let pc = ports.iter().filter(|p| p.from as usize == i || p.to as usize == i).count() as u32;
             let mut w = W::new();
             w.u32(0).u32(0);
             arr(&mut w, sp, sn);
             w.zeros(8).v3(bb[0]).f32(0.0).v3(bb[1]).f32(0.0);
-            w.f32(1.0).u32(0).u32(0).u32(if i == 0 { 0 } else { 96 }).u32(0).i32(0).i32(-1).u32(0);
+            w.f32(1.0).u32(0).u32(0).u32(if i == 0 { 0 } else { 96 }).u32(pc).i32(0).i32(-1).u32(0);
             arr(&mut w, ap, an_);
             rooms.push(w.b);
         }
         let nrooms = rooms.len() as u16;
         let rp = mb.add_item(ROOM.name, rooms.concat());
+        let mut pitems = Vec::new();
+        for p in &ports {
+            let cb: Vec<u8> = p.corners.iter().flat_map(|c| [c[0], c[1], c[2], 0.0]).flat_map(f32::to_le_bytes).collect();
+            let cp = mb.add_item(T_VEC4, cb);
+            let mut w = W::new();
+            w.u32(0).u32(0).u32(p.from).u32(p.to).u32(0).u32(0).u32(0).u32(0);
+            arr(&mut w, cp, 4);
+            arr(&mut w, 0, 0);
+            pitems.push(w.b);
+        }
+        let npt = pitems.len() as u16;
+        let pp_ = if pitems.is_empty() { 0 } else { mb.add_item(PORTAL.name, pitems.concat()) };
         let mut set_items = Vec::new();
         for (h, ents) in sets {
             sets_report.push(json!({"interior": name(it.hash), "set": format!("{h:08x}"), "entities": ents.len()}));
-            let (lp, ln) = uints(&mut mb, T_UINT, &vec![0u32; ents.len()]);
+            let (lp, ln) = uints(&mut mb, T_UINT, &set_loc[&h]);
             let (pp, pn) = mb.ptr_array(meta::CENTITYDEF.name, ents);
             let mut w = W::new();
             w.u32(0).u32(0).u32(h).u32(0);
@@ -378,7 +449,7 @@ pub fn emit(ctx: &Ctx, ints: &[Interior], an: &HashMap<String, String>, archetyp
         w.zeros(8).u32(0).u32(0); // mloFlags
         arr(&mut w, ep, en);
         arr(&mut w, rp, nrooms);
-        arr(&mut w, 0, 0); // portals
+        arr(&mut w, pp_, npt); // portals
         arr(&mut w, sp, nsets);
         arr(&mut w, 0, 0); // timeCycleModifiers
         w.zeros(8);
