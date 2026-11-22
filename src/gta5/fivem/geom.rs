@@ -12,6 +12,13 @@ pub type V3 = [f32; 3];
 /// `kind`: GTA V bucket (ydr::Geom::kind). Decals are lifted 5 mm along
 /// their normals so they do not z-fight with the surface below.
 pub fn push_geoms(out: &mut Vec<Geom>, pos: &[V3], idx: &[u32], uvs: Option<&[[f32; 2]]>, colours: Option<&[u32]>, tex: &str, kind: u8) {
+    push_geoms_n(out, pos, idx, None, uvs, colours, tex, kind)
+}
+
+/// `push_geoms` with source vertex normals (used when given for every
+/// vertex; otherwise area-weighted face normals are computed).
+#[allow(clippy::too_many_arguments)]
+pub fn push_geoms_n(out: &mut Vec<Geom>, pos: &[V3], idx: &[u32], normals: Option<&[V3]>, uvs: Option<&[[f32; 2]]>, colours: Option<&[u32]>, tex: &str, kind: u8) {
     let n = pos.len();
     // Dense meshes: collapse edges within 0.5% of the mesh size. UV and
     // colour seams are separate vertices, so meshopt keeps them as locked
@@ -67,7 +74,7 @@ pub fn push_geoms(out: &mut Vec<Geom>, pos: &[V3], idx: &[u32], uvs: Option<&[[f
         for &i in t {
             let v = *remap.entry(i).or_insert_with(|| {
                 let s = i as usize;
-                let nn = unit(nrm[s]);
+                let nn = normals.filter(|v| v.len() == n).map_or_else(|| unit(nrm[s]), |v| unit(v[s]));
                 let p = [pos[s][0] + nn[0] * lift, pos[s][1] + nn[1] * lift, pos[s][2] + nn[2] * lift];
                 let col = colours.map_or(0xFFFF_FFFF, |c| c[s] | 0xFF00_0000);
                 let uv = uvs.map_or([0.0, 0.0], |u| u[s]);

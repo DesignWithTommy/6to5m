@@ -25,6 +25,8 @@ pub struct Mesh {
     pub shader: Option<usize>,
     /// Bone name hashes of the owning model's palette.
     pub palette: Option<Vec<u32>>,
+    /// Source vertex normals (octahedral stream), when they fit the faces.
+    pub normals: Option<Vec<V3>>,
 }
 
 pub struct TexRef {
@@ -776,6 +778,7 @@ impl<'a> ModelReader<'a> {
         let vertex = &self.gfx[data..data + length];
         let mut positions = Vec::with_capacity(vertex_count);
         let mut quantized = None;
+        let mut axis_used = 2;
         if position_size == 12 && format == 6 {
             req(r32(vertex, 0)? & 127 == 0x63)?;
             for i in 0..vertex_count {
@@ -788,6 +791,7 @@ impl<'a> ModelReader<'a> {
             let span = [16_777_215.0, 16_777_215.0, 65535.0];
             let end = [0, 1, 2].map(|k| bias[k] + scale[k] * span[k]);
             quantized = Some((reorder(bias, axis), reorder(end, axis)));
+            axis_used = axis;
             for i in 0..vertex_count {
                 let q = r64(vertex, position_offset + i * 8)?;
                 let p = [
@@ -891,8 +895,61 @@ impl<'a> ModelReader<'a> {
         req(tight || conservative)?;
         let uvs = self.read_uvs(fvf, vertex_count, vertex);
         let colors = self.read_colors(fvf, vertex_count, vertex);
-        Ok(Mesh { name, positions, indices, uvs, colors, shader: None, palette: None })
+        let normals = read_normals(vertex, &positions, &indices, axis_used);
+        Ok(Mesh { name, positions, indices, uvs, colors, shader: None, palette: None, normals })
     }
+}
+
+/// Vertex normals from header stream word 2 (one dword per vertex,
+/// octahedral 10:10 or 8:8), as TomBox `tools/rage/meshlets.py` reads them
+/// from the game's mesh shader. The shader's selector bit is unreliable, so
+/// the encoding (and whether the position axis order applies) is the one
+/// whose normals agree best with the face normals; none below 0.5 -> None.
+fn read_normals(vertex: &[u8], pos: &[V3], idx: &[u32], axis: u32) -> Option<Vec<V3>> {
+    let w = r32(vertex, 8).ok()?;
+    let (off, stride) = (((w >> 7) & 0x1ff_fffc) as usize, (w >> 3) & 60);
+    let n = pos.len();
+    if w == 0 || stride != 4 || off < 16 || off.checked_add(n * 4)? > vertex.len() {
+        return None;
+    }
+    let oct = |x: f32, y: f32| {
+        let z = 1.0 - x.abs() - y.abs();
+        let t = (-z).max(0.0);
+        let (x, y) = (if x >= 0.0 { x - t } else { x + t }, if y >= 0.0 { y - t } else { y + t });
+        let l = (x * x + y * y + z * z).sqrt();
+        if l > 0.0 { [x / l, y / l, z / l] } else { [0.0, 0.0, 1.0] }
+    };
+    let word = |i: usize| u32::from_le_bytes(vertex[off + 4 * i..off + 4 * i + 4].try_into().unwrap());
+    let d10 = |i: usize| { let d = word(i); oct((d & 0x3ff) as f32 / 511.5 - 1.0, ((d >> 10) & 0x3ff) as f32 / 511.5 - 1.0) };
+    let d8 = |i: usize| { let d = word(i); oct((d & 0xff) as f32 / 127.5 - 1.0, ((d >> 8) & 0xff) as f32 / 127.5 - 1.0) };
+    // face normals at sampled triangles' first vertex
+    let mut acc = Vec::new();
+    let step = (idx.len() / 3 / 2000).max(1);
+    for t in idx.chunks_exact(3).step_by(step) {
+        let (a, b, c) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
+        let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        let f = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+        let l = (f[0] * f[0] + f[1] * f[1] + f[2] * f[2]).sqrt();
+        if l > 0.0 {
+            acc.push((t[0] as usize, [f[0] / l, f[1] / l, f[2] / l]));
+        }
+    }
+    if acc.is_empty() {
+        return None;
+    }
+    let dec: [&dyn Fn(usize) -> V3; 2] = [&d10, &d8];
+    let mut best = (0.5f32, None);
+    for (di, d) in dec.iter().enumerate() {
+        for ax in [2, axis] {
+            let fit = acc.iter().map(|(i, f)| { let p = reorder(d(*i), ax); p[0] * f[0] + p[1] * f[1] + p[2] * f[2] }).sum::<f32>() / acc.len() as f32;
+            if fit > best.0 {
+                best = (fit, Some((di, ax)));
+            }
+        }
+    }
+    let (di, ax) = best.1?;
+    Some((0..n).map(|i| reorder(dec[di](i), ax)).collect())
 }
 
 fn reorder(p: V3, axis: u32) -> V3 {

@@ -2,7 +2,7 @@
 //! per archetype (shared texture dictionaries), t6m_bld.ytyp (bounds from
 //! the mesh, textureDictionary set) and 512 m t6m_bld_XX_YY.ymap cells.
 
-use super::geom::{aabb, push_geoms, V3};
+use super::geom::{aabb, push_geoms, push_geoms_n, V3};
 #[path = "interiors.rs"]
 mod interiors;
 #[path = "texopt.rs"]
@@ -659,11 +659,11 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: us
                 if t != MISSING && !texs.contains(&t) {
                     texs.push(t.clone());
                 }
-                push_geoms(&mut mesh.geoms, &sm.positions, &idx, sm.uvs.as_deref(), sm.colors.as_deref(), &t, kind);
+                push_geoms_n(&mut mesh.geoms, &sm.positions, &idx, sm.normals.as_deref(), sm.uvs.as_deref(), sm.colors.as_deref(), &t, kind);
             }
             continue;
         }
-        push_geoms(&mut mesh.geoms, &sm.positions, &sm.indices, sm.uvs.as_deref(), sm.colors.as_deref(), &tex, kind);
+        push_geoms_n(&mut mesh.geoms, &sm.positions, &sm.indices, sm.normals.as_deref(), sm.uvs.as_deref(), sm.colors.as_deref(), &tex, kind);
     }
     Ok(Some((mesh, texs, missing, frag_out)))
 }
