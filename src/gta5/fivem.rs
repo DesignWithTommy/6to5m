@@ -24,6 +24,7 @@ mod collision;
 mod geom;
 pub mod split;
 mod terrain;
+mod vehicles;
 pub mod verify;
 
 use memmap2::Mmap;
@@ -62,7 +63,8 @@ usage: 6ixpack fivem build --game <dir> --out <resource dir> [options]
   --split <metres>     also write <out>/[<name>]/: one resource per square region
                        (rounded to 512 m cells) plus <name>_common (ytyps, LOD/SLOD
                        ymaps, shared txds, terrain, water); see ensure.cfg there
-  --split-max <MB>     quarter any region resource bigger than this (default 1024)";
+  --split-max <MB>     quarter any region resource bigger than this (default 1024)
+also: 6ixpack fivem vehicle <name> --game <dir> --out <dir>   (one 6m vehicle -> FiveM vehicle resource; --help)";
 
 const TOOL: &str = "fivem-20";
 
@@ -278,6 +280,7 @@ fn resolve_placements(p: &std::path::Path) -> Result<PathBuf, String> {
 pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
     match args.first().map(String::as_str) {
+        Some("vehicle") => return vehicles::run(&args[1..]),
         Some("build") => {}
         _ => {
             println!("{USAGE}");

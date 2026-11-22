@@ -20,6 +20,7 @@ Claude Code: `claude mcp add 6to5m -- C:/path/to/6ixpack.exe mcp`
 cargo build --release                       # -> target/release/6ixpack.exe (pure Rust, no DLLs)
 6ixpack levels.rpf out/                     # extract an RPF9 archive
 6ixpack fivem build --game <GTA VI dir> --out <resource> --bbox x0,y0,x1,y1   # map area -> FiveM resource
+6ixpack fivem vehicle chino --game <GTA VI dir> --out <resource>              # one vehicle -> FiveM vehicle resource
 ```
 
 ## Status
@@ -30,6 +31,7 @@ What works today:
 - **Textures**: RAGE pools and TTPF stores to DDS/PNG; BCPack (Xbox hardware compression) decoded in pure Rust for BC1, BC3, BC4, BC5 and BC7 (BC6H partly).
 - **Models**: drawables and fragments to OBJ/GLB.
 - **GTA V / FiveM** (`6ixpack fivem build`): a ready resource for any map area.
+  - `6ixpack fivem vehicle <name>`: a 6m vehicle (`<name>`, `_mid`, `_hi` fragments) to `<model>.yft`, `<model>_hi.yft` and `<model>.ytd` (GTA V bone names, skeleton pruned to 255 bones, rigid parts per bone, box physics for chassis and 4 wheels), plus vehicles/handling/carvariations/carcols meta and fxmanifest. Doors stay shut, wheels are generated tyres, no paint colours.
   - Terrain tiles, water and buildings/props as ydr, with ytd textures re-encoded to DXT1/DXT5.
   - Textures picked from every material slot until one is a real colour map (normal, mask and flat maps rejected); texture size capped by prop size (128 px for small clutter).
   - Road and apron tiles: one opaque base layer plus alpha-blended decal layers, with the terrain sunk underneath.
@@ -87,6 +89,7 @@ Pure Rust, no C code, DLLs or external tools. `cargo build --release` → `targe
 6ixpack sixng   <args...>               placements, vehicles, GLB, names, interiors, movies, ...
 6ixpack convert <kind> ...              GTA V files: ytd, ydr, ybn, ymap, ytyp
 6ixpack fivem build --game .. --out ..   ready FiveM map resource (terrain, buildings, water)
+6ixpack fivem vehicle <name> ..          FiveM vehicle resource from one 6m vehicle
 6ixpack mcp                             stdio MCP server: extract, audio, texture, model, convert, sixng, fivem tools
 ```
 

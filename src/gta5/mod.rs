@@ -6,6 +6,7 @@ pub mod meta;
 pub mod rsc;
 pub mod ybn;
 pub mod ydr;
+pub mod yft;
 pub mod ytd;
 
 pub const USAGE: &str = "\

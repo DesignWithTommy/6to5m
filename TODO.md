@@ -28,6 +28,13 @@ Next, from the FiveM port's requests:
 - LOD/SLOD drawables without a model link (unnamed hash) not converted.
 - Airport: roads missing, far-apron floating poles, canopy cutout look — uninvestigated.
 
+## fivem vehicle (`src/gta5/fivem/vehicles.rs`, `src/gta5/yft.rs`)
+Loads in CodeWalker; not yet tested in game.
+- Doors, bonnet and boot are drawn on their bones but are static: physics is at most 5 box children (chassis + 4 wheels) because more needs a BVH. Add the BVH and per-part children, groups and joint limits.
+- Wheels: 6m wheel meshes were not found, so each wheel gets a generated tyre cylinder. Find the 6m wheel drawables.
+- Shaders are default/alpha only: add vehicle_paint shaders so carcols colours apply, plus glass, lights, dirt and damage.
+- Handling, seats, layout and meta are sedan defaults; map 6m vehicle data when it is decoded.
+
 ## fivem features (from the FiveM migration)
 - Road paths to .ynd (AI traffic), from `sixng paths`
 - Navmesh to .ynv (ped/AI pathing)
