@@ -178,6 +178,19 @@ fn check_dds(p: &std::path::Path) -> Result<(), String> {
 
 /// Self-lit shader family (lamps, signs, screens; sixng-core material
 /// families, from SixNG 4a1bd3d): written as GTA V emissive.sps.
+fn is_glass(shader_hash: u32) -> bool {
+    sixng_core::material::classify(&format!("{shader_hash:08x}"), &[])["class"] == "glass"
+}
+
+/// Shared translucent pane texture for 6m glass (cool grey, ~35% opaque).
+fn glass_tex(pools: &Pools) -> Result<String, String> {
+    let p = pools.dir.join("glass6m.dds");
+    if !p.exists() {
+        write_atomic(&p, &rgba_dds(&[70u8, 82, 88, 90].repeat(16), 4, 4)).map_err(|e| e.to_string())?;
+    }
+    Ok("r6m_glass6m".into())
+}
+
 fn is_emissive(shader_hash: u32) -> bool {
     sixng_core::material::classify(&format!("{shader_hash:08x}"), &[])["class"] == "emissive"
 }
@@ -313,6 +326,13 @@ impl Pools {
             Ok((w, h, rgba))
         };
         ttpf().map_err(|e2| format!("{e1}; ttpf: {e2}"))
+    }
+
+    /// True when the TTPF copy of the texture is stored linear (UNORM):
+    /// masks, normals and packed data. Colour maps are *_SRGB.
+    fn linear(&self, h64: u64) -> bool {
+        const SRGB: [u32; 7] = [29, 72, 75, 78, 91, 93, 99];
+        h64 != 0 && sixng_core::ttpf::global(&self.game).get(h64).is_some_and(|(_, t)| !SRGB.contains(&t.dxgi_format))
     }
 
     fn from_ttpf(&self, hash: u32, h64: u64) -> Result<PathBuf, String> {
@@ -681,6 +701,9 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: us
                 for t in cands {
                     let key = m.embedded.as_ref().and_then(|e| e.by_hash(t.hash)).and_then(|x| x.asset_key).unwrap_or(t.key);
                     match pools.get(t.hash, key, t.h64) {
+                        // fallback: colour maps are stored sRGB; a UNORM texture in a
+                        // non-colour slot is a packed mask (baggage loader: rainbow noise)
+                        Ok(_) if !COLOR_SLOTS.contains(&t.param) && pools.linear(t.h64) => errs.push(format!("{:08x}: linear (mask) texture in non-colour slot", t.hash)),
                         Ok(_) => return format!("r6m_{:08x}", t.hash),
                         Err(e) => errs.push(format!("{:08x}: {e}", t.hash)),
                     }
@@ -689,10 +712,14 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: us
                 MISSING.to_string()
             },
         );
+        // 6m glass shaders tint panes from shader constants over an opaque
+        // grey map: GTA V gets a translucent tinted pane (alpha.sps) instead.
+        let glass = sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).is_some_and(|mat| is_glass(mat.shader_hash));
+        let tex = if glass { glass_tex(pools).unwrap_or(tex) } else { tex };
         if tex != MISSING && !texs.contains(&tex) {
             texs.push(tex.clone());
         }
-        let kind = sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).map_or(0, |mat| if kind_of(mat.bucket) == 0 && is_emissive(mat.shader_hash) { 4 } else { kind_of(mat.bucket) });
+        let kind = sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).map_or(0, |mat| if glass { 1 } else if kind_of(mat.bucket) == 0 && is_emissive(mat.shader_hash) { 4 } else { kind_of(mat.bucket) });
         // normal map (opaque only): normal_spec.sps with the material's bump texture
         let nrm = if kind != 0 || tex == MISSING {
             None
@@ -926,7 +953,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     let mut tcap: HashMap<String, u16> = HashMap::new();
     for a in done.values() {
         let rad = (0..3).map(|k| (a.hi[k] - a.lo[k]).powi(2)).sum::<f32>().sqrt() / 2.0;
-        let cap: u16 = if rad < 1.5 { 128 } else if rad < 4.0 { 256 } else if rad < 12.0 { 512 } else { 1024 };
+        let cap: u16 = if rad < 1.5 { 128 } else if rad < 4.0 { 256 } else if rad < 12.0 { 512 } else if rad < 40.0 { 1024 } else { 2048 };
         for t in &a.texs {
             let e = tcap.entry(t.clone()).or_insert(0);
             *e = (*e).max(cap);
@@ -934,7 +961,8 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     }
     let cap_of = |t: &str| -> u16 {
         let c = tcap.get(t).copied().unwrap_or(4096);
-        ctx.o.max_tex.map_or(c, |m| c.min(m))
+        // --max-tex caps props; big walls (cap >= 1024) keep at least 1024 px
+        ctx.o.max_tex.map_or(c, |m| if c >= 1024 { c.min(m.max(1024)) } else { c.min(m) })
     };
     let tsize = |t: &str| fs::metadata(cache.join(format!("{}.dds", &t[4..]))).map(|m| m.len()).unwrap_or(0);
     let mut fam: BTreeMap<String, Vec<&Arch>> = BTreeMap::new();
