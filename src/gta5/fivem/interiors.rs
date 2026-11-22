@@ -13,9 +13,10 @@
 //! per instance as t6m_intcol_<hash>_<n>.ybn in world space, each polygon
 //! carrying the room id of the room whose bounds contain it (6m bounds have
 //! no room ids; limbo when none), so the game knows the player is inside.
-//! Lights: the 6m light sets (`sixng lights` -> <work>/lights/levels/
-//! sets.jsonl) of each interior entity's archetype and of the entity itself
-//! become a CExtensionDefLightEffect on that MLO entity.
+//! Lights: the 6m light sets of each interior entity's archetype and of
+//! the entity itself become a CExtensionDefLightEffect on that MLO entity.
+//! They are decoded from the interiors' own meta files during the build
+//! (no extra pass). T6M_NO_LIGHTS=1 skips lights.
 //! Entity-set entities go in CMloEntitySets, off by default
 //! (ActivateInteriorEntitySet turns them on).
 
@@ -190,7 +191,7 @@ pub fn load(ctx: &Ctx, dir: &Path, index: &ArchiveIndex) -> Vec<Interior> {
         ctx.skip(&format!("({missing} interior instances)"), "interior archetype file missing", json!({"count": missing}));
     }
     let mut out: Vec<Interior> = by_hash.into_values().collect();
-    let (arch_lights, ent_lights) = light_sets(ctx, &out);
+    let (arch_lights, ent_lights) = light_sets(ctx, index, &out);
     for c in out.iter_mut().flat_map(|i| i.children.iter_mut()) {
         c.lights = arch_lights.get(&crate::gta5::rsc::joaat(&c.name)).into_iter().chain(ent_lights.get(&c.src)).flatten().cloned().collect();
     }
@@ -724,54 +725,43 @@ fn collision(ctx: &Ctx, levels: &Path, e: &Entry, it: &Interior, order: &[u32], 
 
 type LightMaps = (HashMap<u32, Vec<Value>>, HashMap<(String, usize), Vec<Value>>);
 
-/// 6m light sets from `<work>/lights/levels/sets.jsonl` (`sixng lights`)
-/// that `ints`' children use: by archetype hash, and by (meta file offset,
-/// entity index). Each light gets its set's offset added to its position.
-/// Empty when absent.
-fn light_sets(ctx: &Ctx, ints: &[Interior]) -> LightMaps {
+/// The 6m light sets `ints`' children use, decoded straight from the
+/// interiors' own meta files (they hold the entity lights and the light
+/// extensions of the archetypes defined beside them; archetypes defined in
+/// other files keep no lights): by archetype hash, and by (meta file
+/// offset, entity index). Each light gets its set's offset added to its position.
+fn light_sets(ctx: &Ctx, index: &ArchiveIndex, ints: &[Interior]) -> LightMaps {
     let (mut by_arch, mut by_ent): LightMaps = Default::default();
-    let kids = || ints.iter().flat_map(|i| i.children.iter());
-    let want_arch: std::collections::HashSet<String> = kids().map(|c| format!("\"archetype\":\"{:08x}\"", crate::gta5::rsc::joaat(&c.name))).collect();
-    let want_file: std::collections::HashSet<String> = kids().map(|c| format!("\"id\":\"levels.rpf@{}\"", c.src.0)).collect();
-    if want_arch.is_empty() {
+    if ints.is_empty() || std::env::var_os("T6M_NO_LIGHTS").is_some() {
         return (by_arch, by_ent);
     }
-    let Ok(text) = fs::read_to_string(ctx.o.work.join("lights").join("levels").join("sets.jsonl")) else { return (by_arch, by_ent) };
-    let field = |l: &str, k: &str| -> Option<String> {
-        let i = l.find(k)?;
-        let rest = &l[i + k.len()..];
-        let s = rest.find('"')? + 1;
-        let e = s + rest[s..].find('"')?;
-        Some(format!("{k}\"{}\"", &rest[s..e]))
-    };
-    for l in text.lines() {
-        let arch_hit = field(l, "\"archetype\":").is_some_and(|a| want_arch.contains(&a));
-        let file_hit = l.contains("\"owner\":\"entity\"") && field(l, "\"id\":").is_some_and(|a| want_file.contains(&a));
-        if !arch_hit && !file_hit {
-            continue;
-        }
-        let Ok(s) = serde_json::from_str::<Value>(l) else { continue };
-        let off = f3(&s["ext_offset"]);
-        let lights: Vec<Value> = s["lights"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|v| {
-                let mut v = v.clone();
-                let p = f3(&v["position"]);
-                v["position"] = json!([p[0] + off[0], p[1] + off[1], p[2] + off[2]]);
-                v
-            })
-            .collect();
-        match (s["owner"].as_str(), hx(&s["archetype"])) {
-            (Some("archetype"), Some(h)) => {
-                by_arch.entry(h).or_insert(lights);
+    let kids = || ints.iter().flat_map(|i| i.children.iter());
+    let want: std::collections::HashSet<u32> = kids().map(|c| crate::gta5::rsc::joaat(&c.name)).collect();
+    let files: std::collections::BTreeSet<String> = kids().map(|c| c.src.0.clone()).collect();
+    let levels = ctx.o.game.join("levels.rpf");
+    let by_off: HashMap<u64, &Entry> = index.entries.iter().map(|e| (e.off, e)).collect();
+    for f in files {
+        let Some(e) = u64::from_str_radix(&f, 16).ok().and_then(|o| by_off.get(&o)) else { continue };
+        let Ok(r) = Resource::load_sys(&levels, e) else { continue };
+        for s in sixng_core::lights::light_sets(&r) {
+            let off = s.ext_offset;
+            let lights: Vec<Value> = s
+                .lights
+                .iter()
+                .filter_map(|l| {
+                    let mut v = serde_json::to_value(l).ok()?;
+                    let p = l.position;
+                    v["position"] = json!([p[0] + off[0], p[1] + off[1], p[2] + off[2]]);
+                    Some(v)
+                })
+                .collect();
+            match (s.owner, s.entity_index) {
+                ("archetype", _) if want.contains(&s.archetype) => {
+                    by_arch.entry(s.archetype).or_insert(lights);
+                }
+                ("entity", Some(i)) => by_ent.entry((f.clone(), i)).or_default().extend(lights),
+                _ => {}
             }
-            (Some("entity"), _) => {
-                let (Some(id), Some(i)) = (s["id"].as_str().and_then(|f| f.strip_prefix("levels.rpf@")), s["entity_index"].as_u64()) else { continue };
-                by_ent.entry((id.to_string(), i as usize)).or_default().extend(lights);
-            }
-            _ => {}
         }
     }
     (by_arch, by_ent)
