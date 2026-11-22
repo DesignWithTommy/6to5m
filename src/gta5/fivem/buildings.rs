@@ -390,7 +390,7 @@ fn load_places(ctx: &Ctx, dir: &Path) -> Result<Vec<Place>, Box<dyn Error>> {
             ctx.skip(&format!("hash_{:08x}", e["archetype"].as_u64().unwrap_or(0)), "unnamed hash", json!({"position": pos}));
             return;
         };
-        let Some(off) = e["model_id"].as_str().and_then(|m| m.strip_prefix("levels.rpf@")).and_then(|h| usize::from_str_radix(h, 16).ok()) else {
+        let Some(off) = e["model_id"].as_str().and_then(|m| m.strip_prefix("levels.rpf@")).and_then(|h| usize::from_str_radix(h.split('#').next().unwrap_or(h), 16).ok()) else {
             ctx.skip(&name, "model not in levels.rpf", json!({"model_id": e["model_id"]}));
             return;
         };
