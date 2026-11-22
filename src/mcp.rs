@@ -15,6 +15,7 @@ const TOOLS: &[(&str, &str, &str)] = &[
     ("model", "model", "RAGE drawables to OBJ. Pass [\"--help\"] for options."),
     ("convert", "convert", "Convert to GTA V formats: ytd (DDS dir), ydr/ybn (OBJ), ymap/ytyp (JSON). Pass [] for usage."),
     ("sixng", "sixng", "SixNG commands: placements, vehicles, GLB export, ttpf, names, interiors, movies, ... Pass [\"--help\"] (or [\"<command>\", \"--help\"]) for the list."),
+    ("fivem", "fivem", "Build a ready FiveM resource from GTA VI: args like [\"build\", \"--game\", \"<dir>\", \"--out\", \"<res>\", \"--bbox\", \"x0,y0,x1,y1\"]. Pass [\"--help\"] for options."),
 ];
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {

@@ -1,6 +1,26 @@
-# 6to5m
+# 6to5m: GTA VI to GTA V / FiveM converter (CLI + MCP server)
 
-GTA VI (Xbox Series X|S version) to GTA V / FiveM toolkit: extract RPF9 assets and convert map areas into ready FiveM resources. The binary is `6ixpack`.
+**6to5m** is a pure-Rust **command-line tool and MCP server** that extracts **GTA VI (Xbox Series X|S version)** RPF9 archives and converts maps, textures, models and collision into **GTA V / FiveM** formats (ydr, ytd, ybn, ymap, ytyp, water.xml) as ready-to-stream FiveM resources. The binary is `6ixpack`.
+
+Keywords: GTA 6, GTA VI, RPF9, RAGE, BCPack, Xbox Series X, GTA V, FiveM, CodeWalker, ydr, ytd, ybn, ymap, MLO, map conversion, modding, MCP, Model Context Protocol, AI agents, Rust.
+
+## For AI agents: MCP server
+
+Run `6ixpack mcp` as a stdio MCP server, and every CLI command becomes an MCP tool: `extract`, `audio`, `texture`, `model`, `convert`, `sixng`, `fivem`. Each tool takes the same args as the CLI; pass `["--help"]` to discover options.
+
+```json
+{ "mcpServers": { "6to5m": { "command": "C:/path/to/6ixpack.exe", "args": ["mcp"] } } }
+```
+
+Claude Code: `claude mcp add 6to5m -- C:/path/to/6ixpack.exe mcp`
+
+## CLI quick start
+
+```
+cargo build --release                       # -> target/release/6ixpack.exe (pure Rust, no DLLs)
+6ixpack levels.rpf out/                     # extract an RPF9 archive
+6ixpack fivem build --game <GTA VI dir> --out <resource> --bbox x0,y0,x1,y1   # map area -> FiveM resource
+```
 
 ## Status
 
@@ -65,7 +85,7 @@ Pure Rust, no C code, DLLs or external tools. `cargo build --release` → `targe
 6ixpack sixng   <args...>               placements, vehicles, GLB, names, interiors, movies, ...
 6ixpack convert <kind> ...              GTA V files: ytd, ydr, ybn, ymap, ytyp
 6ixpack fivem build --game .. --out ..   ready FiveM map resource (terrain, buildings, water)
-6ixpack mcp                             stdio MCP server: extract, audio, texture, model, sixng tools
+6ixpack mcp                             stdio MCP server: extract, audio, texture, model, convert, sixng, fivem tools
 ```
 
 Add `--help` to any command. `--threads N` works everywhere.
