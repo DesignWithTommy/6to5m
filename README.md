@@ -53,7 +53,6 @@ What works today:
 - [x] Road and asphalt surfaces
 - [x] LOD/SLOD drawables with no linked model (unresolved archetypes 84,216 to 37; `#member` model ids resolved, so every airport placement converts)
 - [ ] Models outside `levels.rpf` (`pack/*` archives)
-- [ ] Collision surface materials (currently all default) (in progress)
 - [x] Interiors as GTA V MLOs: `t6m_int.ytyp` (CMloArchetypeDef with decoded rooms, entity sets and the interior entities) and `t6m_int_X_Y.ymap` (CMloInstanceDef); `--interiors` still flattens them into world space instead
 - [ ] MLO portals (not decoded yet: every entity sits in limbo, entity sets start off)
 - [x] Tint palettes: the embedded palette entry (vertex colour blue, row 0) is baked into tinted copies of the colour texture (32-step colours, max 512 px); the palette is no longer picked as a colour map
