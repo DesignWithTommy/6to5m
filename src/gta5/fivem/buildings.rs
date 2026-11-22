@@ -313,6 +313,14 @@ impl Pools {
     }
 }
 
+/// Archetype-name suffix of a tinted placement variant: `<name>__tint<row>`.
+const TINT_SEP: &str = "__tint";
+
+/// Model name and palette row of a (possibly tinted) archetype name.
+fn split_tint(n: &str) -> (&str, usize) {
+    n.rsplit_once(TINT_SEP).and_then(|(b, r)| Some((b, r.parse().ok()?))).unwrap_or((n, 0))
+}
+
 /// Shader slot of the per-model tint palette (one-row embedded texture).
 const TINT_PALETTE: u32 = 0x2c8d_7182;
 
@@ -460,6 +468,11 @@ fn load_places(ctx: &Ctx, dir: &Path) -> Result<Vec<Place>, Box<dyn Error>> {
         }
         let rot = if ctx.o.conjugate { [-stored[0], -stored[1], -stored[2], stored[3]] } else { stored };
         let l = &e["lod"];
+        // Tinted placements (palette row > 0) get their own archetype variant.
+        let name = match e["tint_row"].as_u64() {
+            Some(row) if row > 0 => format!("{name}{TINT_SEP}{row}"),
+            _ => name,
+        };
         out.push(Place {
             name,
             off,
@@ -547,15 +560,20 @@ fn lod_parents(ctx: &Ctx, maps: &HashSet<&str>) -> HashMap<(String, usize), (Str
 
 /// archetype name -> lodDist from sixng lod-links (<work>/index/archetype_lod.jsonl).
 fn archetype_lods(ctx: &Ctx, names: &[&String]) -> HashMap<String, f32> {
-    let want: HashMap<String, &String> = names.iter().map(|n| (format!("{:08x}", crate::gta5::rsc::joaat(n)), *n)).collect();
+    let mut want: HashMap<String, Vec<&String>> = HashMap::new();
+    for n in names {
+        want.entry(format!("{:08x}", crate::gta5::rsc::joaat(split_tint(n).0))).or_default().push(*n);
+    }
     let mut out = HashMap::new();
     let Ok(text) = fs::read_to_string(ctx.o.work.join("index").join("archetype_lod.jsonl")) else { return out };
     for l in text.lines() {
         let Some(h) = l.strip_prefix("{\"archetype\":\"").and_then(|r| r.get(..8)) else { continue };
-        let Some(n) = want.get(h) else { continue };
+        let Some(ns) = want.get(h) else { continue };
         if let Ok(v) = serde_json::from_str::<Value>(l) {
             if let Some(d) = v["lod_dist"].as_f64().filter(|d| *d > 0.0) {
-                out.insert((*n).clone(), d as f32);
+                for n in ns {
+                    out.insert((*n).clone(), d as f32);
+                }
             }
         }
     }
@@ -574,7 +592,7 @@ struct Arch {
 type Built = (Mesh, Vec<String>, Vec<String>, bool);
 
 /// rpf9 decoder path; None when the model does not decode (or is skinned).
-fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, an: &str, off: usize, entry: Option<&Entry>) -> Result<Option<Built>, String> {
+fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: usize, entry: Option<&Entry>) -> Result<Option<Built>, String> {
     let ext_palettes = std::cell::OnceCell::new();
     let an = an.to_string();
     let models = crate::model::load_models(&ctx.levels, off);
@@ -619,15 +637,18 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, an: &str, off: usize, entry: 
             texs.push(tex.clone());
         }
         let kind = sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).map_or(0, |mat| kind_of(mat.bucket));
-        // Tint palette: bake palette entry (row 0, column = vertex colour
+        // Tint palette: bake palette entry (placement row, column = vertex colour
         // blue) into tinted copies of the colour texture, one per colour.
         let palette = sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).and_then(|mat| mat.textures.iter().find(|t| t.param == TINT_PALETTE)).and_then(|t| {
             m.palettes.iter().find(|p| p.0 == t.hash).map(|p| p.1.clone()).or_else(|| ext_palettes.get_or_init(|| entry.and_then(|e| sixng_palette(ctx, e))).clone())
         });
         if let (Some(pal), Some(cols)) = (palette.as_ref(), sm.colors.as_deref()) {
             let mut groups: Vec<([u8; 3], Vec<u32>)> = Vec::new();
+            // Row `row` of the palette (placement tintValue; past the last row clamps).
+            let (len, rows) = sixng_core::texture::tint_layout(pal.len() as u32);
+            let base = row.min(rows.max(1) as usize - 1) * len as usize;
             for t in sm.indices.chunks_exact(3) {
-                let c = cols.get(t[0] as usize).and_then(|c| pal.get((c >> 16 & 255) as usize)).map_or([255; 3], |p| [p[0], p[1], p[2]].map(|v| ((v as u32 + 16) / 32 * 32).min(255) as u8));
+                let c = cols.get(t[0] as usize).and_then(|c| pal.get(base + (c >> 16 & 255) as usize)).map_or([255; 3], |p| [p[0], p[1], p[2]].map(|v| ((v as u32 + 16) / 32 * 32).min(255) as u8));
                 match groups.iter_mut().find(|g| g.0 == c) {
                     Some(g) => g.1.extend_from_slice(t),
                     None => groups.push((c, t.to_vec())),
@@ -739,7 +760,8 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
         }
     }
     let src = format!("levels.rpf@{off:x}");
-    let rpf = rpf9_mesh(ctx, pools, name, &an, off, entry)?;
+    let (base, row) = split_tint(name);
+    let rpf = rpf9_mesh(ctx, pools, base, row, &an, off, entry)?;
     let (mesh, texs, missing, frag_out) = match (rpf, entry) {
         (Some(x), _) => x,
         (None, Some(e)) => match sixng_mesh(ctx, pools, &an, e) {
