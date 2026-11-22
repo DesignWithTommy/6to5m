@@ -9,7 +9,7 @@ keywords = ["rpf", "archive", "extract", "carving"]
 categories = ["command-line-utilities"]
 
 [dependencies]
-bcpack = { package = "bcpack-rs", git = "https://github.com/Ahmet-Dedeler/bcpack-rs", rev = "02a8c4e802800d55b55797a32dbfe8b16d7fc23f" }
+bcpack = { package = "bcpack-rs", git = "https://github.com/Ahmet-Dedeler/bcpack-rs", rev = "5bf5cc56ed56f1ababf1f9592300bd182ff90bd8" }
 flate2 = "1"
 opus-decoder = "0.1.1"
 sixng-core = { path = "vendor/sixng-core" }

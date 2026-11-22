@@ -57,6 +57,9 @@ pub struct Decoded {
     /// Blocks failing a BC6H/BC7 consistency check (anchor index MSB set,
     /// shared p-bit mismatch): a sign the chain is wrong.
     pub inconsistent: usize,
+    /// BC6H, per block (diagnostics): mode | endpoint distance << 8 |
+    /// chain-from-preset << 16 | referenced block's mode << 20. Empty otherwise.
+    pub info: Vec<u32>,
 }
 
 /// Decode one BCPack chunk (`comp` = stored bytes, zero pad allowed) into
@@ -210,7 +213,7 @@ pub fn history() -> Option<&'static History> {
 /// BC6H blocks (row-major, 16 bytes each) to unquantized 16-bit RGB per
 /// pixel (alpha 0), as f64 RGBA of a `w` x `h` image. Unsigned only
 /// (`signed` textures give zeros).
-pub(crate) fn bc6h_unq_image(lin: &[u8], w: u32, h: u32, signed: bool) -> Vec<f64> {
+pub fn bc6h_unq_image(lin: &[u8], w: u32, h: u32, signed: bool) -> Vec<f64> {
     const W3: [u32; 8] = [0, 9, 18, 27, 37, 46, 55, 64];
     const W4: [u32; 16] = [0, 4, 9, 13, 17, 21, 26, 30, 34, 38, 43, 47, 51, 55, 60, 64];
     let (bw, bh) = (w.div_ceil(4) as usize, h.div_ceil(4) as usize);
@@ -407,7 +410,7 @@ fn bc3(lanes: &[&[u16]], n: usize) -> Decoded {
         let (top, bot) = (lanes[10], lanes[11]);
         bc1_quads(&mut o[12..16], [q[top[a] as usize], q[top[b] as usize], q[bot[a] as usize], q[bot[b] as usize]]);
     }
-    Decoded { data: out, unknown: lost.iter().filter(|&&x| x).count(), lost, inconsistent: 0 }
+    Decoded { data: out, unknown: lost.iter().filter(|&&x| x).count(), lost, inconsistent: 0, info: Vec::new() }
 }
 
 fn bc4(lanes: &[&[u16]], n: usize) -> Decoded {
@@ -436,7 +439,7 @@ fn bc4(lanes: &[&[u16]], n: usize) -> Decoded {
         let bits = alpha_bits(&t::BC4_PAIR, |r| (lanes[4 + 2 * r][i], lanes[5 + 2 * r][i]));
         o[2..8].copy_from_slice(&bits.to_le_bytes()[..6]);
     }
-    Decoded { data: out, unknown: lost.iter().filter(|&&x| x).count(), lost, inconsistent: 0 }
+    Decoded { data: out, unknown: lost.iter().filter(|&&x| x).count(), lost, inconsistent: 0, info: Vec::new() }
 }
 
 fn bc5(lanes: &[&[u16]], n: usize) -> Decoded {
@@ -472,7 +475,7 @@ fn bc5(lanes: &[&[u16]], n: usize) -> Decoded {
             o[2..8].copy_from_slice(&bits.to_le_bytes()[..6]);
         }
     }
-    Decoded { data: out, unknown: lost.iter().filter(|&&x| x).count(), lost, inconsistent: 0 }
+    Decoded { data: out, unknown: lost.iter().filter(|&&x| x).count(), lost, inconsistent: 0, info: Vec::new() }
 }
 
 /// The four 4-bit index residuals of one row (BC6H/BC7 lanes 11-14 style):
@@ -743,7 +746,7 @@ fn bc7(lanes: &[&[u16]], n: usize) -> Decoded {
         out[16 * i..16 * i + 16].copy_from_slice(&o.acc.to_le_bytes());
     }
     let lost: Vec<bool> = (0..n).map(|i| eroot[i] || iroot[i]).collect();
-    Decoded { data: out, unknown: lost.iter().filter(|&&x| x).count(), lost, inconsistent }
+    Decoded { data: out, unknown: lost.iter().filter(|&&x| x).count(), lost, inconsistent, info: Vec::new() }
 }
 
 // BC6H ------------------------------------------------------------------------
@@ -845,6 +848,8 @@ fn bc6h(lanes: &[&[u16]], n: usize) -> Decoded {
     let mut st_i: Vec<[u32; 16]> = Vec::with_capacity(n);
     let (mut eroot, mut iroot) = (vec![false; n], vec![false; n]);
     let mut inconsistent = 0;
+    let mut info = vec![0u32; n];
+    let mut modes = vec![0u32; n];
     let l15 = lanes[15];
     for i in 0..n {
         let (a, b) = (2 * i, 2 * i + 1);
@@ -919,6 +924,8 @@ fn bc6h(lanes: &[&[u16]], n: usize) -> Decoded {
             }
         }
         st_e.push(stb);
+        modes[i] = mode as u32;
+        info[i] = mode as u32 | (de as u32) << 8 | (eroot[i] as u32) << 16 | if de > 0 && de <= i { modes[i - de] << 20 } else { 0 };
         let ibits = if reg == 2 { 3 } else { 4 };
         let imask = (1i32 << ibits) - 1;
         let ishift = 4 - ibits;
@@ -959,5 +966,5 @@ fn bc6h(lanes: &[&[u16]], n: usize) -> Decoded {
         out[16 * i..16 * i + 16].copy_from_slice(&acc.to_le_bytes());
     }
     let lost: Vec<bool> = (0..n).map(|i| eroot[i] || iroot[i]).collect();
-    Decoded { data: out, unknown: lost.iter().filter(|&&x| x).count(), lost, inconsistent }
+    Decoded { data: out, unknown: lost.iter().filter(|&&x| x).count(), lost, inconsistent, info }
 }

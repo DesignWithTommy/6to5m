@@ -74,7 +74,7 @@ Built on the work of:
 - **opus-decoder** (BSD-3-Clause, port of libopus): built-in Opus decoding.
 - **dexyfex** — [CodeWalker](https://github.com/dexyfex/CodeWalker) (MIT): GTA V resource formats (RSC7, ytd, ydr, ybn, ymap/ytyp), ported to Rust.
 - **Ahmet Dedeler** — [bcpack-rs](https://github.com/Ahmet-Dedeler/bcpack-rs) (MIT/Apache-2.0): BCPack BC1 decoder (git dependency).
-- **ItsNotRexed** — [Leonida](https://github.com/ItsNotRexed/Leonida) (GPL-3.0): clean-room BCPack BC3/BC4/BC5/BC6H/BC7 rebuilders and tables, ported in `vendor/sixng-core/src/bcpack.rs`.
+- **ItsNotRexed** — [Leonida](https://github.com/ItsNotRexed/Leonida) (GPL-3.0): clean-room BCPack BC3/BC4/BC5/BC6H/BC7 rebuilders and tables, and the pool self-calibrator, ported in `vendor/sixng-core/src/bcpack*.rs`.
 
 If you are one of these authors and want your credit, link or code changed or removed, open an issue.
 

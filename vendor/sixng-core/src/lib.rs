@@ -24,6 +24,7 @@ pub mod bcpack;
 mod bcpack_tables;
 pub mod bcpack_calib;
 mod bcpack_calib6;
+pub mod bcpack_refine;
 pub mod gaps;
 pub mod lodlinks;
 pub mod bink;

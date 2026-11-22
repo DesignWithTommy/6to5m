@@ -14,4 +14,4 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 texture2ddecoder = "0.1.2"
 regex = "1.13.2"
 opus-decoder = "0.1.1"
-bcpack-rs = { git = "https://github.com/Ahmet-Dedeler/bcpack-rs", rev = "02a8c4e802800d55b55797a32dbfe8b16d7fc23f" }
+bcpack-rs = { git = "https://github.com/Ahmet-Dedeler/bcpack-rs", rev = "5bf5cc56ed56f1ababf1f9592300bd182ff90bd8" }

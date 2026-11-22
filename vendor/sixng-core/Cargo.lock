@@ -32,19 +32,13 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 [[package]]
 name = "bcpack-rs"
 version = "0.2.0"
-source = "git+https://github.com/Ahmet-Dedeler/bcpack-rs?rev=02a8c4e802800d55b55797a32dbfe8b16d7fc23f#02a8c4e802800d55b55797a32dbfe8b16d7fc23f"
+source = "git+https://github.com/Ahmet-Dedeler/bcpack-rs?rev=5bf5cc56ed56f1ababf1f9592300bd182ff90bd8#5bf5cc56ed56f1ababf1f9592300bd182ff90bd8"
 dependencies = [
  "flate2",
- "png 0.17.16",
+ "png",
  "rayon",
  "serde_json",
 ]
-
-[[package]]
-name = "bitflags"
-version = "1.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
 
 [[package]]
 name = "bitflags"
@@ -140,7 +134,7 @@ dependencies = [
  "byteorder-lite",
  "moxcms",
  "num-traits",
- "png 0.18.1",
+ "png",
 ]
 
 [[package]]
@@ -211,24 +205,11 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "png"
-version = "0.17.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82151a2fc869e011c153adc57cf2789ccb8d9906ce52c0b39a6b5697749d7526"
-dependencies = [
- "bitflags 1.3.2",
- "crc32fast",
- "fdeflate",
- "flate2",
- "miniz_oxide 0.8.9",
-]
-
-[[package]]
-name = "png"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60769b8b31b2a9f263dae2776c37b1b28ae246943cf719eb6946a1db05128a61"
 dependencies = [
- "bitflags 2.13.2",
+ "bitflags",
  "crc32fast",
  "fdeflate",
  "flate2",

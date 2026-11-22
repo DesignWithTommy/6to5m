@@ -613,7 +613,7 @@ impl<'a> Pool<'a> {
                     let mut s = 0;
                     while s < slices_at(mip) && ok {
                         let cs = chunks_for(&chunks, mip_slice_offset(&layout, base, level, s), level.region)?;
-                        ok = cs.iter().all(|x| x.codec == 0 || x.codec == 8 || x.codec == CODEC_BC1);
+                        ok = cs.iter().all(|x| x.codec == 0 || x.codec == 8 || x.codec == CODEC_BC1 || sixng_core::bcpack::supported((x.codec << 2) as u8));
                         s += step;
                     }
                     *slot = ok;
@@ -690,7 +690,12 @@ impl<'a> Pool<'a> {
                 Ok(out)
             }
             CODEC_BC1 => decode_bc1(packed, c.size / 8).filter(|b| b.len() == c.size).ok_or_else(|| "BCPack BC1 chunk does not decode".into()),
-            _ => Err("BCPack chunk in a format other than BC1 (not decoded yet)".into()),
+            // BC3/BC4/BC5/BC6H/BC7 BCPack (sixng-core rebuilders; blocks predicted from
+            // an unfitted preset history entry come out approximate)
+            k if sixng_core::bcpack::supported((k << 2) as u8) => sixng_core::bcpack::decode((k << 2) as u8, packed, c.size)
+                .map(|d| d.data)
+                .map_err(|e| e.to_string()),
+            _ => Err("BCPack chunk of an unknown codec".into()),
         }
     }
 

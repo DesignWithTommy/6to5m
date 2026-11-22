@@ -49,6 +49,55 @@ fn main() {
             let ix = h.bc7_ix_bits.iter().flatten().filter(|&&b| b > 0).count();
             println!("{:.1}s bc4 {} bc7 ep slots {ep} ix slots {ix} bc6h ep {} ix {}", t0.elapsed().as_secs_f64(), h.bc4.iter().flatten().count(), h.bc6h_ecls.iter().filter(|&&c| c > 0).count(), h.bc6h_icls.iter().filter(|&&c| c > 0).count());
         }
+        "refine" => {
+            let mut h = sixng_core::bcpack::History::from_bytes(&std::fs::read(&a[3]).unwrap()).unwrap();
+            let t0 = std::time::Instant::now();
+            sixng_core::bcpack_refine::refine_indices(&set, &mut h);
+            std::fs::write(&a[4], h.to_bytes()).unwrap();
+            println!("refined in {:.1}s", t0.elapsed().as_secs_f64());
+        }
+        "mipcheck" => {
+            // mipcheck <codec hex> <max textures>: BCPack mip m vs plain mip m+1, per block
+            let codec = u8::from_str_radix(&a[3], 16).unwrap();
+            let lim: usize = a[4].parse().unwrap();
+            let mut agg: BTreeMap<String, (usize, f64, usize)> = BTreeMap::new();
+            let mut ntex = 0;
+            'o: for s in &set.stores { for t in &s.textures {
+                if t.slices() != 1 || (9..=12).contains(&t.tile_mode()) || t.split_2b { continue; }
+                let Some(l) = t.layout() else { continue };
+                let nm = l.mips.len();
+                let ck = |m: usize| -> Vec<usize> { let (x, y) = l.mip_span(m); (0..s.chunks.len() - 1).filter(|&i| s.chunks[i + 1].1 > t.virt + x && s.chunks[i].1 < t.virt + y).collect() };
+                let Some(m) = (0..nm.saturating_sub(1)).find(|&m| ck(m).iter().any(|&i| s.chunks[i].2 & 0x3F == codec && s.chunks[i].2 & 0x1C != 0) && ck(m + 1).iter().all(|&i| s.chunks[i].2 & 0x1C == 0)) else { continue };
+                let Ok((data, _)) = s.data_ex(t) else { continue };
+                let (Ok((a0, w0, h0)), Ok((a1, w1, _))) = (decode_rgba(t, &data, m as u32), decode_rgba(t, &data, m as u32 + 1)) else { continue };
+                let unq = codec == 0x18 && std::env::var("UNQ").is_ok();
+                let (u0, u1) = if unq {
+                    let f = |mm: usize| { let p = &l.mips[mm]; sixng_core::bcpack::bc6h_unq_image(&l.untile(&data, mm), p.w * 4, p.h * 4, false).iter().map(|&v| ((v + 1.0).log2() * 16.0).min(255.0) as u8).collect::<Vec<u8>>() };
+                    (f(m), f(m + 1))
+                } else { (a0.clone(), a1.clone()) };
+                let (a0, a1) = (u0, u1);
+                ntex += 1;
+                let mut cache: BTreeMap<usize, sixng_core::bcpack::Decoded> = BTreeMap::new();
+                for by in 0..(h0 / 4) { for bx in 0..(w0 / 4) {
+                    let mut e = 0.0;
+                    for c in 0..3 {
+                        let mut s0 = 0.0; for y in 0..4 { for x in 0..4 { s0 += a0[(((by * 4 + y) * w0 + bx * 4 + x) * 4 + c) as usize] as f64; } }
+                        let mut s1 = 0.0; for y in 0..2 { for x in 0..2 { s1 += a1[(((by * 2 + y) * w1 + bx * 2 + x) * 4 + c) as usize] as f64; } }
+                        e += (s0 / 16.0 - s1 / 4.0).abs();
+                    }
+                    let v = t.virt + l.addr(m, 0, bx, by);
+                    let Some(ci) = (0..s.chunks.len() - 1).find(|&i| s.chunks[i].1 <= v && s.chunks[i + 1].1 > v) else { continue };
+                    if s.chunks[ci].2 & 0x1C == 0 { continue; }
+                    let d = cache.entry(ci).or_insert_with(|| sixng_core::bcpack::decode(codec, &chunk_comp(s, ci), (s.chunks[ci + 1].1 - s.chunks[ci].1) as usize).unwrap());
+                    let bi = ((v - s.chunks[ci].1) / 16) as usize;
+                    let key = match d.info.get(bi) { Some(&x) => { let de = (x >> 8) & 255; let kind = if de == 0 { "none".to_string() } else if (x >> 16) & 1 != 0 { "hist".into() } else { format!("ref{}", x >> 20) }; format!("m{:02} {kind}", x & 255) } None => "all".into() };
+                    let g = agg.entry(key).or_default(); g.0 += 1; g.1 += e; if e > 60.0 { g.2 += 1; }
+                } }
+                if ntex >= lim { break 'o; }
+            } }
+            println!("{ntex} textures");
+            for (k, v) in agg { if v.0 >= 50 { println!("{k}: blocks {} mean err {:.1} bad {:.1}%", v.0, v.1 / v.0 as f64, 100.0 * v.2 as f64 / v.0 as f64); } }
+        }
         "dump" => {
             // dump <store label substr> <chunk> <outdir>
             let s = set.stores.iter().find(|s| s.label().contains(a[3].as_str())).unwrap();

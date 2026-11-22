@@ -659,6 +659,8 @@ fn run_cli(cli: &Cli, out: &Out) -> Result<()> {
         Cmd::Ttpf { store, hash, first, mip, all_slices, all, out: tout } => {
             let a = ws.resolve(store)?;
             let st = sixng_core::ttpf::Ttpf::open(&a.path)?;
+            // registers the BCPack preset-history fit over all stores (cached)
+            let _ = sixng_core::ttpf::global(&ws.game);
             let mut sel: Vec<&sixng_core::ttpf::TtpfTex> = Vec::new();
             for h in hash {
                 let x = u64::from_str_radix(h.trim_start_matches("0x"), 16)?;
@@ -682,10 +684,10 @@ fn run_cli(cli: &Cli, out: &Out) -> Result<()> {
                         Ok(x) => x,
                         Err(e) => return vec![json!({"hash": format!("{:016x}", t.hash), "slices": t.slices(), "error": e.to_string()})],
                     };
-                    // Data entirely in BCPack chunks other than BC1 (no decoder yet): the PNG
-                    // would be blank, so --all writes nothing for it.
+                    // Data entirely in BCPack chunks that did not decode: the PNG would be
+                    // blank, so --all writes nothing for it.
                     if *all && skipped >= t.size as u64 {
-                        return vec![json!({"hash": format!("{:016x}", t.hash), "w": t.width, "h": t.height, "format": sixng_core::texture::dxgi_name(t.dxgi_format), "error": "all data in BCPack chunks (not decodable yet)", "bcpack_only": true})];
+                        return vec![json!({"hash": format!("{:016x}", t.hash), "w": t.width, "h": t.height, "format": sixng_core::texture::dxgi_name(t.dxgi_format), "error": "all data in BCPack chunks that did not decode", "bcpack_only": true})];
                     }
                     let n = if *all_slices { t.slices() } else { 1 };
                     for sl in 0..n {
@@ -708,7 +710,7 @@ fn run_cli(cli: &Cli, out: &Out) -> Result<()> {
                     let bcpack = res.iter().filter(|r| r["bcpack_only"] == true).count();
                     let failed = res.len() - ok - bcpack;
                     let idx = dir.join("index.json");
-                    let note = "One PNG per texture (<hash>_m<mip>.png). partial = some of the data is in BCPack chunks other than BC1, so part of the image is blank or noise; bcpack_only = nothing decodable yet, no PNG written. Names are not recovered (64-bit hashes).";
+                    let note = "One PNG per texture (<hash>_m<mip>.png). partial = some BCPack blocks predict from preset history entries that could not be fitted, so part of the image may be off; bcpack_only = nothing decodable yet, no PNG written. Names are not recovered (64-bit hashes).";
                     std::fs::write(&idx, serde_json::to_vec_pretty(&json!({"note": note, "store": a.id, "textures": st.textures.len(), "written": ok, "complete": ok - partial, "partial": partial, "bcpack_only": bcpack, "failed": failed, "results": res}))?)?;
                     out.print(&json!({"ok": true, "store": a.id, "textures": st.textures.len(), "written": ok, "complete": ok - partial, "partial": partial, "bcpack_only": bcpack, "failed": failed, "index": idx}));
                 } else {
