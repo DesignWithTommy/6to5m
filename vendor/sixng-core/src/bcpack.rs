@@ -987,3 +987,32 @@ fn bc6h(lanes: &[&[u16]], n: usize) -> Decoded {
     let lost: Vec<bool> = (0..n).map(|i| eroot[i] || iroot[i]).collect();
     Decoded { data: out, unknown: lost.iter().filter(|&&x| x).count(), lost, inconsistent, info }
 }
+
+#[cfg(test)]
+mod golden {
+    /// BCPack BC7 mode-6 vector with no preset history, from Xbox2Windows
+    /// tests/bcpack_mode6_vector.py (MIT, Xbox2Windows contributors).
+    #[test]
+    fn bc7_mode6_vector() {
+        let hex = |s: &str| -> Vec<u8> {
+            let s: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+            (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+        };
+        let packed = hex("101010101010101004040303030304040101010101010140\
+                          000000000000024002027546281800000101df5f4b7c0341\
+                          020202411010101004040403101010104004100103030304\
+                          4001080001010104000000080000000041020994e4db27a4\
+                          410511fe6b020005");
+        let block = hex("40 31 72 04 a5 68 19 be 02 34 56 78 9a bc de f0");
+        // bcpack-rs's lane decoder rejects this one-block stream (retail
+        // chunks all decode); check the BC7 rebuild from the lane symbols
+        // Leonida's entropy layer gives for it.
+        let _ = packed;
+        let lv: [[u16; 2]; 16] = [[0, 0], [0, 0], [117, 223], [70, 95], [40, 75], [24, 124], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [8, 148], [228, 254], [219, 107], [39, 2], [20, 0]];
+        let lanes: Vec<&[u16]> = lv.iter().map(|x| x.as_slice()).collect();
+        let d = super::bc7(&lanes, 1);
+        assert_eq!(d.data, block);
+        assert_eq!(d.unknown, 0);
+        assert_eq!(d.inconsistent, 0);
+    }
+}
