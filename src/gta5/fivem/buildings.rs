@@ -734,6 +734,21 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     // used by several families goes once into the shared chain
     // t6m_shr0000 <- t6m_shr0001 <- ... (gtxd.meta parents), and every family
     // txd's parent is the last shared txd, so nothing is stored twice.
+    // Texture size cap by the largest model using it (bounding radius):
+    // small props never show a texture at 1-2k on screen.
+    let mut tcap: HashMap<String, u16> = HashMap::new();
+    for a in done.values() {
+        let rad = (0..3).map(|k| (a.hi[k] - a.lo[k]).powi(2)).sum::<f32>().sqrt() / 2.0;
+        let cap: u16 = if rad < 1.5 { 128 } else if rad < 4.0 { 256 } else if rad < 12.0 { 512 } else { 4096 };
+        for t in &a.texs {
+            let e = tcap.entry(t.clone()).or_insert(0);
+            *e = (*e).max(cap);
+        }
+    }
+    let cap_of = |t: &str| -> u16 {
+        let c = tcap.get(t).copied().unwrap_or(4096);
+        ctx.o.max_tex.map_or(c, |m| c.min(m))
+    };
     let tsize = |t: &str| fs::metadata(cache.join(format!("{}.dds", &t[4..]))).map(|m| m.len()).unwrap_or(0);
     let mut fam: BTreeMap<String, Vec<&Arch>> = BTreeMap::new();
     for a in done.values() {
@@ -808,7 +823,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
             let file = format!("{stem}.ytd");
             let mut sorted = list.clone();
             sorted.sort();
-            let fp = sha(&format!("{TOOL}|{:?}|{}", ctx.o.max_tex, sorted.iter().map(|t| format!("{t}:{}", tsize(t))).collect::<Vec<_>>().join(",")));
+            let fp = sha(&format!("{TOOL}|{:?}|{}", ctx.o.max_tex, sorted.iter().map(|t| format!("{t}:{}:{}", tsize(t), cap_of(t))).collect::<Vec<_>>().join(",")));
             if ctx.up_to_date(&file, &fp).is_some() {
                 return ctx.emit(&file, &fp, json!({"textures": sorted.len()}), None);
             }
@@ -817,9 +832,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
                 let p = cache.join(format!("{}.dds", &t[4..]));
                 let b = fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
                 let mut tex = ytd::from_dds(t, &b)?;
-                if let Some(m) = ctx.o.max_tex {
-                    tex.limit_size(m);
-                }
+                tex.limit_size(cap_of(t));
                 texs.push(tex);
             }
             let bytes = ytd::build_ytd(&texs).map_err(|e| format!("{file}: {e}"))?;
@@ -850,12 +863,23 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     // Size floor: 6m's lodDists assume its own LOD chain; in GTA a big
     // building must not stop drawing before the small props on it, so
     // lodDist >= 10x bounding radius (150..1500 m), >= 300 m when large.
+    let radius = |a: &Arch| (0..3).map(|k| (a.hi[k] - a.lo[k]).powi(2)).sum::<f32>().sqrt() / 2.0;
     let floor = |a: &Arch| {
-        let r = (0..3).map(|k| (a.hi[k] - a.lo[k]).powi(2)).sum::<f32>().sqrt() / 2.0;
+        let r = radius(a);
         let f = (r.max(1.0) * 10.0).clamp(150.0, 1500.0);
         if r >= 15.0 { f.max(300.0) } else { f }
     };
-    let lod = |n: &str, a: &Arch| alod.get(n).copied().unwrap_or(0.0).max(floor(a));
+    // Clutter (bounding radius < 3 m: cones, crates, tools, signs) streams
+    // only near the player: lodDist 40..100 m whatever 6m says.
+    let small = |a: &Arch| radius(a) < 3.0;
+    let clamp_small = |a: &Arch, d: f32| if small(a) { d.clamp(40.0, 100.0) } else { d };
+    let lod = |n: &str, a: &Arch| {
+        if small(a) {
+            clamp_small(a, alod.get(n).copied().unwrap_or(radius(a) * 30.0))
+        } else {
+            alod.get(n).copied().unwrap_or(0.0).max(floor(a))
+        }
+    };
     let archetypes: Vec<Archetype> = done
         .iter()
         .map(|(n, a)| {
@@ -913,7 +937,11 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     let elod = |i: usize| {
         let p = kept[i];
         let a = &done[&p.name];
-        if p.elod > 0.0 { p.elod.max(floor(a)) } else { lod(&p.name, a) }
+        if p.elod > 0.0 {
+            if small(a) { clamp_small(a, p.elod) } else { p.elod.max(floor(a)) }
+        } else {
+            lod(&p.name, a)
+        }
     };
     let mut kids = vec![0u32; kept.len()];
     let mut kid_lod = vec![0f32; kept.len()];
