@@ -38,6 +38,9 @@ pub fn push_geoms(out: &mut Vec<Geom>, pos: &[V3], idx: &[u32], uvs: Option<&[[f
     let new = || Geom { texture: tex.to_string(), kind, ..Default::default() };
     let mut g = new();
     let mut remap: HashMap<u32, u16> = HashMap::new();
+    // weld: source vertices that differ only in attributes we drop
+    // (tangents, extra UV sets) collapse into one output vertex
+    let mut weld: HashMap<([i32; 3], [i8; 3], [i32; 2], u32), u16> = HashMap::new();
     for t in idx.chunks_exact(3) {
         if t.iter().any(|&i| i as usize >= n) || t[0] == t[1] || t[1] == t[2] || t[0] == t[2] {
             continue;
@@ -46,17 +49,29 @@ pub fn push_geoms(out: &mut Vec<Geom>, pos: &[V3], idx: &[u32], uvs: Option<&[[f
         if g.positions.len() + fresh > 65535 {
             out.push(std::mem::replace(&mut g, new()));
             remap.clear();
+            weld.clear();
         }
         for &i in t {
             let v = *remap.entry(i).or_insert_with(|| {
                 let s = i as usize;
                 let nn = unit(nrm[s]);
-                g.positions.push([pos[s][0] + nn[0] * lift, pos[s][1] + nn[1] * lift, pos[s][2] + nn[2] * lift]);
-                g.normals.push(nn);
-                g.colours.push(colours.map_or(0xFFFF_FFFF, |c| c[s] | 0xFF00_0000));
+                let p = [pos[s][0] + nn[0] * lift, pos[s][1] + nn[1] * lift, pos[s][2] + nn[2] * lift];
+                let col = colours.map_or(0xFFFF_FFFF, |c| c[s] | 0xFF00_0000);
                 let uv = uvs.map_or([0.0, 0.0], |u| u[s]);
-                g.uvs.push([uv[0], 1.0 - uv[1]]);
-                (g.positions.len() - 1) as u16
+                let uv = [uv[0], 1.0 - uv[1]];
+                let key = (
+                    p.map(|x| (x * 1000.0).round() as i32),
+                    nn.map(|x| (x * 127.0).round() as i8),
+                    uv.map(|x| (x * 4096.0).round() as i32),
+                    col,
+                );
+                *weld.entry(key).or_insert_with(|| {
+                    g.positions.push(p);
+                    g.normals.push(nn);
+                    g.colours.push(col);
+                    g.uvs.push(uv);
+                    (g.positions.len() - 1) as u16
+                })
             });
             g.indices.push(v);
         }

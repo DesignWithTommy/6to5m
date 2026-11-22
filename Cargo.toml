@@ -27,8 +27,11 @@ texture2ddecoder = "0.1.2"
 texpresso = "2.0.2"
 
 [profile.release]
-lto = true
-codegen-units = 1
+# thin LTO + parallel codegen: builds several times faster than fat LTO
+# with codegen-units = 1, for a few percent of runtime speed
+lto = "thin"
+codegen-units = 16
+strip = true
 
 [[bin]]
 name = "6ixpack"
