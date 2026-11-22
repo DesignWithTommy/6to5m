@@ -33,6 +33,7 @@ usage: 6ixpack fivem ped <name> --game <6m dir> --out <resource dir> [options]
   --work <dir>       sixng work dir with index/packs.json (default $SIXNG_WORK or work)
   --ped <model>      GTA V model name for the output (default: <name>)
   --list             list the candidate drawables and their components, write nothing
+  --all              every part of the character, not just the default look
   --only <a,b>       keep only drawables whose name contains one of these words
   --max-tex <px>     cap texture size (default 1024)";
 
@@ -44,6 +45,7 @@ pub struct PedOpts {
     pub ped: String,
     pub list: bool,
     pub only: Vec<String>,
+    pub all: bool,
     pub max_tex: u16,
 }
 
@@ -56,6 +58,7 @@ fn parse(args: &[String]) -> Result<PedOpts, String> {
         ped: String::new(),
         list: false,
         only: Vec::new(),
+        all: false,
         max_tex: 1024,
     };
     let mut it = args.iter();
@@ -67,6 +70,7 @@ fn parse(args: &[String]) -> Result<PedOpts, String> {
             "--work" => o.work = val(&mut it, a)?.into(),
             "--ped" => o.ped = val(&mut it, a)?.to_lowercase(),
             "--list" => o.list = true,
+            "--all" => o.all = true,
             "--only" => o.only = val(&mut it, a)?.split(',').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect(),
             "--max-tex" => o.max_tex = val(&mut it, a)?.parse().map_err(|e| format!("--max-tex: {e}"))?,
             s if s.starts_with('-') => return Err(format!("unknown argument {s}\n{USAGE}")),
@@ -89,38 +93,76 @@ fn parse(args: &[String]) -> Result<PedOpts, String> {
 /// GTA V ped component slots (ePedVarComp order) and their file tokens.
 const SLOTS: [&str; 12] = ["head", "berd", "hair", "uppr", "lowr", "hand", "feet", "teef", "accs", "task", "decl", "jbib"];
 
-/// Component slot for a 6m drawable name, or None to skip it.
+// Part selection ported from SixNG `outfit.rs` (GPL-3.0, upstream de366fb):
+// a character is `<prefix>_<item>_<fit>_...` with a fit tag (`fr1`, `mr1`);
+// the default look is one part per outfit slot, the first in name order.
+
+/// Fit tag (`mr1`, `fr1`, `mk1` ...): sex + body type + number.
+fn is_fit(t: &str) -> bool {
+    let b = t.as_bytes();
+    b.len() == 3 && (b[0] == b'm' || b[0] == b'f') && b[1].is_ascii_lowercase() && b[2].is_ascii_digit()
+}
+
+/// Character prefix (tokens before `<item>_<fit>`, at least two) and item word.
+fn prefix_item(name: &str) -> Option<(String, String)> {
+    let t: Vec<&str> = name.split('_').collect();
+    let i = t.iter().position(|x| is_fit(x))?;
+    (i >= 3).then(|| (t[..i - 1].join("_"), t[i - 1].to_string()))
+}
+
+/// SixNG outfit slot of an item word; None = accessory (off by default).
+fn outfit_slot(item: &str) -> Option<&'static str> {
+    const SL: &[(&str, &str)] = &[
+        ("hair", "hair"), ("beard", "beard"), ("brows", "brows"), ("lashes", "lashes"), ("eyes", "eyes"), ("teeth", "teeth"),
+        ("bodyupper", "body_upper"), ("bodylower", "body_lower"), ("fullbody", "full"), ("dress", "full"), ("jumpsuit", "full"), ("overalls", "full"),
+        ("jacket", "outer"), ("coat", "outer"), ("blazer", "outer"), ("cardigan", "outer"),
+        ("tshirt", "top"), ("shirt", "top"), ("sweatshirt", "top"), ("hoodie", "top"), ("tanktop", "top"), ("blouse", "top"), ("bra", "top"),
+        ("pants", "bottom"), ("shorts", "bottom"), ("skirt", "bottom"), ("undies", "bottom"), ("leggings", "bottom"),
+        ("boots", "feet"), ("shoes", "feet"), ("sneakers", "feet"), ("sandals", "feet"), ("heels", "feet"), ("piercing", "piercing"),
+    ];
+    if item == "head" {
+        return Some("head");
+    }
+    SL.iter().filter(|(w, _)| item.starts_with(w)).max_by_key(|(w, _)| w.len()).map(|(_, s)| *s)
+}
+
+/// Selection group of a part (SixNG `outfit_options`).
+fn group_of(name: &str) -> String {
+    let item = prefix_item(name).map(|x| x.1).unwrap_or_default();
+    match outfit_slot(&item) {
+        Some("head") if name.contains("_eyes") => "head eyes".into(),
+        Some("head") if name.contains("_earring") => "head earring".into(),
+        Some(s) => s.into(),
+        None => item,
+    }
+}
+
+/// GTA V component slot of a 6m drawable. Each default-look group gets its
+/// own slot, because a ped shows one drawable per slot. Eyes, brows and
+/// lashes are merged into the head.
 fn slot_of(name: &str) -> Option<usize> {
     let n = name.to_ascii_lowercase();
-    let has = |ks: &[&str]| ks.iter().any(|k| n.contains(k));
-    if has(&["bipedbounds", "_cloth_sim", "physics"]) {
+    if ["bipedbounds", "_cloth_sim", "physics"].iter().any(|k| n.contains(k)) {
         return None;
     }
-    if has(&["_eyes", "eyelash", "lashes", "_head", "headcs"]) {
-        return Some(0);
-    }
-    if has(&["beard", "stubble", "moustache", "mustache", "goatee"]) {
-        return Some(1);
-    }
-    if has(&["hair", "brows"]) {
-        return Some(2);
-    }
-    if has(&["glove"]) {
-        return Some(5);
-    }
-    if has(&["shoe", "boot", "sneaker", "trainer", "heels", "sandal", "flipflop", "loafer", "slipper"]) {
-        return Some(6);
-    }
-    if has(&["jeans", "pants", "shorts", "skirt", "trouser", "legging", "cargo", "chino", "jogger", "slacks"]) {
-        return Some(4);
-    }
-    if has(&["jacket", "coat", "hoodie", "bomber", "blazer", "parka", "cardigan"]) {
-        return Some(11);
-    }
-    if has(&["tshirt", "shirt", "top", "crop", "vest", "tank", "polo", "blouse", "sweater", "dress", "bra", "fullbody", "body", "torso", "uniform", "suit", "overall"]) {
-        return Some(3);
-    }
-    Some(8)
+    let item = prefix_item(&n).map(|x| x.1).unwrap_or_default();
+    Some(match outfit_slot(&item) {
+        Some("head" | "eyes" | "brows" | "lashes") => 0,
+        Some("beard") => 1,
+        Some("hair") => 2,
+        Some("body_upper") => 3,
+        Some("bottom") => 4,
+        Some("feet") => 6,
+        Some("teeth") => 7,
+        Some("top" | "full") => 8,
+        Some("body_lower") => 9,
+        Some("piercing") => 10,
+        Some("outer") => 11,
+        _ if item.starts_with("legacyhead") => 0,
+        _ if item.starts_with("legacyped") => 3,
+        _ if item.starts_with("glove") => 5,
+        _ => 9, // accessories (only with --all / --only)
+    })
 }
 
 /// 6m bone name -> GTA V bone name, for names that differ.
@@ -536,36 +578,56 @@ fn decode_part(game: &Path, e: &Entry, six: &sixng_core::pedskel::PedSkeleton, m
     Ok(part)
 }
 
-/// Candidate drawables: packs.rpf drawables named <name>_*, one entry per
-/// name (the largest copy).
+/// Candidate drawables: packs.rpf drawables of character `<name>` (one entry
+/// per name, the largest copy). Default: SixNG's default look, one part per
+/// outfit slot (accessories, `_alt_`, holsters, `_cull` and first-person
+/// copies left out; a one-piece outfit replaces top and bottom). `--all`
+/// keeps every part, `--only` filters by name words.
 fn candidates<'a>(ix: &'a sixng_core::scan::ArchiveIndex, o: &PedOpts) -> Vec<&'a Entry> {
-    let prefix = format!("{}_", o.name);
     let mut by: BTreeMap<String, &Entry> = BTreeMap::new();
     for e in &ix.entries {
         let Some(n) = e.name.as_deref() else { continue };
         let l = n.to_ascii_lowercase();
-        if e.rtype.as_deref() != Some("dr") || !l.starts_with(&prefix) || slot_of(&l).is_none() {
+        if e.rtype.as_deref() != Some("dr") || slot_of(&l).is_none() || prefix_item(&l).map(|x| x.0).as_deref() != Some(o.name.as_str()) {
             continue;
         }
         if !o.only.is_empty() && !o.only.iter().any(|w| l.contains(w.as_str())) {
             continue;
         }
         let cur = by.entry(l).or_insert(e);
-        if e.usize > cur.usize {
+        if (e.usize, std::cmp::Reverse(e.off)) > (cur.usize, std::cmp::Reverse(cur.off)) {
             *cur = e;
         }
     }
-    // other characters sharing the prefix (cs_lucia_dad_head_*, cs_lucia_old_*)
-    // are separate peds: drop them unless asked for by --only
-    let others: Vec<String> = by
-        .keys()
-        .filter_map(|n| {
-            let rest = &n[prefix.len()..];
-            let w = rest.split('_').next()?;
-            (rest.starts_with(&format!("{w}_head_")) && w != "head").then(|| format!("{prefix}{w}_"))
-        })
-        .collect();
-    by.into_iter().filter(|(n, _)| !others.iter().any(|o| n.starts_with(o.as_str()))).map(|x| x.1).collect()
+    if o.all || !o.only.is_empty() {
+        return by.into_values().collect();
+    }
+    let skip = |n: &str| ["_cull", "_fp", "eyecap", "tattooprojection"].iter().any(|x| n.contains(x));
+    let mut chosen: BTreeMap<String, &Entry> = BTreeMap::new();
+    for pass in [false, true] {
+        // second pass: a slot with only `_cull` copies takes one of those
+        for (n, e) in &by {
+            let item = prefix_item(n).map(|x| x.1).unwrap_or_default();
+            if outfit_slot(&item).is_none() || n.contains("_alt_") || n.contains("holster") || skip(n) != pass {
+                continue;
+            }
+            chosen.entry(group_of(n)).or_insert(e);
+        }
+    }
+    if chosen.contains_key("full") {
+        chosen.remove("top");
+        chosen.remove("bottom");
+    }
+    // no head of its own (cs_jason): the legacy head and whole-body copies
+    if !chosen.contains_key("head") {
+        for (n, e) in &by {
+            let item = prefix_item(n).map(|x| x.1).unwrap_or_default();
+            if item.starts_with("legacyhead") || item.starts_with("legacyped") {
+                chosen.entry(item).or_insert(e);
+            }
+        }
+    }
+    chosen.into_values().collect()
 }
 
 /// Order variations: the plain drawable first.
@@ -606,13 +668,13 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
         match r {
             Ok(p) => {
                 report.push(json!({"source": n, "slot": SLOTS[p.slot], "geometries": p.geoms.len(), "texture": p.diffuse.is_some(), "warnings": p.warnings}));
-                if n.contains("_eyes") || n.contains("lash") { extra.push(p) } else { parts.push(p) }
+                if n.contains("_eyes") || n.contains("lash") || n.contains("_brows") { extra.push(p) } else { parts.push(p) }
             }
             Err(e) => report.push(json!({"source": n, "error": e})),
         }
     }
     for e in extra {
-        let base = e.src.replace("_eyes", "");
+        let base = e.src.replace("_eyes", "").replace("lashes", "head").replace("brows", "head");
         let common = |a: &str, b: &str| a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count();
         let best = parts.iter_mut().filter(|p| p.slot == 0).max_by_key(|p| common(&p.src, &base));
         match best {
