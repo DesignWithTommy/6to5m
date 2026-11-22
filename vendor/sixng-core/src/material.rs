@@ -227,7 +227,7 @@ pub fn layers(name_hash: &str, entries: &[Value]) -> Option<Value> {
         ],
         "overlay": {"colour_alpha": tex(overlay), "uv_set": null, "weight": "texture alpha (grime/dirt); UV set unknown"},
         "extra_data": tex(extra),
-        "vertex_color_channels": {"r": "unverified: a baked shading term, mostly 255 (dark blobs on ground tiles where trees stand, 23 on average on trees, 252 on interior shaders, so not sky occlusion alone)", "g": "unverified: a per-surface mask, equal to r on 63 % of ordinary vertices; low on ground shaders (street tile: grass 0, road mid grey, pavement 255)", "b": "tint palette index (entry within the palette row)", "a": "layer 2 weight"},
+        "vertex_color_channels": {"r": "unverified: a baked shading term, mostly 255 (dark blobs on ground tiles where trees stand, 23 on average on trees, 252 on interior shaders; does not follow sky visibility from its own or neighbouring placed geometry in ray tests, nor nearby batch trees, grass AO or road distance)", "g": "unverified: equal to r on 63 % of ordinary vertices; low on ground shaders and varies widely within one collision surface, so not a surface-type mask (looks painted per vertex)", "b": "tint palette index (entry within the palette row)", "a": "layer 2 weight"},
         "confidence": {"grouping": "high", "weight_channel": "medium", "uv_layer2": "medium", "uv_base": "low", "data_channels": "unknown"},
         "note": "Derived from texture-size grouping and vertex/UV statistics, not from shader code. Blend: lerp(base, layer2, COLOR0.a), then the overlay by its alpha. Normal maps: DirectX green.",
     }))

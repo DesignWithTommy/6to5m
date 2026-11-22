@@ -375,6 +375,37 @@ pub fn mesh_glb(name: &str, groups: &[NodeGroup], materials: &[Material], skelet
     pack(&doc, b.bin)
 }
 
+/// Build a line GLB: one node with line segments (mode 1, `segments` =
+/// index pairs into `positions`) and, when `tris` is not empty, a second
+/// node with triangles over the same positions (mode 4). RAGE space in.
+pub fn lines_glb(name: &str, positions: &[[f32; 3]], segments: &[u32], tris: &[u32], extras: Value) -> Vec<u8> {
+    let mut b = Builder::default();
+    let pos: Vec<[f32; 3]> = positions.iter().map(|&v| yup(v)).collect();
+    let a = b.vec3(&pos, true);
+    let li = b.indices(segments);
+    let mut meshes = vec![json!({"name": format!("{name}_strands"), "primitives": [{"attributes": {"POSITION": a}, "indices": li, "mode": 1}]})];
+    let mut nodes = vec![json!({"name": format!("{name}_strands"), "mesh": 0})];
+    if !tris.is_empty() {
+        let ti = b.indices(tris);
+        meshes.push(json!({"name": format!("{name}_roots"), "primitives": [{"attributes": {"POSITION": a}, "indices": ti, "mode": 4, "material": 0}]}));
+        nodes.push(json!({"name": format!("{name}_roots"), "mesh": 1}));
+    }
+    let n = nodes.len();
+    nodes.push(json!({"name": name, "children": (0..n).collect::<Vec<_>>()}));
+    let doc = json!({
+        "asset": {"version": "2.0", "generator": "sixng-extractor (lines)"},
+        "scene": 0,
+        "scenes": [{"name": name, "nodes": [n], "extras": extras}],
+        "nodes": nodes,
+        "meshes": meshes,
+        "materials": [{"name": "roots", "doubleSided": true, "pbrMetallicRoughness": {"baseColorFactor": [0.5, 0.5, 0.5, 1.0], "metallicFactor": 0.0}}],
+        "accessors": b.accessors,
+        "bufferViews": b.views,
+        "buffers": [{"byteLength": b.bin.len()}],
+    });
+    pack(&doc, b.bin)
+}
+
 /// Build a point-cloud GLB (mode 0), one node per primitive.
 pub fn points_glb(name: &str, prims: &[PointPrim], extras: Value) -> Vec<u8> {
     let mut b = Builder::default();

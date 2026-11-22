@@ -92,11 +92,12 @@ pub fn looks_like_fragment(p: &[u8]) -> bool {
     if p.len() < 176 || q64(p, 0) != 0 {
         return false;
     }
-    if ![8, 16, 24, 32, 40, 168].iter().all(|&at| system_pointer(q64(p, at))) {
+    // rpf9-explorer 1.2: +16/+32/+40 are optional (null or a system pointer).
+    if ![8, 24, 168].iter().all(|&at| system_pointer(q64(p, at))) || ![16, 32, 40].iter().all(|&at| q64(p, at) == 0 || system_pointer(q64(p, at))) {
         return false;
     }
-    let (a, b) = (q16(p, 48), q16(p, 52));
-    (1..=4096).contains(&a) && (1..=4096).contains(&b) && a == q16(p, 50) && b == q16(p, 54)
+    let (a, b, c, d) = (q16(p, 48), q16(p, 50), q16(p, 52), q16(p, 54));
+    (1..=4096).contains(&a) && b <= 4096 && c <= d && d <= 4096
 }
 
 pub fn looks_like_dictionary(p: &[u8]) -> bool {
@@ -124,7 +125,7 @@ fn looks_like_drawable_header(p: &[u8], embedded: bool) -> bool {
         return false;
     }
     let radius = qf(p, 44);
-    valid_bounds(vec3(p, 48), vec3(p, 64)) && radius.is_finite() && radius > 0.0 && radius < 1_000_000.0
+    valid_bounds(vec3(p, 48), vec3(p, 64)) && radius.is_finite() && radius >= 0.0 && radius < 1_000_000.0
 }
 
 pub fn looks_like_drawable(p: &[u8]) -> bool {
@@ -275,7 +276,7 @@ impl ExtentReader<'_> {
                 check(
                     seen_models.insert(model)
                         && count > 0
-                        && count <= 256
+                        && count <= MAX_MESHES
                         && count == self.u16(model + 18)? as usize
                         && count == self.u16(model + 54)? as usize,
                 )?;
@@ -585,7 +586,8 @@ impl<'a> ModelReader<'a> {
         }
         req(!meshes.is_empty())?;
         let (mut lo, mut hi) = (min, max);
-        if dictionary || self.bones {
+        // rpf9-explorer 1.2: zero-size declared bounds fall back to the decoded geometry.
+        if dictionary || self.bones || min == max {
             lo = [f32::INFINITY; 3];
             hi = [f32::NEG_INFINITY; 3];
             for mesh in &meshes {
@@ -827,7 +829,9 @@ impl<'a> ModelReader<'a> {
         if bone_palette {
             let hint = ((count_flags >> 16) & 0x1FFF) as usize;
             let constant = count_flags & 0x2000_0000 != 0;
-            req(if constant { hint & 1 == 0 && (bone_count == 0 || hint / 2 < bone_count) } else { hint == 0 })?;
+            // 16-bit bone indices (R16_UINT in the blend-index slot) carry hint 2.
+            let wide = r8(sys, fvf + 0xD0 + 20)? == 2 && r8(sys, fvf + 0x104 + 20)? == 57;
+            req(if constant { hint & 1 == 0 && (bone_count == 0 || hint / 2 < bone_count) } else { hint == 0 || (hint == 2 && wide) })?;
             for i in 0..clusters {
                 let bone = r16(index, palette_at + i * 2)? as usize;
                 req(bone == 0xFFFF || bone_count == 0 || bone < bone_count)?;

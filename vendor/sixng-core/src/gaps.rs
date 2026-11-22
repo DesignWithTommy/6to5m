@@ -501,10 +501,16 @@ pub fn texture_gaps(archives: &[(ArchiveInfo, Vec<Entry>)], inp: &GapInputs, pro
     let (usage, usage_info) = read_usage(&inp.placements);
 
     // 2. drawables
-    let total: u64 = archives.iter().map(|a| a.1.len() as u64).sum();
+    let total: u64 = archives.iter().flat_map(|a| &a.1).map(|e| if e.id.contains('#') { 1 } else { e.members.len().max(1) as u64 }).sum();
     let done = AtomicU64::new(0);
     let mut models: Vec<Model> = Vec::new();
     for (a, entries) in archives {
+        let entries: Vec<_> = entries.iter().flat_map(|e| {
+            if e.members.is_empty() || e.id.contains('#') { vec![e.clone()] } else {
+                e.members.iter().filter_map(|n| crate::export::member_entry(e, n).ok()).collect()
+            }
+        }).collect();
+        let resolver = crate::export::ModelResolver::new(&entries);
         let m: Vec<Model> = entries
             .par_iter()
             .filter_map(|e| {
@@ -512,10 +518,17 @@ pub fn texture_gaps(archives: &[(ArchiveInfo, Vec<Entry>)], inp: &GapInputs, pro
                 if d % 256 == 0 {
                     progress(&e.id, d, total);
                 }
-                let r = Resource::load_sys(&a.path, e).ok()?;
-                let shaders = crate::drawable::find_shaders(&r);
+                let (source, member) = resolver.resolve(&entries, &e.id).ok()?;
+                let r = if member.is_some() { Resource::load(&a.path, source) } else { Resource::load_sys(&a.path, source) }.ok()?;
+                let shaders = if let Some(name) = member {
+                    let mut info = crate::drawable::describe(&r);
+                    crate::drawable::select_member(&r, &mut info, name).ok()?;
+                    info.shaders
+                } else { crate::drawable::find_shaders(&r) };
                 let name = e.name.clone().unwrap_or_else(|| e.id.clone());
-                let ext = if r.sys.len() >= 0x4c { [(r.f32(0x2c + 20) - r.f32(0x2c + 4)).abs(), (r.f32(0x2c + 24) - r.f32(0x2c + 8)).abs()] } else { [0.0, 0.0] };
+                let ext = if let Some(name) = member {
+                    crate::drawable::model_bounds(&r, Some(name)).map(|b| [b[1][0] - b[0][0], b[1][1] - b[0][1]]).unwrap_or([0.0; 2])
+                } else if r.sys.len() >= 0x4c { [(r.f32(0x2c + 20) - r.f32(0x2c + 4)).abs(), (r.f32(0x2c + 24) - r.f32(0x2c + 8)).abs()] } else { [0.0, 0.0] };
                 let ext = if ext.iter().all(|v| v.is_finite() && *v < 20000.0) { ext } else { [0.0, 0.0] };
                 let mats = shaders
                     .iter()
@@ -788,7 +801,7 @@ pub fn texture_gaps(archives: &[(ArchiveInfo, Vec<Entry>)], inp: &GapInputs, pro
     let roles: BTreeMap<&str, Value> = by_role.iter().map(|(k, v)| (*k, json!({"flat": v[0], "lowmip": v[1], "ok_or_other": v[2]}))).collect();
 
     Ok((json!({
-        "note": "BCPack texture gaps (sixng texture-gaps). status: flat = every mip has bytes in BCPack chunks that do not decode (Xbox hardware texture codec; BC1 decodes, the other formats not yet); the export writes a flat fallback colour (model's decoded colour average, flat normal, mid grey for data maps). lowmip = top mips in such chunks, exported at mip N (resolution in `textures`). One record per affected material (drawable shader); `status` is its worst slot. placements = entity placements + batched instances using the model; area_m2 = local bbox x*y extent x scale^2 summed over placements (overlaps counted twice; LOD proxies cover the same ground as their HD models). Terrain / layered materials: a colour slot starts a layer (guess from slot order); surface_type from the layer's mean colour (when any mip decodes), else the model name, else the collision surface categories under the placements (inferred, see surface_categories.json). Classes come from shader families and model names (class_source).",
+        "note": "BCPack texture gaps (sixng texture-gaps). status: flat = every mip has bytes in BCPack chunks that do not decode (Xbox hardware texture codec; BC1, BC3 and BC7 decode, the other formats not yet); the export writes a flat fallback colour (model's decoded colour average, flat normal, mid grey for data maps). lowmip = top mips in such chunks, exported at mip N (resolution in `textures`). One record per affected material (drawable shader); `status` is its worst slot. placements = entity placements + batched instances using the model; area_m2 = local bbox x*y extent x scale^2 summed over placements (overlaps counted twice; LOD proxies cover the same ground as their HD models). Terrain / layered materials: a colour slot starts a layer (guess from slot order); surface_type from the layer's mean colour (when any mip decodes), else the model name, else the collision surface categories under the placements (inferred, see surface_categories.json). Classes come from shader families and model names (class_source).",
         "generated_by": "sixng texture-gaps",
         "seconds": t0.elapsed().as_secs_f64().round(),
         "inputs": {"archives": archives.iter().map(|a| json!({"archive": a.0.id, "drawables": a.1.len()})).collect::<Vec<_>>(), "usage": usage_info, "collision_cue": coll.is_some()},
