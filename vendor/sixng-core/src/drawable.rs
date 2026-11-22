@@ -994,6 +994,23 @@ pub struct Shader {
     /// Record bytes +0x38..+0x40 (render bucket flags, see material.rs).
     #[serde(default)]
     pub flags: Vec<u8>,
+    /// Non-texture parameters (constants), in table order.
+    #[serde(default)]
+    pub constants: Vec<ShaderConst>,
+}
+
+/// A constant of a shader: the parameter table continues after the
+/// texture entries with {u32 name hash, u32 descriptor}. Descriptors
+/// `0x0040_XX_tt` index the constant block (record +0x08, which runs up to
+/// the texture-pointer array at +0x10) at float offset XX; others
+/// (`0x01…`, `0x0041…`) point into buffers that are not read. `values` is
+/// the vec4 at that offset, or None when it is not in the block.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShaderConst {
+    pub hash: String,
+    pub desc: String,
+    pub offset: usize,
+    pub values: Option<[f32; 4]>,
 }
 
 /// A texture slot of a shader: the parameter it binds to and the texture
@@ -1030,7 +1047,7 @@ fn shaders_at(r: &Resource, arr: usize) -> Vec<Shader> {
         .map_while(|at| r.sys_off(r.u64(at)).filter(|&s| r.sys.get(s + 4..s + 8) == Some(b"atem")))
         .enumerate()
         .map(|(k, s)| {
-            let mut sh = Shader { index: k, record_off: s as u64, name_hash: format!("{:08x}", r.u32(s)), param_hashes: vec![], textures: vec![], flags: r.sys.get(s + 0x38..s + 0x40).map(|b| b.to_vec()).unwrap_or_default() };
+            let mut sh = Shader { index: k, record_off: s as u64, name_hash: format!("{:08x}", r.u32(s)), param_hashes: vec![], textures: vec![], flags: r.sys.get(s + 0x38..s + 0x40).map(|b| b.to_vec()).unwrap_or_default(), constants: vec![] };
             if let Some(pt) = r.sys_off(r.u64(s + 0x20)) {
                 let np = r.sys.get(pt + 1).copied().unwrap_or(0) as usize;
                 sh.param_hashes = (0..np).map(|i| format!("{:08x}", r.u32(pt + 8 + 8 * i))).collect();
@@ -1048,6 +1065,22 @@ fn shaders_at(r: &Resource, arr: usize) -> Vec<Shader> {
                             hash32: format!("{:08x}", r.u32(tr + 0x18)),
                         });
                     }
+                }
+                // constants: table entries after the textures (total count in byte 4 of the header)
+                let total = r.sys.get(pt + 4).copied().unwrap_or(0) as usize;
+                let block = r.sys_off(r.u64(s + 0x08)).and_then(|cb| r.sys_off(r.u64(s + 0x10)).filter(|&ta| ta > cb).map(|ta| (cb, (ta - cb) / 4)));
+                for i in np..total.min(256) {
+                    let v = r.u64(pt + 8 + 8 * i);
+                    if v == 0 {
+                        break;
+                    }
+                    let (h, d) = (v as u32, (v >> 32) as u32);
+                    // descriptor 0x0040_XX_tt indexes this block (XX = float offset);
+                    // others (0x01…, 0x0041…) point into buffers not read here
+                    let offset = ((d >> 8) & 0xff) as usize;
+                    let in_block = d >> 16 == 0x40;
+                    let values = block.filter(|&(_, nf)| in_block && offset + 4 <= nf).map(|(cb, _)| [0, 1, 2, 3].map(|k| r.f32(cb + 4 * (offset + k))));
+                    sh.constants.push(ShaderConst { hash: format!("{h:08x}"), desc: format!("{d:08x}"), offset, values });
                 }
             }
             sh
@@ -1367,7 +1400,7 @@ mod dictionary_tests {
         geoms[1].vertex_buffer = 0; geoms[1].index_buffer = 1;
         info.geometries = geoms;
         info.buffers = (0..4).map(|i| GfxBuffer { struct_off: i, gfx_off: i, bytes: 0, flags: 0, kind_hint: 8, mesh_blob: None }).collect();
-        info.shaders = (0..3).map(|i| Shader { index: i, record_off: i as u64, name_hash: format!("shader{i}"), param_hashes: vec![], textures: vec![], flags: vec![] }).collect();
+        info.shaders = (0..3).map(|i| Shader { index: i, record_off: i as u64, name_hash: format!("shader{i}"), param_hashes: vec![], textures: vec![], flags: vec![], constants: vec![] }).collect();
         info.shaders[2].textures.push(TexRef { param: 0, param_hash: String::new(), hash64: String::new(), hash32: format!("{:08x}", crate::meta7a::joaat("own")) });
         info.embedded_textures = ["other", "own"].iter().map(|name| crate::texture::TexInfo {
             name: name.to_string(), width: 1, height: 1, depth: 1, mips: 1, dxgi_format: 28,
