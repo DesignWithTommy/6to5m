@@ -24,9 +24,9 @@ What works today:
 ## Roadmap
 
 - [x] BCPack BC4
-- [ ] BCPack BC6H (modes m10/m14) and the remaining inconsistent BC7 blocks
+- [ ] BCPack BC6H (modes m10/m14) and the remaining inconsistent BC7 blocks (in progress)
 - [x] Road and asphalt surfaces
-- [ ] LOD/SLOD drawables with no linked model (unnamed hashes)
+- [x] LOD/SLOD drawables with no linked model (unresolved archetypes 84,216 to 37; `#member` model ids in progress)
 - [ ] Models outside `levels.rpf` (`pack/*` archives)
 - [ ] Collision surface materials (currently all default)
 - [ ] Interior (MLO) shells, so interior contents stop needing `--interiors` (in progress)
@@ -41,7 +41,7 @@ What works today:
 - [ ] Lights to ymap LODLights / DistantLODLights (night lighting)
 - [ ] Instanced batches (grass, vegetation) to ymap grass instance lists
 - [ ] Minimap texture and zone names
-- [ ] Split output into several resources by region/size (in progress; the 2 km airport is 2.8 GB after size work, down from 5.2 GB)
+- [x] Split output into several resources by region: `--split <metres>` writes `<out>/[<name>]/` with one resource per region plus `<name>_common` (ytyps, LOD/SLOD ymaps, shared txds, terrain, water) and an `ensure.cfg`; regions over `--split-max <MB>` (default 1024) are quartered. Not yet tested in game
 - [ ] Coordinate offset option: GTA VI's map reaches y 9474, past GTA V's ~±8000 limit
 - [ ] Los Santos removal in Rust: stub ymaps/ybns for vanilla _citye/_cityw/_hills, packing the ~11k ybn stubs into fewer files
 
