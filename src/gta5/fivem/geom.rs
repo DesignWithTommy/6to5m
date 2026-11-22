@@ -7,6 +7,10 @@ use std::collections::HashMap;
 
 pub type V3 = [f32; 3];
 
+/// `--simplify`: meshopt edge collapse on dense meshes. Off by default: at
+/// 0.5% error it flattened building facades into layers in game.
+pub static SIMPLIFY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Append geometries for one source mesh. `uvs` are raw (OBJ-style, V up);
 /// `colours` packed R in the low byte.
 /// `kind`: GTA V bucket (ydr::Geom::kind). Decals are lifted 5 mm along
@@ -24,7 +28,7 @@ pub fn push_geoms_n(out: &mut Vec<Geom>, pos: &[V3], idx: &[u32], normals: Optio
     // colour seams are separate vertices, so meshopt keeps them as locked
     // borders and textures do not swim.
     let simplified;
-    let idx = if idx.len() >= 3000 && idx.iter().all(|&i| (i as usize) < n) {
+    let idx = if SIMPLIFY.load(std::sync::atomic::Ordering::Relaxed) && idx.len() >= 3000 && idx.iter().all(|&i| (i as usize) < n) {
         let mut dst = vec![0u32; idx.len()];
         let k = meshopt_rs::simplify::simplify(&mut dst, idx, pos, idx.len() / 2 / 3 * 3, 0.005);
         dst.truncate(k);
