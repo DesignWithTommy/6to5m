@@ -100,6 +100,31 @@ pub(crate) fn decode_lanes(codec: u8, comp: &[u8], out_len: usize) -> Result<Vec
 /// Bump on every change to decoded BCPack output: keys derived texture
 /// caches (fivem_tex_cache_v{N}) so stale ones invalidate themselves.
 pub const BCPACK_DECODER_VERSION: u32 = 2;
+/// Per-codec decoder versions (bump the codec whose decoded output changed):
+/// BC1, BC3, BC4, BC5, BC6H, BC7. `cache_tag` builds a texture-cache key
+/// from them so a change re-decodes only that codec's textures.
+pub const BCPACK_CODEC_VERSION: [(u8, u32); 6] = [(CODEC_BC1, 1), (CODEC_BC3, 1), (CODEC_BC4, 1), (CODEC_BC5, 1), (CODEC_BC6H, 2), (CODEC_BC7, 1)];
+
+/// Decoder version for a DXGI format's BCPack codec (0 = not BCPack-coded).
+pub fn codec_version_for_dxgi(dxgi: u32) -> u32 {
+    let codec = match dxgi {
+        70..=72 => CODEC_BC1,
+        76..=78 => CODEC_BC3,
+        79..=81 => CODEC_BC4,
+        82..=84 => CODEC_BC5,
+        94..=96 => CODEC_BC6H,
+        97..=99 => CODEC_BC7,
+        _ => return 0,
+    };
+    BCPACK_CODEC_VERSION.iter().find(|x| x.0 == codec).map_or(0, |x| x.1)
+}
+
+/// Texture-cache tag for a source DXGI format, e.g. "f95v2"; put it in the
+/// cached file name so only that format's entries go stale on a bump.
+pub fn cache_tag(dxgi: u32) -> String {
+    format!("f{dxgi}v{}", codec_version_for_dxgi(dxgi))
+}
+
 /// Bump when the history calibration/refinement changes: keys the cached
 /// `bcpack-history-*.bin`.
 pub const BCPACK_HISTORY_VERSION: u32 = 1;

@@ -373,6 +373,28 @@ impl Ttpf {
     pub fn data_ex(&self, t: &TtpfTex) -> Result<(Vec<u8>, u64)> {
         self.read_ex(t.virt, t.size.min(64 << 20))
     }
+
+    /// Smallest-index mip whose larger side is at most `max_dim` pixels
+    /// (the last mip when none is that small).
+    pub fn mip_for_max_dim(&self, t: &TtpfTex, max_dim: u32) -> u32 {
+        let n = t.layout().map_or(1, |l| l.mips.len() as u32).max(1);
+        (0..n).find(|&m| (t.width >> m).max(t.height >> m).max(1) <= max_dim).unwrap_or(n - 1)
+    }
+
+    /// Like `data_ex`, but only decodes mip `mip` and smaller: bytes before
+    /// mip `mip` stay zero and BCPack chunks wholly before it are never
+    /// decoded. BCPack prediction chains never cross a chunk (a reference
+    /// before the chunk start reads the preset table), so the result for
+    /// mips >= `mip` is identical to a full decode. Mip-tail textures whose
+    /// small mips share a chunk with larger ones decode that chunk once.
+    pub fn data_ex_from_mip(&self, t: &TtpfTex, mip: u32) -> Result<(Vec<u8>, u64)> {
+        let size = t.size.min(64 << 20);
+        let start = t.layout().filter(|l| (mip as usize) < l.mips.len()).map_or(0, |l| l.mip_span(mip as usize).0).min(size);
+        let (tail, skipped) = self.read_ex(t.virt + start, size - start)?;
+        let mut out = vec![0u8; size as usize];
+        out[start as usize..].copy_from_slice(&tail);
+        Ok((out, skipped))
+    }
 }
 
 /// All stores under `<game>/data/ttdb`, opened lazily.

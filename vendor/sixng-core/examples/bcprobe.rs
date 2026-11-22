@@ -63,6 +63,29 @@ fn main() {
             std::fs::write(&a[4], h.to_bytes()).unwrap();
             println!("refined in {:.1}s", t0.elapsed().as_secs_f64());
         }
+        "fromcheck" => {
+            // fromcheck <n>: data_ex_from_mip == data_ex on mips >= m, for n BCPack textures
+            let lim: usize = a[3].parse().unwrap();
+            let (mut n, mut bad) = (0, 0);
+            let t0 = std::time::Instant::now();
+            let (mut tf, mut tp) = (0.0, 0.0);
+            'o: for s in &set.stores { for t in &s.textures {
+                let Some(l) = t.layout() else { continue };
+                if l.mips.len() < 3 || t.width < 1024 || !s.chunks.windows(2).any(|w| w[1].1 > t.virt && w[0].1 < t.virt + t.size && w[0].2 & 0x1C != 0) { continue; }
+                let m = s.mip_for_max_dim(t, 512);
+                let a0 = std::time::Instant::now();
+                let Ok((full, _)) = s.data_ex(t) else { continue };
+                tf += a0.elapsed().as_secs_f64();
+                let a1 = std::time::Instant::now();
+                let (part, _) = s.data_ex_from_mip(t, m).unwrap();
+                tp += a1.elapsed().as_secs_f64();
+                let st = l.mip_span(m as usize).0 as usize;
+                n += 1;
+                if full[st..] != part[st..] { bad += 1; }
+                if n >= lim { break 'o; }
+            } }
+            println!("{n} textures, {bad} differ; full {tf:.2}s vs from-mip {tp:.2}s ({:.1}s)", t0.elapsed().as_secs_f64());
+        }
         "mipcheck" => {
             // mipcheck <codec hex> <max textures>: BCPack mip m vs plain mip m+1, per block
             let codec = u8::from_str_radix(&a[3], 16).unwrap();
