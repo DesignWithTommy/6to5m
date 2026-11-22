@@ -533,7 +533,7 @@ pub fn cached_history(set: &TtpfSet) -> crate::bcpack::History {
         std::fs::metadata(&s.path).map(|m| m.len()).unwrap_or(0).hash(&mut hs);
     }
     let dir = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("sixng");
-    let file = dir.join(format!("bcpack-history-{:016x}.bin", hs.finish()));
+    let file = dir.join(format!("bcpack-history-v{}-{:016x}.bin", crate::bcpack::BCPACK_HISTORY_VERSION, hs.finish()));
     if let Some(h) = std::fs::read(&file).ok().and_then(|b| crate::bcpack::History::from_bytes(&b)) {
         return h;
     }

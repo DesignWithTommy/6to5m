@@ -97,6 +97,13 @@ pub(crate) fn decode_lanes(codec: u8, comp: &[u8], out_len: usize) -> Result<Vec
 // Preset history ----------------------------------------------------------------
 
 /// Fitted preset ("built-in") history; see `bcpack_calib`.
+/// Bump on every change to decoded BCPack output: keys derived texture
+/// caches (fivem_tex_cache_v{N}) so stale ones invalidate themselves.
+pub const BCPACK_DECODER_VERSION: u32 = 1;
+/// Bump when the history calibration/refinement changes: keys the cached
+/// `bcpack-history-*.bin`.
+pub const BCPACK_HISTORY_VERSION: u32 = 1;
+
 #[derive(Clone)]
 pub struct History {
     pub bc4: Vec<Option<[u8; 2]>>,

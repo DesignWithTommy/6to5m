@@ -122,7 +122,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
 // ------------------------------------------------------------- textures
 
 /// Keyed textures from the ttdb pools / TTPF stores, cached as DDS under
-/// <work>/fivem_tex_cache/<hash>.dds (same cache and checks as buildings).
+/// <work>/fivem_tex_cache_v{N}/<hash>.dds (same cache and checks as buildings).
 struct Pools {
     game: PathBuf,
     catalog: Option<crate::texture::Catalog>,
@@ -436,7 +436,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     if e_base.is_none() && e_mid.is_none() && e_hi.is_none() {
         return Err(format!("no fragment named {0}, {0}_mid or {0}_hi in {1} (try --list)", o.name, ip.display()).into());
     }
-    let cache = o.work.join("fivem_tex_cache");
+    let cache = o.work.join(format!("fivem_tex_cache_v{}", sixng_core::bcpack::BCPACK_DECODER_VERSION));
     fs::create_dir_all(&cache)?;
     let ttdb = o.game.join("data").join("ttdb");
     let mut pools = Pools { game: o.game.clone(), catalog: crate::texture::Catalog::build(&ttdb).map_err(|e| eprintln!("{}: {e}", ttdb.display())).ok(), maps: HashMap::new(), dir: cache.clone() };

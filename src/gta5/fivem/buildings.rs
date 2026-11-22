@@ -232,7 +232,7 @@ fn q4(v: &Value) -> Option<[f32; 4]> {
 }
 
 /// Keyed textures from the ttdb streaming pools, cached as DDS under
-/// <work>/fivem_tex_cache/<hash>.dds.
+/// <work>/fivem_tex_cache_v{N}/<hash>.dds.
 struct Pools {
     game: PathBuf,
     catalog: Option<crate::texture::Catalog>,
@@ -709,7 +709,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     if arch.is_empty() {
         return Ok(());
     }
-    let cache = ctx.o.work.join("fivem_tex_cache");
+    let cache = ctx.o.work.join(format!("fivem_tex_cache_v{}", sixng_core::bcpack::BCPACK_DECODER_VERSION));
     fs::create_dir_all(&cache)?;
     let ttdb = ctx.o.game.join("data").join("ttdb");
     let pools = Pools { game: ctx.o.game.clone(), catalog: crate::texture::Catalog::build(&ttdb).map_err(|e| eprintln!("{}: {e}", ttdb.display())).ok(), maps: Mutex::new(HashMap::new()), dir: cache.clone() };
