@@ -7,20 +7,25 @@ GTA VI (Xbox Series X|S version) to GTA V / FiveM toolkit: extract RPF9 assets a
 What works today:
 
 - **Extraction**: RPF9 archive scanning and carving, names, placements, interiors, lights, paths, navmesh, collision, audio (Opus/Ogg/WAV), Bink movies, PSO/meta to JSON, vehicles and handling data.
-- **Textures**: RAGE pools and TTPF stores to DDS/PNG; BCPack (Xbox hardware compression) decoded in pure Rust for BC1, BC3, BC5 and BC7.
+- **Textures**: RAGE pools and TTPF stores to DDS/PNG; BCPack (Xbox hardware compression) decoded in pure Rust for BC1, BC3, BC4, BC5 and BC7 (BC6H partly).
 - **Models**: drawables and fragments to OBJ/GLB.
 - **GTA V / FiveM** (`6ixpack fivem build`): a ready resource for any map area.
   - Terrain tiles, water and buildings/props as ydr, with ytd textures re-encoded to DXT1/DXT5.
+  - Textures picked from every material slot until one is a real colour map (normal, mask and flat maps rejected); texture size capped by prop size (128 px for small clutter).
+  - Road and apron tiles: one opaque base layer plus alpha-blended decal layers, with the terrain sunk underneath.
+  - Draw distances: big buildings never vanish before the props on them; small clutter streams only within 40-100 m.
   - Texture dictionaries share common textures through a gtxd.meta parent chain.
   - Correct render buckets (opaque, alpha, decal, cutout).
   - LOD/SLOD chains (or `--no-lod`).
-  - Static collision as ybn.
+  - Static collision as ybn (welded, deduplicated, weapon-only shapes dropped unless `--weapon-collision`).
   - Every output is checked against a CodeWalker loader.
 
 ## Roadmap
 
-- [ ] BCPack BC4 and BC6H history presets (the last undecodable textures)
-- [ ] Missing road and asphalt surfaces (unlinked LOD drawables, models in other archives)
+- [x] BCPack BC4
+- [ ] BCPack BC6H (modes m10/m14) and the remaining inconsistent BC7 blocks
+- [x] Road and asphalt surfaces
+- [ ] LOD/SLOD drawables with no linked model (unnamed hashes)
 - [ ] Models outside `levels.rpf` (`pack/*` archives)
 - [ ] Collision surface materials (currently all default)
 - [ ] Interior (MLO) shells, so interior contents stop needing `--interiors`
@@ -52,7 +57,7 @@ Pure Rust, no C code, DLLs or external tools. `cargo build --release` → `targe
 ```
 6ixpack [-n] [-v] <file.rpf> [outdir]   scan and extract payloads (cached scan index)
 6ixpack audio   <args...>               AWC/ADAT audio: list, Opus, Ogg, WAV
-6ixpack texture <args...>               RAGE textures and TTPF stores -> DDS/PNG (BCPack BC1 decodes)
+6ixpack texture <args...>               RAGE textures and TTPF stores -> DDS/PNG (BCPack decodes)
 6ixpack model   <args...>               drawables -> OBJ (cached model walk)
 6ixpack sixng   <args...>               placements, vehicles, GLB, names, interiors, movies, ...
 6ixpack convert <kind> ...              GTA V files: ytd, ydr, ybn, ymap, ytyp
@@ -67,13 +72,13 @@ Add `--help` to any command. `--threads N` works everywhere.
 Built on the work of:
 
 - **offs** — [rpf9-extract](https://github.com/offs/rpf9-extract) (no license published): the archive scanner, carver and report code this tool started from.
-- **breadbbbb** — [rpf9-explorer](https://github.com/breadbbbb/rpf9-explorer) (no license published): model, texture and audio decoding references.
-- **holdmysocks** — [SixNG](https://github.com/holdmysocks/SixNG) (GPL-3.0): vendored in `vendor/sixng-core` and the `sixng` command.
+- **breadbbbb** — [rpf9-explorer](https://github.com/breadbbbb/rpf9-explorer) (no license published): model, texture and audio decoding references; the 1.2 model recovery (zero-radius drawables, empty-bounds geometry fallback, optional fragment header pointers, 16-bit bone palettes) is ported in `src/model/decode.rs`.
+- **holdmysocks** — [SixNG](https://github.com/holdmysocks/SixNG) (GPL-3.0): vendored in `vendor/sixng-core` and the `sixng` command; synced to 0.5.0 for drawable-dictionary members (per-member model names, bounds and exports).
 - **ShrewBrew** — [OpenRPF9](https://github.com/shrewbrewsh/OpenRPF9) (MIT): stream-carving approach.
 - **rpf9-audio contributors** — [rpf9-audio](https://github.com/jaylikesbunda/rpf9-audio) (MIT): AWC/ADAT and Ogg Opus handling.
 - **opus-decoder** (BSD-3-Clause, port of libopus): built-in Opus decoding.
 - **dexyfex** — [CodeWalker](https://github.com/dexyfex/CodeWalker) (MIT): GTA V resource formats (RSC7, ytd, ydr, ybn, ymap/ytyp), ported to Rust.
-- **Ahmet Dedeler** — [bcpack-rs](https://github.com/Ahmet-Dedeler/bcpack-rs) (MIT/Apache-2.0): BCPack BC1 decoder (git dependency).
+- **Ahmet Dedeler** — [bcpack-rs](https://github.com/Ahmet-Dedeler/bcpack-rs) (MIT/Apache-2.0): BCPack rANS lanes and BC1 decoder (git dependency).
 - **ItsNotRexed** — [Leonida](https://github.com/ItsNotRexed/Leonida) (GPL-3.0): clean-room BCPack BC3/BC4/BC5/BC6H/BC7 rebuilders and tables, and the pool self-calibrator, ported in `vendor/sixng-core/src/bcpack*.rs`.
 
 If you are one of these authors and want your credit, link or code changed or removed, open an issue.
