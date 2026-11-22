@@ -52,6 +52,7 @@ usage: 6ixpack fivem vehicle <name> --game <dir> --out <resource dir> [options]
   --max-tex <px>       drop top mips so textures are at most this size
   --vehicle-data <f>   vehicles.json from `6ixpack sixng vehicles --out <work>` (default <work>/vehicles/vehicles.json):
                        real wheelScale, rim + tyre models and body colour; without it a generated tyre and grey paint
+  --paint <hex>        body colour as sRGB RRGGBB or AARRGGBB (as `sixng vehicles` lists it); overrides the configuration's
   --config <n>         which 6m spawn configuration to take rim, tyre and colour from (default 0)
   --list               list 6m vehicle fragments in the index and exit";
 
@@ -87,6 +88,7 @@ struct Opts {
     max_tex: Option<u16>,
     vdata: Option<PathBuf>,
     config: usize,
+    paint: Option<[u8; 3]>,
     list: bool,
 }
 
@@ -102,6 +104,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         max_tex: None,
         vdata: None,
         config: 0,
+        paint: None,
         list: false,
     };
     let mut it = args.iter();
@@ -116,6 +119,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "--mass" => o.mass = val(&mut it, a)?.parse().map_err(|e| format!("{a}: {e}"))?,
             "--max-tex" => o.max_tex = Some(val(&mut it, a)?.parse().map_err(|e| format!("{a}: {e}"))?),
             "--vehicle-data" => o.vdata = Some(val(&mut it, a)?.into()),
+            "--paint" => o.paint = Some(parse_paint(&val(&mut it, a)?).ok_or(format!("{a} wants RRGGBB or AARRGGBB hex"))?),
             "--config" => o.config = val(&mut it, a)?.parse().map_err(|e| format!("{a}: {e}"))?,
             "--list" => o.list = true,
             x if !x.starts_with("--") && o.name.is_empty() => o.name = x.to_lowercase(),
@@ -384,7 +388,7 @@ fn load_source(game: &Path, e: &Entry, pools: &mut Pools, texs: &mut Vec<String>
                                 match pools.get(hash, key, u64::from_str_radix(&t.hash64, 16).unwrap_or(0)) {
                                     Ok(_) => return format!("r6m_{hash:08x}"),
                                     // the paint slot's white is in no store: the body colour
-                                    Err(_) if ph(&t) == Some(PAINT_SLOT) => return PAINT.to_string(),
+                                    Err(_) if ph(&t) == Some(PAINT_SLOT) || sixng_core::material::is_paint(&sh.name_hash) => return PAINT.to_string(),
                                     Err(e) => errs.push(format!("{hash:08x}: {e}")),
                                 }
                             }
@@ -401,7 +405,7 @@ fn load_source(game: &Path, e: &Entry, pools: &mut Pools, texs: &mut Vec<String>
             if !texs.contains(&tex) {
                 texs.push(tex.clone());
             }
-            let kind = sh.map_or(0, |sh| kind_of(sh.flags.get(4).copied().unwrap_or(0)));
+            let kind = sh.map_or(0, |sh| if is_emissive(sh) { yft::EMISSIVE } else { kind_of(sh.flags.get(4).copied().unwrap_or(0)) });
             let uv = m.uvs.iter().find(|u| u.0 == 3).or(m.uvs.first()).map(|u| u.1.as_slice());
             let col: Option<Vec<u32>> = m.colors.as_ref().map(|c| c.iter().map(|x| u32::from_le_bytes(*x)).collect());
             // dominant joint per vertex (joints index the drawable skeleton)
@@ -614,7 +618,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
         tx.push(solid(TYRE, [0x20, 0x20, 0x20, 0xFF], 16));
     }
     if texs.iter().any(|t| t == PAINT) {
-        let [r, g, b] = vd.as_ref().map_or([0x80; 3], |v| v.colour);
+        let [r, g, b] = o.paint.or(vd.as_ref().map(|v| v.colour)).unwrap_or([0x80; 3]);
         tx.push(solid(PAINT, [b, g, r, 0xFF], 16));
     }
     if texs.iter().any(|t| t == MISSING) {
@@ -1013,4 +1017,19 @@ fn vehicle_data(o: &Opts) -> Option<VData> {
     let s = |k: &str| c.and_then(|c| c[k].as_str()).map(String::from);
     let hex = c.and_then(|c| c["colour"]["srgb_if_linear"].as_str()).and_then(|h| u32::from_str_radix(h.trim_start_matches('#'), 16).ok()).unwrap_or(0x808080);
     Some(VData { wheel_scale: wsf, wheel_scale_rear: wsr, rim: s("rim"), tyre: s("tyre"), colour: [(hex >> 16) as u8, (hex >> 8) as u8, hex as u8] })
+}
+
+/// Lamps, neon, screens: emissive shaders by recovered name or material
+/// family (ported from SixNG 4a1bd3d, glTF emissive materials).
+fn is_emissive(sh: &drawable::Shader) -> bool {
+    sixng_core::names::shader(&sh.name_hash).is_some_and(|n| n.contains("emissive"))
+        || sixng_core::material::classify(&sh.name_hash, &sh.flags)["class"] == "emissive"
+}
+
+/// `--paint`: sRGB hex RRGGBB or AARRGGBB (`#` / `0x` optional, alpha
+/// ignored), as SixNG's `--paint` (4a1bd3d) takes it.
+fn parse_paint(s: &str) -> Option<[u8; 3]> {
+    let h = s.trim().trim_start_matches('#').trim_start_matches("0x");
+    let v = u32::from_str_radix(h, 16).ok().filter(|_| h.len() == 6 || h.len() == 8)?;
+    Some([(v >> 16) as u8, (v >> 8) as u8, v as u8])
 }
