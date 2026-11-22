@@ -68,6 +68,7 @@ What works today:
 - [ ] Instanced batches (grass, vegetation) to ymap grass instance lists
 - [ ] Minimap texture and zone names
 - [x] Split output into several resources by region: `--split <metres>` writes `<out>/[<name>]/` with one resource per region plus `<name>_common` (ytyps, LOD/SLOD ymaps, shared txds, terrain, water) and an `ensure.cfg`; regions over `--split-max <MB>` (default 1024) are quartered. Not yet tested in game
+- [x] Collision surface materials: 6m surface ids map to GTA V materials (concrete, tarmac, gravel, dirt, sand, marsh, soil, grass, rock) through `sixng surfaces` categories; needs `<work>/collision/levels/surface_categories.json`, else DEFAULT. Not yet tested in game
 - [ ] Coordinate offset option: GTA VI's map reaches y 9474, past GTA V's ~±8000 limit
 - [ ] Los Santos removal in Rust: stub ymaps/ybns for vanilla _citye/_cityw/_hills, packing the ~11k ybn stubs into fewer files
 

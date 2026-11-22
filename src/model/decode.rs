@@ -58,6 +58,8 @@ pub struct Model {
     pub materials: Option<Vec<Material>>,
     /// Embedded texture dictionary (texture module parser).
     pub embedded: Option<crate::texture::Embedded>,
+    /// One-row embedded textures (tint palettes) by name hash, RGBA8.
+    pub palettes: Vec<(u32, Vec<[u8; 4]>)>,
 }
 
 pub struct Extent {
@@ -622,6 +624,9 @@ impl<'a> ModelReader<'a> {
             declared: (min, max),
             note,
             materials,
+            palettes: embedded.as_ref().map_or_else(Vec::new, |e| {
+                e.textures.iter().filter_map(|t| Some((t.name_hash, crate::texture::palette_rgba(t, self.gfx)?))).collect()
+            }),
             embedded,
         })
     }

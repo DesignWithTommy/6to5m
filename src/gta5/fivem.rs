@@ -13,7 +13,7 @@
 //! `sixng lod-links`: HD cells -> t6m_lod1 (LOD) -> t6m_lod2 (SLOD1) ...
 //!
 //! TODO (not done here):
-//! - Collision material ids (all static collision is material 0), normal/spec shaders,
+//! - Normal/spec shaders,
 //!   skinned models (skipped and reported), prop-batch LOD parents.
 //! - Rotation: placements store the inverse entity rotation, which is what
 //!   CEntityDef stores too, so it is copied as is (like buildings_port.py).

@@ -411,6 +411,17 @@ pub fn write_png(path: &Path, w: u32, h: u32, rgba: &[u8]) -> Result<(), Box<dyn
     Ok(format::write_png(path, w, h, rgba)?)
 }
 
+/// Pixels of an embedded one-row texture (a per-model tint palette), which
+/// is stored linear (untiled), as in sixng-core's `embedded_rgba`.
+pub fn palette_rgba(t: &TextureInfo, gfx: &[u8]) -> Option<Vec<[u8; 4]>> {
+    if t.height != 1 || t.width == 0 || t.width > 4096 {
+        return None;
+    }
+    let data = gfx.get(t.gfx_offset..t.gfx_offset.checked_add(t.alloc_bytes)?)?;
+    let rgba = format::decode_rgba(data, t.width, 1, t.format).ok()?;
+    Some(rgba.chunks_exact(4).map(|p| [p[0], p[1], p[2], p[3]]).collect())
+}
+
 /// Decode a DDS file's preview mip to RGBA8.
 pub fn dds_preview(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), Box<dyn Error>> {
     let (_, w, h, rgba) = dds::decode_preview(bytes)?;

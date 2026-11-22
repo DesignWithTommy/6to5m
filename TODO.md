@@ -22,7 +22,7 @@ Next, from the FiveM port's requests:
 
 ## fivem (open)
 - BCPack textures: flat decodes rejected (placeholder) until the pure-Rust BCPack decoder lands in sixng-core ttpf.
-- Collision material ids not mapped (all material 0).
+- Collision materials come from inferred `sixng surfaces` categories (geometry-only unless paths/batches/navmeshes are exported first); verify in game, refine with road and plant cues.
 - gtxd.meta shared txd chain unverified in game.
 - Multi-archive models (pack/core_restofworld) not converted.
 - LOD/SLOD drawables without a model link (unnamed hash) not converted.

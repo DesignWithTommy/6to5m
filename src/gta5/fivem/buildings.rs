@@ -311,6 +311,62 @@ impl Pools {
     }
 }
 
+/// Shader slot of the per-model tint palette (one-row embedded texture).
+const TINT_PALETTE: u32 = 0x2c8d_7182;
+
+/// Cached copy of colour texture `tex` multiplied by `c` (sRGB), or a
+/// solid `c` when the model has no usable colour texture (the palette then
+/// gives the whole colour). Returns its texture name.
+fn tinted(pools: &Pools, tex: &str, c: [u8; 3]) -> Result<String, String> {
+    let stem = if tex == MISSING { "w".to_string() } else { tex[4..].to_string() };
+    let name = format!("r6m_{stem}_t{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
+    let p = pools.dir.join(format!("{}.dds", &name[4..]));
+    if p.exists() {
+        return Ok(name);
+    }
+    let (rgba, w, h) = if tex == MISSING {
+        ([255u8; 4].repeat(16), 4, 4)
+    } else {
+        let b = fs::read(pools.dir.join(format!("{stem}.dds"))).map_err(|e| e.to_string())?;
+        let (mut w, mut h, mut rgba) = crate::texture::dds_preview(&b).map_err(|e| e.to_string())?;
+        // Tinted copies are many; halve them down to 512 px to keep the ytds small.
+        while w.max(h) > 512 && w >= 2 && h >= 2 {
+            let (nw, nh) = (w / 2, h / 2);
+            let mut d = vec![0u8; (nw * nh * 4) as usize];
+            for y in 0..nh as usize {
+                for x in 0..nw as usize {
+                    for k in 0..4 {
+                        let at = |xx: usize, yy: usize| rgba[(yy * w as usize + xx) * 4 + k] as u32;
+                        d[(y * nw as usize + x) * 4 + k] = ((at(2 * x, 2 * y) + at(2 * x + 1, 2 * y) + at(2 * x, 2 * y + 1) + at(2 * x + 1, 2 * y + 1) + 2) / 4) as u8;
+                    }
+                }
+            }
+            (w, h, rgba) = (nw, nh, d);
+        }
+        (rgba, w, h)
+    };
+    let mut out = rgba;
+    for px in out.chunks_exact_mut(4) {
+        for k in 0..3 {
+            px[k] = ((px[k] as u32 * c[k] as u32 + 127) / 255) as u8;
+        }
+    }
+    write_atomic(&p, &rgba_dds(&out, w, h)).or_else(|e| if p.exists() { Ok(()) } else { Err(e.to_string()) })?;
+    Ok(name)
+}
+
+/// The tint palette embedded in the model resource: the one-row texture
+/// that its shaders' palette slots point at (by 64-bit hash), read through
+/// sixng-core as its GLB export does. All palette slots of a model share it.
+fn sixng_palette(ctx: &Ctx, e: &Entry) -> Option<Vec<[u8; 4]>> {
+    use sixng_core::{drawable, resource::Resource, texture};
+    let r = Resource::load(&ctx.o.game.join("levels.rpf"), e).ok()?;
+    let emb: HashMap<u64, texture::TexInfo> = texture::find_textures(&r).into_iter().filter(|t| t.height == 1).filter_map(|t| Some((texture::embedded_hash(&r, &t)?, t))).collect();
+    let h64 = drawable::find_shaders(&r).into_iter().flat_map(|s| s.textures).find(|t| u32::from_str_radix(&t.param_hash, 16).ok() == Some(TINT_PALETTE) && u64::from_str_radix(&t.hash64, 16).is_ok_and(|h| emb.contains_key(&h)))?.hash64;
+    let rgba = texture::embedded_rgba(&r, emb.get(&u64::from_str_radix(&h64, 16).ok()?)?).ok()?;
+    Some(rgba.chunks_exact(4).map(|p| [p[0], p[1], p[2], p[3]]).collect())
+}
+
 fn placeholder() -> Tex {
     let mut data = Vec::new();
     let (mut w, mut levels) = (64usize, 0u8);
@@ -514,7 +570,8 @@ struct Arch {
 type Built = (Mesh, Vec<String>, Vec<String>, bool);
 
 /// rpf9 decoder path; None when the model does not decode (or is skinned).
-fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, an: &str, off: usize) -> Result<Option<Built>, String> {
+fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, an: &str, off: usize, entry: Option<&Entry>) -> Result<Option<Built>, String> {
+    let ext_palettes = std::cell::OnceCell::new();
     let an = an.to_string();
     let models = crate::model::load_models(&ctx.levels, off);
     let base = |n: &str| n.split(".#").next().unwrap_or(n).to_lowercase();
@@ -541,7 +598,7 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, an: &str, off: usize) -> Resu
             || MISSING.to_string(),
             |mat| {
                 let mut cands: Vec<_> = COLOR_SLOTS.iter().filter_map(|slot| mat.textures.iter().find(|t| t.param == *slot)).collect();
-                cands.extend(mat.textures.iter().filter(|t| !COLOR_SLOTS.contains(&t.param)));
+                cands.extend(mat.textures.iter().filter(|t| !COLOR_SLOTS.contains(&t.param) && t.param != TINT_PALETTE));
                 let mut errs = Vec::new();
                 for t in cands {
                     let key = m.embedded.as_ref().and_then(|e| e.by_hash(t.hash)).and_then(|x| x.asset_key).unwrap_or(t.key);
@@ -558,6 +615,29 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, an: &str, off: usize) -> Resu
             texs.push(tex.clone());
         }
         let kind = sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).map_or(0, |mat| kind_of(mat.bucket));
+        // Tint palette: bake palette entry (row 0, column = vertex colour
+        // blue) into tinted copies of the colour texture, one per colour.
+        let palette = sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).and_then(|mat| mat.textures.iter().find(|t| t.param == TINT_PALETTE)).and_then(|t| {
+            m.palettes.iter().find(|p| p.0 == t.hash).map(|p| p.1.clone()).or_else(|| ext_palettes.get_or_init(|| entry.and_then(|e| sixng_palette(ctx, e))).clone())
+        });
+        if let (Some(pal), Some(cols)) = (palette.as_ref(), sm.colors.as_deref()) {
+            let mut groups: Vec<([u8; 3], Vec<u32>)> = Vec::new();
+            for t in sm.indices.chunks_exact(3) {
+                let c = cols.get(t[0] as usize).and_then(|c| pal.get((c >> 16 & 255) as usize)).map_or([255; 3], |p| [p[0], p[1], p[2]].map(|v| ((v as u32 + 16) / 32 * 32).min(255) as u8));
+                match groups.iter_mut().find(|g| g.0 == c) {
+                    Some(g) => g.1.extend_from_slice(t),
+                    None => groups.push((c, t.to_vec())),
+                }
+            }
+            for (c, idx) in groups {
+                let t = if c == [255; 3] { tex.clone() } else { tinted(pools, &tex, c).unwrap_or_else(|_| tex.clone()) };
+                if t != MISSING && !texs.contains(&t) {
+                    texs.push(t.clone());
+                }
+                push_geoms(&mut mesh.geoms, &sm.positions, &idx, sm.uvs.as_deref(), sm.colors.as_deref(), &t, kind);
+            }
+            continue;
+        }
         push_geoms(&mut mesh.geoms, &sm.positions, &sm.indices, sm.uvs.as_deref(), sm.colors.as_deref(), &tex, kind);
     }
     Ok(Some((mesh, texs, missing, frag_out)))
@@ -654,7 +734,7 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
         }
     }
     let src = format!("levels.rpf@{off:x}");
-    let rpf = rpf9_mesh(ctx, pools, name, &an, off)?;
+    let rpf = rpf9_mesh(ctx, pools, name, &an, off, entry)?;
     let (mesh, texs, missing, frag_out) = match (rpf, entry) {
         (Some(x), _) => x,
         (None, Some(e)) => match sixng_mesh(ctx, pools, &an, e) {

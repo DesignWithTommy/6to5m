@@ -290,7 +290,7 @@ fn write_bounds_hdr(w: &mut W, h: &BoundsHdr) {
 
 /// One BoundGeometryBVH from local verts/tris (all indices valid, < MAX_VERTS).
 /// Returns (block id, world box min, box max).
-fn write_geometry(b: &mut Builder, id: BlockId, verts: &[V3], tris: &[[u32; 3]], material: u8) -> (V3, V3) {
+fn write_geometry(b: &mut Builder, id: BlockId, verts: &[V3], tris: &[[u32; 3]], tri_mats: &[u8]) -> (V3, V3) {
     // Centre of the vertex bounding box (GeometryCenter in the XML pipeline).
     let mut vmn = [f32::MAX; 3];
     let mut vmx = [f32::MIN; 3];
@@ -313,6 +313,21 @@ fn write_geometry(b: &mut Builder, id: BlockId, verts: &[V3], tris: &[[u32; 3]],
         .collect();
     let (bvh, order) = build_bvh(&items, 4);
     let polys: Vec<[u32; 3]> = order.iter().map(|&i| tris[i]).collect();
+    // material list (first-use order) and per-polygon index into it
+    let mut mat_list: Vec<u8> = Vec::new();
+    let poly_mi: Vec<u8> = order
+        .iter()
+        .map(|&i| {
+            let m = tri_mats[i];
+            (match mat_list.iter().position(|&x| x == m) {
+                Some(k) => k,
+                None => {
+                    mat_list.push(m);
+                    mat_list.len() - 1
+                }
+            }) as u8
+        })
+        .collect();
     let (bmin, bmax) = (bvh.min, bvh.max);
 
     // CalculateQuantum (from the BVH-updated box).
@@ -380,10 +395,12 @@ fn write_geometry(b: &mut Builder, id: BlockId, verts: &[V3], tris: &[[u32; 3]],
     let verts_b = b.add(Seg::Sys, vw);
 
     let mut mw = W::new();
-    mw.u32(material as u32).u32(0);
-    mw.zeros(8 * 3); // padded to 4 materials
+    for m in &mat_list {
+        mw.u32(*m as u32).u32(0);
+    }
+    mw.zeros(8 * 4usize.saturating_sub(mat_list.len())); // padded to 4 materials
     let mats_b = b.add(Seg::Sys, mw);
-    let pmi_b = b.sys_bytes(vec![0u8; polys.len()]);
+    let pmi_b = b.sys_bytes(poly_mi);
     let bvh_b = write_bvh(b, &bvh);
 
     let mut w = W::new();
@@ -394,7 +411,7 @@ fn write_geometry(b: &mut Builder, id: BlockId, verts: &[V3], tris: &[[u32; 3]],
     w.ptr(Some(verts_b)).ptr(None).ptr(None).ptr(None);
     w.u32(nv).u32(polys.len() as u32).zeros(24);
     w.ptr(Some(mats_b)).ptr(None).zeros(24);
-    w.ptr(Some(pmi_b)).u8(1).u8(0).u16(0).u32(0).u32(0).u32(0);
+    w.ptr(Some(pmi_b)).u8(mat_list.len() as u8).u8(0).u16(0).u32(0).u32(0).u32(0);
     w.ptr(Some(bvh_b)).u32(0).u32(0).u16(0xFFFF).u16(0).u32(0).u32(0).u32(0);
     debug_assert_eq!(w.len(), 336);
     b.set(id, w);
@@ -439,12 +456,22 @@ fn split(verts: &[V3], tris: &[[u32; 3]], ids: Vec<usize>, out: &mut Vec<Vec<usi
 /// Build a .ybn: one BoundGeometryBVH, or a BoundComposite of several when
 /// the mesh exceeds one geometry's limits. `material` is the material type.
 pub fn build_ybn(verts: &[[f32; 3]], tris: &[[u32; 3]], material: u8) -> Result<Vec<u8>, String> {
+    build_ybn_mats(verts, tris, &vec![material; tris.len()])
+}
+
+/// As [`build_ybn`] with one GTA V material index per triangle
+/// (materials.dat order; at most 255 distinct per geometry).
+pub fn build_ybn_mats(verts: &[[f32; 3]], tris: &[[u32; 3]], tri_mats: &[u8]) -> Result<Vec<u8>, String> {
+    if tri_mats.len() != tris.len() {
+        return Err("material count != triangle count".into());
+    }
     let n = verts.len() as u32;
-    let tris: Vec<[u32; 3]> = tris
+    let (tris, mats): (Vec<[u32; 3]>, Vec<u8>) = tris
         .iter()
         .copied()
-        .filter(|t| t[0] != t[1] && t[1] != t[2] && t[0] != t[2])
-        .collect();
+        .zip(tri_mats.iter().copied())
+        .filter(|(t, _)| t[0] != t[1] && t[1] != t[2] && t[0] != t[2])
+        .unzip();
     if let Some(t) = tris.iter().find(|t| t.iter().any(|&i| i >= n)) {
         return Err(format!("triangle index out of range: {:?} (verts {})", t, n));
     }
@@ -458,7 +485,7 @@ pub fn build_ybn(verts: &[[f32; 3]], tris: &[[u32; 3]], material: u8) -> Result<
     split(verts, &tris, (0..tris.len()).collect(), &mut chunks);
 
     // Remap each chunk to local vertex arrays (first-use order).
-    let local: Vec<(Vec<V3>, Vec<[u32; 3]>)> = chunks
+    let local: Vec<(Vec<V3>, Vec<[u32; 3]>, Vec<u8>)> = chunks
         .iter()
         .map(|ids| {
             let mut map = std::collections::HashMap::new();
@@ -477,20 +504,20 @@ pub fn build_ybn(verts: &[[f32; 3]], tris: &[[u32; 3]], material: u8) -> Result<
                     o
                 })
                 .collect();
-            (lv, lt)
+            (lv, lt, ids.iter().map(|&i| mats[i]).collect())
         })
         .collect();
 
     // Always a BoundComposite root, even for one geometry: loose static
     // ybns need the composite child flags or peds pass through.
-    let local = if local.len() == 1 { vec![(verts.to_vec(), tris.clone())] } else { local };
+    let local = if local.len() == 1 { vec![(verts.to_vec(), tris.clone(), mats.clone())] } else { local };
     let mut b = Builder::new();
 
     let root = b.reserve(Seg::Sys);
     let kids: Vec<BlockId> = local.iter().map(|_| b.reserve(Seg::Sys)).collect();
     let mut boxes = Vec::new();
-    for (k, (lv, lt)) in kids.iter().zip(&local) {
-        boxes.push(write_geometry(&mut b, *k, lv, lt, material));
+    for (k, (lv, lt, lm)) in kids.iter().zip(&local) {
+        boxes.push(write_geometry(&mut b, *k, lv, lt, lm));
     }
     let cn = kids.len();
     let mut cw = W::new();

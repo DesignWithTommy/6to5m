@@ -232,6 +232,7 @@ pub fn parse(text: &str, name: &str) -> Result<Model, String> {
         note: Some("Imported OBJ geometry; external material libraries and texture paths are not loaded."),
         materials: None,
         embedded: None,
+        palettes: Vec::new(),
     })
 }
 

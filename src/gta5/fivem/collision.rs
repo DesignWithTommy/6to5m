@@ -3,7 +3,12 @@
 //!
 //! The bounds' world bboxes are cached in <work>/fivem_collision_index.jsonl
 //! (one decode pass over every unnamed rageobj resource of levels.rpf).
-//! GTA V material ids are not mapped yet: everything is material 0 (default).
+//!
+//! Materials: the 6m surface id is a hash of an unknown name, so ids map to
+//! GTA V materials (materials.dat order, as in Sollumz collision_materials.py)
+//! through the categories `sixng surfaces` infers
+//! (<work>/collision/levels/surface_categories.json). Without that file, or
+//! for an id it doesn't cover, the material is 0 (DEFAULT).
 
 use super::{sha, Ctx, TOOL};
 use crate::gta5::ybn;
@@ -17,6 +22,54 @@ use sixng_core::{
 use std::{collections::BTreeMap, error::Error, fs, io::Write};
 
 const CELL: f32 = 512.0;
+
+/// GTA V material index for an inferred 6m surface category.
+pub fn gta_material(category: &str) -> u8 {
+    let c = category.to_ascii_lowercase();
+    let has = |k: &str| c.contains(k);
+    if has("generic") {
+        0
+    } else if has("ballast variant") {
+        31 // GRAVEL_SMALL
+    } else if has("ballast") || has("gravel") {
+        34 // GRAVEL_TRAIN_TRACK
+    } else if has("dirt track") {
+        35 // DIRT_TRACK
+    } else if has("road") {
+        4 // TARMAC
+    } else if has("seabed") || has("underwater") {
+        22 // SAND_UNDERWATER
+    } else if has("shore") {
+        20 // SAND_WET
+    } else if has("sand") {
+        18 // SAND_LOOSE
+    } else if has("wetland") || has("swamp") {
+        41 // MARSH
+    } else if has("forest") {
+        43 // SOIL
+    } else if has("grass") || has("vegetated") {
+        47 // GRASS
+    } else if has("rock") {
+        9 // ROCK
+    } else if has("paved") || has("hard") || has("wall") || has("structure") {
+        1 // CONCRETE
+    } else {
+        0
+    }
+}
+
+/// 6m surface id -> GTA V material, from `sixng surfaces` output.
+fn material_map(ctx: &Ctx) -> BTreeMap<u16, u8> {
+    let p = ctx.o.work.join("collision").join("levels").join("surface_categories.json");
+    let Some(doc) = fs::read_to_string(&p).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else {
+        ctx.skip("(collision materials)", "surface_categories.json missing (run `6ixpack sixng surfaces`); all collision is DEFAULT", json!({}));
+        return BTreeMap::new();
+    };
+    doc["surfaces"]
+        .as_object()
+        .map(|m| m.iter().filter_map(|(k, v)| Some((u16::from_str_radix(k, 16).ok()?, gta_material(v["category"].as_str()?)))).collect())
+        .unwrap_or_default()
+}
 
 fn decode(path: &std::path::Path, e: &Entry, full: bool) -> Option<sixng_core::bounds::Collision> {
     let r = Resource::load_sys(path, e).ok()?;
@@ -49,6 +102,8 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
             boxes.insert(id.clone(), *b);
         }
     }
+    let mats = material_map(ctx);
+    let mats_fp = sha(&format!("{mats:?}"));
     let by_id: BTreeMap<&str, &Entry> = cands.iter().map(|e| (e.id.as_str(), *e)).collect();
     let sel: Vec<&Entry> = boxes.iter().filter(|(_, b)| ctx.o.in_bbox(b[0], b[1])).filter_map(|(id, _)| by_id.get(id.as_str()).copied()).collect();
     eprintln!("collision: {} bounds in region", sel.len());
@@ -63,26 +118,27 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         .par_iter()
         .map(|((cx, cy), es)| {
             let file = format!("t6m_col_{:02}_{:02}.ybn", cx + 50, cy + 50);
-            let fp = sha(&format!("{TOOL}|col|{}|{}", ctx.o.weapon_collision, es.iter().map(|e| e.id.as_str()).collect::<Vec<_>>().join(",")));
+            let fp = sha(&format!("{TOOL}|col|{mats_fp}|{}|{}", ctx.o.weapon_collision, es.iter().map(|e| e.id.as_str()).collect::<Vec<_>>().join(",")));
             if let Some(info) = ctx.up_to_date(&file, &fp) {
                 ctx.emit(&file, &fp, info, None)?;
                 return Ok(());
             }
-            let (mut verts, mut tris): (Vec<[f32; 3]>, Vec<[u32; 3]>) = (Vec::new(), Vec::new());
+            let (mut verts, mut tris, mut tm): (Vec<[f32; 3]>, Vec<[u32; 3]>, Vec<u8>) = (Vec::new(), Vec::new(), Vec::new());
             for e in es {
                 let Some(c) = decode(&rpf, e, ctx.o.weapon_collision) else { continue };
-                for (v, idx) in c.by_mat.values() {
+                for (id, (v, idx)) in &c.by_mat {
                     let base = verts.len() as u32;
                     verts.extend_from_slice(v);
                     tris.extend(idx.chunks_exact(3).map(|t| [base + t[0], base + t[1], base + t[2]]));
+                    tm.resize(tris.len(), mats.get(id).copied().unwrap_or(0));
                 }
             }
             if tris.is_empty() {
                 return Ok(());
             }
             let raw = tris.len();
-            let (verts, tris) = weld(&verts, &tris);
-            let bytes = ybn::build_ybn(&verts, &tris, 0).map_err(|e| format!("{file}: {e}"))?;
+            let (verts, tris, tm) = weld(&verts, &tris, &tm);
+            let bytes = ybn::build_ybn_mats(&verts, &tris, &tm).map_err(|e| format!("{file}: {e}"))?;
             let info = json!({"bounds": es.len(), "triangles": tris.len(), "raw_triangles": raw});
             let s = ctx.emit(&file, &fp, info, Some(bytes))?;
             ctx.report.lock().unwrap().converted.push(json!({"kind": "collision", "ybn": s, "bounds": es.len(), "triangles": tris.len()}));
@@ -97,7 +153,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
 
 /// Weld vertices on a 1 cm grid and drop degenerate and duplicate triangles
 /// (overlapping 6m bounds repeat the same surfaces many times).
-fn weld(verts: &[[f32; 3]], tris: &[[u32; 3]]) -> (Vec<[f32; 3]>, Vec<[u32; 3]>) {
+fn weld(verts: &[[f32; 3]], tris: &[[u32; 3]], mats: &[u8]) -> (Vec<[f32; 3]>, Vec<[u32; 3]>, Vec<u8>) {
     use std::collections::{HashMap, HashSet};
     let mut ids: HashMap<[i32; 3], u32> = HashMap::new();
     let mut out_v = Vec::new();
@@ -113,7 +169,8 @@ fn weld(verts: &[[f32; 3]], tris: &[[u32; 3]]) -> (Vec<[f32; 3]>, Vec<[u32; 3]>)
         .collect();
     let mut seen: HashSet<[u32; 3]> = HashSet::new();
     let mut out_t = Vec::new();
-    for t in tris {
+    let mut out_m = Vec::new();
+    for (t, m) in tris.iter().zip(mats) {
         let t = [remap[t[0] as usize], remap[t[1] as usize], remap[t[2] as usize]];
         if t[0] == t[1] || t[1] == t[2] || t[0] == t[2] {
             continue;
@@ -122,7 +179,8 @@ fn weld(verts: &[[f32; 3]], tris: &[[u32; 3]]) -> (Vec<[f32; 3]>, Vec<[u32; 3]>)
         k.sort_unstable();
         if seen.insert(k) {
             out_t.push(t);
+            out_m.push(*m);
         }
     }
-    (out_v, out_t)
+    (out_v, out_t, out_m)
 }
