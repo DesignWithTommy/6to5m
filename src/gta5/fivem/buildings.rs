@@ -5,6 +5,8 @@
 use super::geom::{aabb, push_geoms, V3};
 #[path = "interiors.rs"]
 mod interiors;
+#[path = "texopt.rs"]
+mod texopt;
 use super::{safe_name, sha, write_atomic, Ctx, TOOL};
 use crate::gta5::{
     meta::{self, Archetype, Entity, MapData, MapTypes},
@@ -565,6 +567,8 @@ struct Arch {
     lo: V3,
     hi: V3,
     texs: Vec<String>,
+    /// textures on non-opaque geometry (their alpha is read)
+    alpha: Vec<String>,
 }
 
 type Built = (Mesh, Vec<String>, Vec<String>, bool);
@@ -724,8 +728,9 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
         lo: f3(&i["lo"]),
         hi: f3(&i["hi"]),
         texs: i["texs"].as_array().map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect()).unwrap_or_default(),
+        alpha: i["alpha"].as_array().map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect()).unwrap_or_default(),
     };
-    if let Some(info) = ctx.up_to_date(&file, &fp) {
+    if let Some(info) = ctx.up_to_date(&file, &fp).filter(|i| i.get("alpha").is_some()) {
         let a = from_info(&info);
         if a.texs.iter().all(|t| pools.dir.join(format!("{}.dds", &t[4..])).exists()) {
             let s = ctx.emit(&file, &fp, info, None)?;
@@ -764,7 +769,8 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
     }
     let (lo, hi) = aabb(mesh.geoms.iter().flat_map(|g| g.positions.iter()));
     let bytes = ydr::build_ydr(&mesh, 9998.0, None).map_err(|e| format!("{file}: {e}"))?;
-    let info = json!({"lo": lo, "hi": hi, "texs": texs});
+    let alpha: std::collections::BTreeSet<&String> = mesh.geoms.iter().filter(|g| g.kind != 0).map(|g| &g.texture).collect();
+    let info = json!({"lo": lo, "hi": hi, "texs": texs, "alpha": alpha});
     let s = ctx.emit(&file, &fp, info.clone(), Some(bytes))?;
     ctx.report.lock().unwrap().converted.push(json!({"kind": "building", "name": an, "source": format!("levels.rpf@{off:x}"), "ydr": s, "textures": texs.len(), "fragment": is_frag}));
     Ok(Some(from_info(&info)))
@@ -817,7 +823,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     let mut tcap: HashMap<String, u16> = HashMap::new();
     for a in done.values() {
         let rad = (0..3).map(|k| (a.hi[k] - a.lo[k]).powi(2)).sum::<f32>().sqrt() / 2.0;
-        let cap: u16 = if rad < 1.5 { 128 } else if rad < 4.0 { 256 } else if rad < 12.0 { 512 } else { 4096 };
+        let cap: u16 = if rad < 1.5 { 128 } else if rad < 4.0 { 256 } else if rad < 12.0 { 512 } else { 1024 };
         for t in &a.texs {
             let e = tcap.entry(t.clone()).or_insert(0);
             *e = (*e).max(cap);
@@ -895,21 +901,21 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     }
     let total: usize = dicts.iter().map(|d| d.1.len()).sum();
     eprintln!("buildings: {} textures ({} shared) in {} dictionaries", total, shared.len(), dicts.len());
+    let alpha_tex: HashSet<&String> = done.values().flat_map(|a| &a.alpha).collect();
     let results: Vec<Result<String, String>> = dicts
         .par_iter()
         .map(|(stem, list, _)| {
             let file = format!("{stem}.ytd");
             let mut sorted = list.clone();
             sorted.sort();
-            let fp = sha(&format!("{TOOL}|{:?}|{}", ctx.o.max_tex, sorted.iter().map(|t| format!("{t}:{}:{}", tsize(t), cap_of(t))).collect::<Vec<_>>().join(",")));
+            let fp = sha(&format!("{TOOL}|{}|{:?}|{}", texopt::TAG, ctx.o.max_tex, sorted.iter().map(|t| format!("{t}:{}:{}:{}", tsize(t), cap_of(t), alpha_tex.contains(t))).collect::<Vec<_>>().join(",")));
             if ctx.up_to_date(&file, &fp).is_some() {
                 return ctx.emit(&file, &fp, json!({"textures": sorted.len()}), None);
             }
             let mut texs = vec![placeholder()];
             for t in &sorted {
                 let p = cache.join(format!("{}.dds", &t[4..]));
-                let b = fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
-                let mut tex = ytd::from_dds(t, &b)?;
+                let mut tex = texopt::load(t, &p, alpha_tex.contains(t))?;
                 tex.limit_size(cap_of(t));
                 texs.push(tex);
             }
