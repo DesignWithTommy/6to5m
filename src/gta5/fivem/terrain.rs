@@ -156,6 +156,16 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         .filter(|t| !t.tris.is_empty())
         .collect();
     tiles.sort_by_key(|t| (t.off, t.child));
+    // lowest terrain z per 256 m water cell over the whole map, for water()
+    {
+        let mut low: std::collections::BTreeMap<String, f32> = std::collections::BTreeMap::new();
+        for v in tiles.iter().flat_map(|t| t.verts.iter()) {
+            let k = format!("{},{}", (v[0] / super::WATER_CELL).floor() as i64, (v[1] / super::WATER_CELL).floor() as i64);
+            let e = low.entry(k).or_insert(f32::MAX);
+            *e = e.min(v[2]);
+        }
+        std::fs::write(ctx.o.work.join("fivem_water_low.json"), serde_json::to_string(&low)?)?;
+    }
 
     let sel: Vec<(usize, &Tile)> = tiles
         .iter()

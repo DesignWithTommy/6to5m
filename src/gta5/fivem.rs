@@ -123,6 +123,8 @@ pub struct Ctx {
     manifest: Mutex<Manifest>,
     pub report: Mutex<Report>,
     pub layout: Mutex<split::Layout>,
+    /// stream files emitted this run (for pruning stale outputs)
+    emitted: Mutex<std::collections::HashSet<String>>,
 }
 
 impl Ctx {
@@ -157,6 +159,7 @@ impl Ctx {
             None => fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?,
         };
         let summary = verify::verify(file, &data)?;
+        self.emitted.lock().unwrap().insert(file.to_string());
         self.manifest.lock().unwrap().files.insert(file.to_string(), MEntry { fp: fp.to_string(), info });
         self.report.lock().unwrap().outputs.push(json!({"file": file, "status": status, "bytes": data.len(), "verify": summary}));
         Ok(summary)
@@ -295,7 +298,7 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
         manifest = Manifest { tool: TOOL.into(), ..Default::default() };
     }
     let layout = split::load(&o.out);
-    let ctx = Ctx { o, stream, levels, input_time, manifest: Mutex::new(manifest), report: Mutex::new(Report::default()), layout: Mutex::new(layout) };
+    let ctx = Ctx { o, stream, levels, input_time, manifest: Mutex::new(manifest), report: Mutex::new(Report::default()), layout: Mutex::new(layout), emitted: Default::default() };
     let part = |p: &str| ctx.o.only.iter().any(|x| x == p);
 
     let result = (|| -> Result<(), Box<dyn Error>> {
@@ -325,6 +328,9 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
         if part("water") {
             water(&ctx)?;
         }
+        if ["terrain", "buildings", "collision", "water"].iter().all(|p| part(p)) && ctx.o.name.is_none() {
+            prune(&ctx)?;
+        }
         fxmanifest(&ctx)?;
         if let Some(m) = ctx.o.split {
             split::split(&ctx, m, ctx.o.split_max)?;
@@ -351,37 +357,90 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
     result
 }
 
-/// water.xml: 512 m ocean quads at z 0 over the 6m terrain extent plus a
-/// 4 km margin (water_port.py), or over --bbox plus one quad.
+/// Water cell size (water_port.py).
+pub const WATER_CELL: f32 = 256.0;
+
+/// After a full build (all parts, no --name): delete stream files and
+/// manifest entries this run did not emit, so old outputs don't pile up.
+fn prune(ctx: &Ctx) -> Result<(), Box<dyn Error>> {
+    let keep = ctx.emitted.lock().unwrap();
+    let (mut n, mut bytes) = (0usize, 0u64);
+    for e in fs::read_dir(&ctx.stream)?.flatten() {
+        let f = e.file_name().to_string_lossy().into_owned();
+        if e.file_type().is_ok_and(|t| t.is_file()) && !keep.contains(&f) {
+            bytes += e.metadata().map(|m| m.len()).unwrap_or(0);
+            fs::remove_file(e.path())?;
+            n += 1;
+        }
+    }
+    ctx.manifest.lock().unwrap().files.retain(|f, _| keep.contains(f));
+    if n > 0 {
+        eprintln!("pruned {n} stale stream files ({:.0} MB)", bytes as f64 / 1048576.0);
+    }
+    ctx.report.lock().unwrap().outputs.push(json!({"file": "stream/", "status": "pruned", "files": n, "bytes": bytes}));
+    Ok(())
+}
+
+/// water.xml (water_port.py): 256 m ocean cells at z 0 over the 6m terrain
+/// extent plus a 4 km margin (or --bbox plus one cell), wet only where the
+/// lowest terrain vertex in the cell is below z + 0.5 or there is no terrain
+/// (<work>/fivem_water_low.json from the terrain stage); runs in a row merge.
 fn water(ctx: &Ctx) -> Result<(), Box<dyn Error>> {
-    let s = 512i64;
+    let s = WATER_CELL as i64;
+    let z = 0.0f32;
     let (x0, y0, x1, y1, m) = match ctx.o.bbox {
         Some(b) => (b[0].floor() as i64, b[1].floor() as i64, b[2].ceil() as i64, b[3].ceil() as i64, s),
         None => (-9607, -7957, 2442, 9474, 4000),
     };
+    let lp = ctx.o.work.join("fivem_water_low.json");
+    let low: std::collections::HashMap<(i64, i64), f32> = match fs::read_to_string(&lp).ok().and_then(|t| serde_json::from_str::<BTreeMap<String, f32>>(&t).ok()) {
+        Some(m) => m.into_iter().filter_map(|(k, v)| { let (a, b) = k.split_once(',')?; Some(((a.parse().ok()?, b.parse().ok()?), v)) }).collect(),
+        None => {
+            ctx.skip("water.xml", "no terrain heights (run the terrain part); ocean everywhere", json!({}));
+            Default::default()
+        }
+    };
+    let wet = |i: i64, j: i64| low.get(&(i, j)).is_none_or(|h| *h < z + 0.5);
+    let (i0, j0) = ((x0 - m).div_euclid(s), (y0 - m).div_euclid(s));
+    let (i1, j1) = ((x1 + m).div_euclid(s), (y1 + m).div_euclid(s));
     let mut q = String::new();
     let mut n = 0;
-    let start = |v: i64| (v - m).div_euclid(s) * s;
-    let mut x = start(x0);
-    while x < x1 + m {
-        let mut y = start(y0);
-        while y < y1 + m {
+    for j in j0..=j1 {
+        let mut i = i0;
+        while i <= i1 {
+            if !wet(i, j) {
+                i += 1;
+                continue;
+            }
+            let a = i;
+            while i <= i1 && wet(i, j) {
+                i += 1;
+            }
             q += &format!(
-                "  <Item><minX value=\"{x}\" /><maxX value=\"{}\" /><minY value=\"{y}\" /><maxY value=\"{}\" /><Type value=\"0\" /><IsInvisible value=\"false\" /><HasLimitedDepth value=\"false\" /><z value=\"0.0\" /><a1 value=\"26\" /><a2 value=\"26\" /><a3 value=\"26\" /><a4 value=\"26\" /><NoStencil value=\"false\" /></Item>\n",
-                x + s,
-                y + s
+                "  <Item><minX value=\"{}\" /><maxX value=\"{}\" /><minY value=\"{}\" /><maxY value=\"{}\" /><Type value=\"0\" /><IsInvisible value=\"false\" /><HasLimitedDepth value=\"false\" /><z value=\"{z:.1}\" /><a1 value=\"26\" /><a2 value=\"26\" /><a3 value=\"26\" /><a4 value=\"26\" /><NoStencil value=\"false\" /></Item>
+",
+                a * s,
+                i * s,
+                j * s,
+                (j + 1) * s
             );
             n += 1;
-            y += s;
         }
-        x += s;
     }
-    let xml = format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<WaterData>\n <WaterQuads>\n{q} </WaterQuads>\n <CalmingQuads />\n <WaveQuads />\n</WaterData>\n");
+    let xml = format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<WaterData>
+ <WaterQuads>
+{q} </WaterQuads>
+ <CalmingQuads />
+ <WaveQuads />
+</WaterData>
+");
     let p = ctx.o.out.join("water.xml");
     let same = fs::read_to_string(&p).is_ok_and(|t| t == xml);
     if !same {
         fs::write(&p, &xml)?;
     }
+    eprintln!("water: {n} quads");
     ctx.report.lock().unwrap().outputs.push(json!({"file": "water.xml", "status": if same {"up-to-date"} else {"written"}, "quads": n}));
     Ok(())
 }
