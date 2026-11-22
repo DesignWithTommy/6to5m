@@ -28,7 +28,7 @@ use std::{
 
 /// Bump when the ynd / ynv output changes.
 pub const YND_V: &str = "ynd1";
-pub const YNV_V: &str = "ynv2";
+pub const YNV_V: &str = "ynv3";
 
 fn overlaps(ctx: &Ctx, b: [f32; 4]) -> bool {
     ctx.o.in_bbox([b[0], b[1], 0.0], [b[2], b[3], 0.0])
@@ -323,8 +323,16 @@ pub fn build_navmesh(ctx: &Ctx) -> Result<(), Box<dyn Error>> {
         }
     }
     cells.par_iter_mut().for_each(|(c, ps)| {
-        decimate(ps);
-        merge(ps);
+        let src = ps.clone();
+        // err < 0: topology-free fallback (borders may move; cross-cell links there drop)
+        for err in [0.01f32, 0.02, 0.04, 0.08, -1.0] {
+            *ps = src.clone();
+            decimate(ps, err);
+            merge(ps);
+            if ps.len() < 16000 && ps.iter().map(|p| p.verts.len()).sum::<usize>() < 65000 {
+                break;
+            }
+        }
         let cb = ynv::cell_bounds(c.0, c.1);
         for p in ps.iter_mut() {
             if p.verts.iter().any(|v| v[0] <= cb[0] + 1e-3 || v[0] >= cb[2] - 1e-3 || v[1] <= cb[1] + 1e-3 || v[1] >= cb[3] - 1e-3) {
@@ -399,7 +407,6 @@ fn merge(ps: &mut Vec<ynv::Poly>) {
             edges.insert(e, i);
         }
     }
-    let mut dbg = [0usize; 6];
     for i in 0..ps.len() {
         if !alive[i] {
             continue;
@@ -409,12 +416,10 @@ fn merge(ps: &mut Vec<ynv::Poly>) {
             let n = ps[i].verts.len();
             let (a, b) = (key(ps[i].verts[k]), key(ps[i].verts[(k + 1) % n]));
             let Some(&j) = edges.get(&(b, a)) else {
-                dbg[0] += 1;
                 k += 1;
                 continue;
             };
             if j == i || !alive[j] || ps[j].flags1 != ps[i].flags1 || n + ps[j].verts.len() - 2 > MAX_V {
-                dbg[1] += 1;
                 k += 1;
                 continue;
             }
@@ -427,8 +432,6 @@ fn merge(ps: &mut Vec<ynv::Poly>) {
             // P from b around to a, then Q strictly between a and b
             let mut v: Vec<[f32; 3]> = (0..n).map(|t| ps[i].verts[(k + 1 + t) % n]).collect();
             v.extend((2..m).map(|t| q.verts[(jb + t) % m]));
-            if !convex(&v) { dbg[2] += 1; }
-            if !planar(&v) { dbg[3] += 1; }
             if !convex(&v) || !planar(&v) {
                 k += 1;
                 continue;
@@ -445,7 +448,6 @@ fn merge(ps: &mut Vec<ynv::Poly>) {
             k = 0;
         }
     }
-    if std::env::var_os("NAV_DEBUG").is_some() { eprintln!("merge: {} -> {} | {:?}", ps.len(), alive.iter().filter(|a| **a).count(), dbg); }
     let mut it = alive.iter();
     ps.retain(|_| *it.next().unwrap());
     for p in ps.iter_mut() {
@@ -484,12 +486,13 @@ fn planar(v: &[[f32; 3]]) -> bool {
 /// Cells far over the polygon budget: weld each flag class into a triangle
 /// mesh and collapse edges (meshopt, open borders locked, so cell edges and
 /// road / non-road seams keep their vertices), then `merge` rebuilds polygons.
-fn decimate(ps: &mut Vec<ynv::Poly>) {
-    const BUDGET: usize = 9000;
+fn decimate(ps: &mut Vec<ynv::Poly>, err: f32) {
+    const BUDGET: usize = 7000;
     if ps.len() <= BUDGET {
         return;
     }
-    let target_frac = BUDGET as f32 / ps.len() as f32;
+    let tris: usize = ps.iter().map(|p| p.verts.len() - 2).sum();
+    let target_frac = 2.0 * BUDGET as f32 / tris as f32;
     let mut classes: BTreeMap<u32, (Vec<[f32; 3]>, Vec<u32>, HashMap<[i32; 3], u32>)> = BTreeMap::new();
     for p in ps.iter() {
         let c = classes.entry(p.flags1).or_default();
@@ -514,9 +517,9 @@ fn decimate(ps: &mut Vec<ynv::Poly>) {
         if idx.is_empty() {
             continue;
         }
-        let target = ((idx.len() / 3) as f32 * target_frac * 1.6) as usize * 3;
+        let target = ((idx.len() / 3) as f32 * target_frac * 1.2) as usize * 3;
         let mut dst = vec![0u32; idx.len()];
-        let k = meshopt_rs::simplify::simplify(&mut dst, &idx, &v, target.min(idx.len()), 0.01);
+        let k = if err < 0.0 { meshopt_rs::simplify::simplify_sloppy(&mut dst, &idx, &v, target.min(idx.len())) } else { meshopt_rs::simplify::simplify(&mut dst, &idx, &v, target.min(idx.len()), err) };
         let tris = if k >= 3 { &dst[..k] } else { &idx[..] };
         for t in tris.chunks_exact(3) {
             let mut vs = [v[t[0] as usize], v[t[1] as usize], v[t[2] as usize]];
