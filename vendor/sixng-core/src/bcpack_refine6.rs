@@ -14,7 +14,7 @@ use crate::bcpack::{self as bp, History};
 use crate::bcpack_tables as t;
 use rayon::prelude::*;
 
-const BUDGET: usize = 6000;
+const BUDGET: usize = 40000;
 
 /// One BC6H chunk with sibling targets for some of its blocks.
 pub(crate) struct Rec {
@@ -228,7 +228,7 @@ pub(crate) fn refine_endpoints(recs: &[Rec], h: &mut History) {
                 let mut r = if h.bc6h_ecls[k] != 0 { h.bc6h_ep[k][c] } else { [0x8000, 0x200, 0x20, 0x20] };
                 let mut e = err(r);
                 before += e;
-                for _round in 0..2 {
+                for _round in 0..6 {
                     let e0 = e;
                     for (f, bits) in [(0usize, 16u32), (1, 10), (2, 6), (3, 6)] {
                         // coarse scan then local refinement
@@ -260,6 +260,17 @@ pub(crate) fn refine_endpoints(recs: &[Rec], h: &mut History) {
                                     }
                                 }
                                 stepv /= 2;
+                            }
+                        }
+                        // single-bit flips: the 12/16-bit modes keep w's high bits
+                        // reversed, so neighbouring values are not neighbours in error
+                        for bit in 0..bits {
+                            let mut t = cand;
+                            t[f] ^= 1 << bit;
+                            let te = err(t);
+                            if te < ce {
+                                ce = te;
+                                cand = t;
                             }
                         }
                         if ce < e {

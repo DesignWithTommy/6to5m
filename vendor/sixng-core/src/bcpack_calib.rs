@@ -626,6 +626,17 @@ fn sibling(t: &TtpfTex, data: &[u8], mz: usize, child: bool) -> Option<Sibling> 
 
 /// Fit a preset history from every store in `set` (plain 2D textures).
 pub fn calibrate(set: &TtpfSet) -> History {
+    calibrate_ex(set, None)
+}
+
+/// Re-run only the BC6H endpoint refit on an existing history (all its other
+/// tables untouched).
+pub fn refit_bc6h(set: &TtpfSet, h: History) -> History {
+    calibrate_ex(set, Some(h))
+}
+
+fn calibrate_ex(set: &TtpfSet, base: Option<History>) -> History {
+    let only6 = base.is_some();
     let mut c7 = Bc7Cal::new();
     let mut c4 = Bc4Cal::default();
     let mut c6 = crate::bcpack_calib6::Bc6Cal::new();
@@ -634,6 +645,9 @@ pub fn calibrate(set: &TtpfSet) -> History {
         let mut seen: HashSet<usize> = HashSet::new();
         for t in &s.textures {
             let Some(cid) = codec_of(t.dxgi_format) else { continue };
+            if only6 && cid != bp::CODEC_BC6H {
+                continue;
+            }
             if t.slices() != 1 || (9..=12).contains(&t.tile_mode()) || t.split_2b {
                 continue;
             }
@@ -725,6 +739,10 @@ pub fn calibrate(set: &TtpfSet) -> History {
                 }
             }
         }
+    }
+    if let Some(mut h) = base {
+        crate::bcpack_refine6::refine_endpoints(&recs6, &mut h);
+        return h;
     }
     let mut h = History::empty();
     c7.build(&mut h);

@@ -55,6 +55,14 @@ fn main() {
             let ix = h.bc7_ix_bits.iter().flatten().filter(|&&b| b > 0).count();
             println!("{:.1}s bc4 {} bc7 ep slots {ep} ix slots {ix} bc6h ep {} ix {}", t0.elapsed().as_secs_f64(), h.bc4.iter().flatten().count(), h.bc6h_ecls.iter().filter(|&&c| c > 0).count(), h.bc6h_icls.iter().filter(|&&c| c > 0).count());
         }
+        "refit6" => {
+            // refit6 <in.bin> <out.bin>: BC6H endpoint refit only
+            let h = sixng_core::bcpack::History::from_bytes(&std::fs::read(&a[3]).unwrap()).unwrap();
+            let t0 = std::time::Instant::now();
+            let h = sixng_core::bcpack_calib::refit_bc6h(&set, h);
+            std::fs::write(&a[4], h.to_bytes()).unwrap();
+            println!("refit6 in {:.1}s", t0.elapsed().as_secs_f64());
+        }
         "refine" => {
             let mut h = sixng_core::bcpack::History::from_bytes(&std::fs::read(&a[3]).unwrap()).unwrap();
             let t0 = std::time::Instant::now();
