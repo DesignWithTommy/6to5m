@@ -31,7 +31,7 @@ Next, from the FiveM port's requests:
 ## fivem weapon (`src/gta5/fivem/weapons.rs`, `yft::build_ydr_skel`)
 
 - [ ] Test in game (give WEAPON_W_PI_SCORPIO_01): grip/muzzle sockets, hand IK, animations.
-- [x] Weapon textures: 6m weapon shaders (e68a4a98) carry only normal + packed material (739e3d0d, R = material id); the colour map is synthesized per id. Real finish colours per id are unknown.
+- [x] Weapon textures: 6m weapon shaders (e68a4a98) carry only normal + packed material (739e3d0d, R = material id); the colour map is synthesized per id. Traced: every one of the 2,733 `weapon` (e68a4a98) shaders in data.rpf has params speculartex, 20245319, bumptex, speculartex2, materialid; 20245319 is never bound in any asset (null texture pointer), so the per-id finish palette is a runtime global the engine binds, not asset data. `materialid` (8adb8480, BC4, ids at R = 2 + 4n) is present on only 54 shaders; it sits in a type-0 texture record that sixng drawable::find_shaders skips. Not in data.rpf PSOs, 0x7a meta (find-u32 on weapon name hashes: 0 hits in data/common/packs/script/story) or named txds. Next: find the global in the executable or shaders.rpf.
 - [ ] Real stats from 6m weapon data instead of GTA V class defaults; component variants (mags, sights) as GTA V components.
 
 ## fivem vehicle (`src/gta5/fivem/vehicles.rs`, `src/gta5/yft.rs`)
