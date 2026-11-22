@@ -13,6 +13,19 @@ pub type V3 = [f32; 3];
 /// their normals so they do not z-fight with the surface below.
 pub fn push_geoms(out: &mut Vec<Geom>, pos: &[V3], idx: &[u32], uvs: Option<&[[f32; 2]]>, colours: Option<&[u32]>, tex: &str, kind: u8) {
     let n = pos.len();
+    // Dense meshes: collapse edges within 0.5% of the mesh size. UV and
+    // colour seams are separate vertices, so meshopt keeps them as locked
+    // borders and textures do not swim.
+    let simplified;
+    let idx = if idx.len() >= 3000 && idx.iter().all(|&i| (i as usize) < n) {
+        let mut dst = vec![0u32; idx.len()];
+        let k = meshopt_rs::simplify::simplify(&mut dst, idx, pos, idx.len() / 2 / 3 * 3, 0.005);
+        dst.truncate(k);
+        simplified = dst;
+        if simplified.len() >= 3 { &simplified[..] } else { idx }
+    } else {
+        idx
+    };
     let mut nrm = vec![[0f32; 3]; n];
     for t in idx.chunks_exact(3) {
         let (a, b, c) = (t[0] as usize, t[1] as usize, t[2] as usize);

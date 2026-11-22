@@ -59,7 +59,7 @@ usage: 6ixpack fivem build --game <dir> --out <resource dir> [options]
   --conjugate-rot      write the conjugate of the stored placement quaternion
   --force              rebuild outputs even when up to date";
 
-const TOOL: &str = "fivem-19";
+const TOOL: &str = "fivem-20";
 
 pub struct Opts {
     pub game: PathBuf,
