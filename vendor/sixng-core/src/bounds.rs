@@ -77,6 +77,8 @@ pub struct Collision {
     pub bbox: [[f32; 3]; 2],
     /// Vertex dedupe per material (position bits -> index).
     lookup: std::collections::HashMap<u16, std::collections::HashMap<[u32; 3], u32>>,
+    /// Skip composite children flagged weapon-only (see `decode_movement`).
+    skip_weapon_only: bool,
 }
 
 fn f3(r: &Resource, o: usize) -> [f32; 3] {
@@ -111,10 +113,20 @@ fn mul(a: &M4, b: &M4) -> M4 {
 }
 
 pub fn decode(r: &Resource) -> Option<Collision> {
+    decode_opt(r, false)
+}
+
+/// Like `decode`, without weapon-only child shapes (about a fifth of map
+/// collision triangles; peds and vehicles never touch them).
+pub fn decode_movement(r: &Resource) -> Option<Collision> {
+    decode_opt(r, true)
+}
+
+fn decode_opt(r: &Resource, skip_weapon_only: bool) -> Option<Collision> {
     if !is_bound(r) {
         return None;
     }
-    let mut c = Collision { bbox: [f3(r, 0x30), f3(r, 0x20)], ..Default::default() };
+    let mut c = Collision { bbox: [f3(r, 0x30), f3(r, 0x20)], skip_weapon_only, ..Default::default() };
     walk(r, 0, &ID, 0, &mut c);
     Some(c)
 }
@@ -145,6 +157,14 @@ fn walk(r: &Resource, o: usize, m: &M4, depth: u32, c: &mut Collision) {
                     _ => ID,
                 };
                 c.stats.children += 1;
+                // child type flags (u32 at +0 of the 16-byte record): 0x02
+                // alone = weapon-only detail shape (bullets, not movement)
+                if c.skip_weapon_only {
+                    let fl = r.sys_off(r.u64(o + 0x88)).filter(|&f| f + 16 * (i + 1) <= r.sys.len()).map(|f| r.u32(f + 16 * i));
+                    if fl == Some(0x02) {
+                        continue;
+                    }
+                }
                 walk(r, k, &mul(m, &local), depth + 1, c);
             }
         }
@@ -360,3 +380,4 @@ impl Collision {
         mesh_glb(name, &[NodeGroup { name: name.to_string(), prims }], &mats, &[], extras)
     }
 }
+

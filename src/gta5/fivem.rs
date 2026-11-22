@@ -55,10 +55,11 @@ usage: 6ixpack fivem build --game <dir> --out <resource dir> [options]
                        default because the MLO shell itself is not converted,
                        so contents of multi-floor interiors float
   --no-lod            HD entities only, all ORPHANHD (no LOD/SLOD chain)
+  --weapon-collision  keep weapon-only collision shapes (bullets); off by default (~20% of triangles)
   --conjugate-rot      write the conjugate of the stored placement quaternion
   --force              rebuild outputs even when up to date";
 
-const TOOL: &str = "fivem-13";
+const TOOL: &str = "fivem-15";
 
 pub struct Opts {
     pub game: PathBuf,
@@ -72,6 +73,7 @@ pub struct Opts {
     pub conjugate: bool,
     pub interiors: bool,
     pub no_lod: bool,
+    pub weapon_collision: bool,
     pub force: bool,
     pub max_tex: Option<u16>,
 }
@@ -195,6 +197,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         conjugate: false,
         interiors: false,
         no_lod: false,
+        weapon_collision: false,
         force: false,
         max_tex: None,
     };
@@ -217,6 +220,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "--conjugate-rot" => o.conjugate = true,
             "--interiors" => o.interiors = true,
             "--no-lod" => o.no_lod = true,
+            "--weapon-collision" => o.weapon_collision = true,
             "--force" => o.force = true,
             "--max-tex" => o.max_tex = Some(val(&mut it, a)?.parse().map_err(|e| format!("--max-tex: {e}"))?),
             _ => return Err(format!("unknown argument {a}\n{USAGE}")),

@@ -18,9 +18,9 @@ use std::{collections::BTreeMap, error::Error, fs, io::Write};
 
 const CELL: f32 = 512.0;
 
-fn decode(path: &std::path::Path, e: &Entry) -> Option<sixng_core::bounds::Collision> {
+fn decode(path: &std::path::Path, e: &Entry, full: bool) -> Option<sixng_core::bounds::Collision> {
     let r = Resource::load_sys(path, e).ok()?;
-    let c = sixng_core::bounds::decode(&r)?;
+    let c = if full { sixng_core::bounds::decode(&r)? } else { sixng_core::bounds::decode_movement(&r)? };
     (!c.by_mat.values().all(|x| x.1.is_empty())).then_some(c)
 }
 
@@ -41,7 +41,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         }
     } else {
         eprintln!("collision: indexing {} resources (once; cached in {})", cands.len(), ip.display());
-        let found: Vec<(String, [[f32; 3]; 2])> = cands.par_iter().filter_map(|e| decode(&rpf, e).map(|c| (e.id.clone(), c.bbox))).collect();
+        let found: Vec<(String, [[f32; 3]; 2])> = cands.par_iter().filter_map(|e| decode(&rpf, e, true).map(|c| (e.id.clone(), c.bbox))).collect();
         let mut f = fs::File::create(&ip)?;
         writeln!(f, "{}", json!({"tool": TOOL, "entries": cands.len()}))?;
         for (id, b) in &found {
@@ -63,14 +63,14 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         .par_iter()
         .map(|((cx, cy), es)| {
             let file = format!("t6m_col_{:02}_{:02}.ybn", cx + 50, cy + 50);
-            let fp = sha(&format!("{TOOL}|col|{}", es.iter().map(|e| e.id.as_str()).collect::<Vec<_>>().join(",")));
+            let fp = sha(&format!("{TOOL}|col|{}|{}", ctx.o.weapon_collision, es.iter().map(|e| e.id.as_str()).collect::<Vec<_>>().join(",")));
             if let Some(info) = ctx.up_to_date(&file, &fp) {
                 ctx.emit(&file, &fp, info, None)?;
                 return Ok(());
             }
             let (mut verts, mut tris): (Vec<[f32; 3]>, Vec<[u32; 3]>) = (Vec::new(), Vec::new());
             for e in es {
-                let Some(c) = decode(&rpf, e) else { continue };
+                let Some(c) = decode(&rpf, e, ctx.o.weapon_collision) else { continue };
                 for (v, idx) in c.by_mat.values() {
                     let base = verts.len() as u32;
                     verts.extend_from_slice(v);
@@ -80,8 +80,10 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
             if tris.is_empty() {
                 return Ok(());
             }
+            let raw = tris.len();
+            let (verts, tris) = weld(&verts, &tris);
             let bytes = ybn::build_ybn(&verts, &tris, 0).map_err(|e| format!("{file}: {e}"))?;
-            let info = json!({"bounds": es.len(), "triangles": tris.len()});
+            let info = json!({"bounds": es.len(), "triangles": tris.len(), "raw_triangles": raw});
             let s = ctx.emit(&file, &fp, info, Some(bytes))?;
             ctx.report.lock().unwrap().converted.push(json!({"kind": "collision", "ybn": s, "bounds": es.len(), "triangles": tris.len()}));
             Ok(())
@@ -91,4 +93,36 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         r?;
     }
     Ok(())
+}
+
+/// Weld vertices on a 1 cm grid and drop degenerate and duplicate triangles
+/// (overlapping 6m bounds repeat the same surfaces many times).
+fn weld(verts: &[[f32; 3]], tris: &[[u32; 3]]) -> (Vec<[f32; 3]>, Vec<[u32; 3]>) {
+    use std::collections::{HashMap, HashSet};
+    let mut ids: HashMap<[i32; 3], u32> = HashMap::new();
+    let mut out_v = Vec::new();
+    let remap: Vec<u32> = verts
+        .iter()
+        .map(|v| {
+            let k = [(v[0] * 100.0).round() as i32, (v[1] * 100.0).round() as i32, (v[2] * 100.0).round() as i32];
+            *ids.entry(k).or_insert_with(|| {
+                out_v.push(*v);
+                (out_v.len() - 1) as u32
+            })
+        })
+        .collect();
+    let mut seen: HashSet<[u32; 3]> = HashSet::new();
+    let mut out_t = Vec::new();
+    for t in tris {
+        let t = [remap[t[0] as usize], remap[t[1] as usize], remap[t[2] as usize]];
+        if t[0] == t[1] || t[1] == t[2] || t[0] == t[2] {
+            continue;
+        }
+        let mut k = t;
+        k.sort_unstable();
+        if seen.insert(k) {
+            out_t.push(t);
+        }
+    }
+    (out_v, out_t)
 }
