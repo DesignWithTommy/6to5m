@@ -90,7 +90,7 @@ fn main() {
                     if s.chunks[ci].2 & 0x1C == 0 { continue; }
                     let d = cache.entry(ci).or_insert_with(|| sixng_core::bcpack::decode(codec, &chunk_comp(s, ci), (s.chunks[ci + 1].1 - s.chunks[ci].1) as usize).unwrap());
                     let bi = ((v - s.chunks[ci].1) / 16) as usize;
-                    let key = match d.info.get(bi) { Some(&x) => { let de = (x >> 8) & 255; let kind = if de == 0 { "none".to_string() } else if (x >> 16) & 1 != 0 { "hist".into() } else { format!("ref{}", x >> 20) }; format!("m{:02} {kind}", x & 255) } None => "all".into() };
+                    let key = match d.info.get(bi) { Some(&x) => { let de = (x >> 8) & 255; let kind = if de == 0 { "none".to_string() } else if (x >> 16) & 1 != 0 { "hist".into() } else { format!("{}ref{}", if (x >> 17) & 1 != 0 { "H" } else { "N" }, x >> 20) }; format!("m{:02} {kind}", x & 255) } None => "all".into() };
                     let g = agg.entry(key).or_default(); g.0 += 1; g.1 += e; if e > 60.0 { g.2 += 1; }
                 } }
                 if ntex >= lim { break 'o; }

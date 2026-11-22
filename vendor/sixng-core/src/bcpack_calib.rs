@@ -629,6 +629,7 @@ pub fn calibrate(set: &TtpfSet) -> History {
     let mut c7 = Bc7Cal::new();
     let mut c4 = Bc4Cal::default();
     let mut c6 = crate::bcpack_calib6::Bc6Cal::new();
+    let mut recs6: Vec<crate::bcpack_refine6::Rec> = Vec::new();
     for s in &set.stores {
         let mut seen: HashSet<usize> = HashSet::new();
         for t in &s.textures {
@@ -690,6 +691,11 @@ pub fn calibrate(set: &TtpfSet) -> History {
                         }
                         inv.get(&(off as u64)).map(|&(bx, by)| sib.quads(bx, by))
                     };
+                    if cid == bp::CODEC_BC6H {
+                        let full = vlen / 16;
+                        let tgt = (0..full).map(|i| q(i).map(|qq| std::array::from_fn(|c| qq.iter().map(|p| p[c]).sum::<f64>() / 4.0))).collect();
+                        recs6.push(crate::bcpack_refine6::Rec { lanes: lo.clone(), nb: full, tgt });
+                    }
                     match cid {
                         bp::CODEC_BC7 => c7.add_chunk(&lanes, nb, Some(&q)),
                         bp::CODEC_BC4 => c4.add_chunk(&lanes, nb, &q),
@@ -725,5 +731,6 @@ pub fn calibrate(set: &TtpfSet) -> History {
     c4.build(&mut h);
     c6.build(&mut h);
     crate::bcpack_refine::refine_indices(set, &mut h);
+    crate::bcpack_refine6::refine_endpoints(&recs6, &mut h);
     h
 }

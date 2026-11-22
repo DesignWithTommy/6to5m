@@ -752,10 +752,10 @@ fn bc7(lanes: &[&[u16]], n: usize) -> Decoded {
 // BC6H ------------------------------------------------------------------------
 
 /// Mode index (1..14) -> D3D11 mode bits.
-pub(crate) const B6_CODE: [u32; 15] = [0, 0x00, 0x01, 0x02, 0x06, 0x0A, 0x0E, 0x12, 0x16, 0x1A, 0x1E, 0x03, 0x07, 0x0B, 0x0F];
+pub const B6_CODE: [u32; 15] = [0, 0x00, 0x01, 0x02, 0x06, 0x0A, 0x0E, 0x12, 0x16, 0x1A, 0x1E, 0x03, 0x07, 0x0B, 0x0F];
 
 /// (transformed, base bits, deltas, regions, header layout)
-pub(crate) fn b6_info(code: u32) -> (bool, u32, [u32; 3], usize, &'static str) {
+pub fn b6_info(code: u32) -> (bool, u32, [u32; 3], usize, &'static str) {
     match code {
         0x00 => (true, 10, [5, 5, 5], 2, "gy4 by4 bz4 rw10 gw10 bw10 rx5 gz4 gy4_ gx5 bz0 gz4_ bx5 bz1 by4_ ry5 bz2 rz5 bz3 d"),
         0x01 => (true, 7, [6, 6, 6], 2, "gy5 gz4 gz5 rw7 bz0 bz1 by4 gw7 by5 bz2 gy4 bw7 bz3 bz5 bz4 rx6 gy4_ gx6 gz4_ bx6 by4_ ry6 rz6 d"),
@@ -775,7 +775,7 @@ pub(crate) fn b6_info(code: u32) -> (bool, u32, [u32; 3], usize, &'static str) {
 }
 
 /// Header plan: (channel or -1 for the partition, endpoint slot, bit, position), header bits.
-pub(crate) fn b6_plan(code: u32) -> (Vec<(i8, u8, u8, u8)>, u32) {
+pub fn b6_plan(code: u32) -> (Vec<(i8, u8, u8, u8)>, u32) {
     let mut pos: u32 = if code < 2 { 2 } else { 5 };
     let mut plan = Vec::new();
     let field = |name: &str| -> (i8, u8) {
@@ -847,6 +847,7 @@ fn bc6h(lanes: &[&[u16]], n: usize) -> Decoded {
     let mut st_e: Vec<[[u32; 4]; 3]> = Vec::with_capacity(n);
     let mut st_i: Vec<[u32; 16]> = Vec::with_capacity(n);
     let (mut eroot, mut iroot) = (vec![false; n], vec![false; n]);
+    let mut hroot = vec![false; n];
     let mut inconsistent = 0;
     let mut info = vec![0u32; n];
     let mut modes = vec![0u32; n];
@@ -869,11 +870,15 @@ fn bc6h(lanes: &[&[u16]], n: usize) -> Decoded {
             NONE_E
         } else if de <= i {
             eroot[i] = eroot[i - de];
+            hroot[i] = hroot[i - de];
             st_e[i - de]
         } else {
             let k = 256 + i - de;
             match history().filter(|h| h.bc6h_ecls[k] != 0) {
-                Some(h) => h.bc6h_ep[k],
+                Some(h) => {
+                    hroot[i] = true;
+                    h.bc6h_ep[k]
+                }
                 None => {
                     eroot[i] = true;
                     [[0; 4]; 3]
@@ -925,7 +930,7 @@ fn bc6h(lanes: &[&[u16]], n: usize) -> Decoded {
         }
         st_e.push(stb);
         modes[i] = mode as u32;
-        info[i] = mode as u32 | (de as u32) << 8 | (eroot[i] as u32) << 16 | if de > 0 && de <= i { modes[i - de] << 20 } else { 0 };
+        info[i] = mode as u32 | (de as u32) << 8 | (eroot[i] as u32) << 16 | (hroot[i] as u32) << 17 | if de > 0 && de <= i { modes[i - de] << 20 } else { 0 };
         let ibits = if reg == 2 { 3 } else { 4 };
         let imask = (1i32 << ibits) - 1;
         let ishift = 4 - ibits;
