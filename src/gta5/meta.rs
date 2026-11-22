@@ -166,7 +166,7 @@ pub fn hash(s: &str) -> Result<u32, String> {
     Ok(rsc::joaat(t))
 }
 
-fn enum_val(v: &EnumVal, names: &[&str]) -> Result<i32, String> {
+pub(crate) fn enum_val(v: &EnumVal, names: &[&str]) -> Result<i32, String> {
     match v {
         EnumVal::N(n) => Ok(*n),
         EnumVal::S(s) => names
@@ -176,7 +176,7 @@ fn enum_val(v: &EnumVal, names: &[&str]) -> Result<i32, String> {
             .ok_or_else(|| format!("unknown enum value '{s}' (expected one of {names:?})")),
     }
 }
-const LOD_TYPES: &[&str] = &[
+pub(crate) const LOD_TYPES: &[&str] = &[
     "LODTYPES_DEPTH_HD",
     "LODTYPES_DEPTH_LOD",
     "LODTYPES_DEPTH_SLOD1",
@@ -185,8 +185,8 @@ const LOD_TYPES: &[&str] = &[
     "LODTYPES_DEPTH_ORPHANHD",
     "LODTYPES_DEPTH_SLOD4",
 ];
-const PRI_LEVELS: &[&str] = &["PRI_REQUIRED", "PRI_OPTIONAL_HIGH", "PRI_OPTIONAL_MEDIUM", "PRI_OPTIONAL_LOW"];
-const ASSET_TYPES: &[&str] = &[
+pub(crate) const PRI_LEVELS: &[&str] = &["PRI_REQUIRED", "PRI_OPTIONAL_HIGH", "PRI_OPTIONAL_MEDIUM", "PRI_OPTIONAL_LOW"];
+pub(crate) const ASSET_TYPES: &[&str] = &[
     "ASSET_TYPE_UNINITIALIZED",
     "ASSET_TYPE_FRAGMENT",
     "ASSET_TYPE_DRAWABLE",
@@ -283,24 +283,24 @@ pub fn compute_extents(entities: &[Entity], archetypes: &[Archetype]) -> Result<
 
 // ---------------------------------------------------------------- infos
 
-struct SInfo {
-    name: u32,
-    key: u32,
-    unk8: u32,
-    size: i32,
+pub(crate) struct SInfo {
+    pub(crate) name: u32,
+    pub(crate) key: u32,
+    pub(crate) unk8: u32,
+    pub(crate) size: i32,
     /// (entry name hash, data offset, data type, unk9, ref type index, ref key)
-    entries: &'static [(u32, i32, u8, u8, i16, u32)],
+    pub(crate) entries: &'static [(u32, i32, u8, u8, i16, u32)],
 }
-struct EInfo {
-    name: u32,
-    key: u32,
-    entries: &'static [(u32, i32)],
+pub(crate) struct EInfo {
+    pub(crate) name: u32,
+    pub(crate) key: u32,
+    pub(crate) entries: &'static [(u32, i32)],
 }
 
 // Verbatim from CodeWalker MetaTypes.GetStructureInfo / GetEnumInfo (as
 // written into CodeWalker-built ymap/ytyp files).
-const CENTITYDEF: SInfo = SInfo { name: 0xce501483, key: 0x6cd37d5a, unk8: 0x400, size: 128, entries: CENTITYDEF_E };
-const CENTITYDEF_E: &[(u32, i32, u8, u8, i16, u32)] = &[
+pub(crate) const CENTITYDEF: SInfo = SInfo { name: 0xce501483, key: 0x6cd37d5a, unk8: 0x400, size: 128, entries: CENTITYDEF_E };
+pub(crate) const CENTITYDEF_E: &[(u32, i32, u8, u8, i16, u32)] = &[
     (0xa023a02c, 8, 0x4a, 0, 0, 0x00000000),
     (0x67d26872, 12, 0x15, 0, 0, 0x00000000),
     (0x9a7b6e6d, 16, 0x15, 0, 0, 0x00000000),
@@ -320,7 +320,7 @@ const CENTITYDEF_E: &[(u32, i32, u8, u8, i16, u32)] = &[
     (0x23c0e543, 116, 0x14, 0, 0, 0x00000000),
     (0x3c852527, 120, 0x15, 0, 0, 0x00000000),
 ];
-const INSTANCED: SInfo = SInfo { name: 0xf14a15be, key: 0x6d7b0a56, unk8: 0x300, size: 48, entries: INSTANCED_E };
+pub(crate) const INSTANCED: SInfo = SInfo { name: 0xf14a15be, key: 0x6d7b0a56, unk8: 0x300, size: 48, entries: INSTANCED_E };
 const INSTANCED_E: &[(u32, i32, u8, u8, i16, u32)] = &[
     (0x7fae45e2, 8, 0x4a, 0, 0, 0x00000000),
     (0x00000100, 0, 0x05, 0, 0, 0xba049770),
@@ -328,7 +328,7 @@ const INSTANCED_E: &[(u32, i32, u8, u8, i16, u32)] = &[
     (0x00000100, 0, 0x05, 0, 0, 0x7c475b5d),
     (0x0f3773dd, 32, 0x52, 0, 3, 0x00000000),
 ];
-const LODLIGHT: SInfo = SInfo { name: 0x87ac4538, key: 0x8a97926c, unk8: 0x300, size: 136, entries: LODLIGHT_E };
+pub(crate) const LODLIGHT: SInfo = SInfo { name: 0x87ac4538, key: 0x8a97926c, unk8: 0x300, size: 136, entries: LODLIGHT_E };
 const LODLIGHT_E: &[(u32, i32, u8, u8, i16, u32)] = &[
     (0x00000100, 0, 0x05, 0, 0, 0xe2cbcfd4),
     (0x34df9828, 8, 0x52, 0, 0, 0x00000000),
@@ -347,7 +347,7 @@ const LODLIGHT_E: &[(u32, i32, u8, u8, i16, u32)] = &[
     (0x00000100, 0, 0x11, 0, 0, 0x00000000),
     (0x88a2b1fb, 120, 0x52, 0, 14, 0x00000000),
 ];
-const DISTLODLIGHT: SInfo = SInfo { name: 0x793441f4, key: 0xa823a583, unk8: 0x300, size: 48, entries: DISTLODLIGHT_E };
+pub(crate) const DISTLODLIGHT: SInfo = SInfo { name: 0x793441f4, key: 0xa823a583, unk8: 0x300, size: 48, entries: DISTLODLIGHT_E };
 const DISTLODLIGHT_E: &[(u32, i32, u8, u8, i16, u32)] = &[
     (0x00000100, 0, 0x05, 0, 0, 0xe2cbcfd4),
     (0x01166164, 8, 0x52, 0, 0, 0x00000000),
@@ -356,7 +356,7 @@ const DISTLODLIGHT_E: &[(u32, i32, u8, u8, i16, u32)] = &[
     (0xdd11304b, 40, 0x13, 0, 0, 0x00000000),
     (0x7a5c560d, 42, 0x13, 0, 0, 0x00000000),
 ];
-const BLOCKDESC: SInfo = SInfo { name: 0xb7206e4a, key: 0x782698f9, unk8: 0x300, size: 72, entries: BLOCKDESC_E };
+pub(crate) const BLOCKDESC: SInfo = SInfo { name: 0xb7206e4a, key: 0x782698f9, unk8: 0x300, size: 72, entries: BLOCKDESC_E };
 const BLOCKDESC_E: &[(u32, i32, u8, u8, i16, u32)] = &[
     (0x68c27e33, 0, 0x15, 0, 0, 0x00000000),
     (0x67d26872, 4, 0x15, 0, 0, 0x00000000),
@@ -365,7 +365,7 @@ const BLOCKDESC_E: &[(u32, i32, u8, u8, i16, u32)] = &[
     (0x8c060170, 40, 0x44, 0, 0, 0x00000000),
     (0x0f678e23, 56, 0x44, 0, 0, 0x00000000),
 ];
-const CMAPDATA: SInfo = SInfo { name: 0xd3593fa6, key: 0xcd85db27, unk8: 0x400, size: 512, entries: CMAPDATA_E };
+pub(crate) const CMAPDATA: SInfo = SInfo { name: 0xd3593fa6, key: 0xcd85db27, unk8: 0x400, size: 512, entries: CMAPDATA_E };
 const CMAPDATA_E: &[(u32, i32, u8, u8, i16, u32)] = &[
     (0xe6e17f14, 8, 0x4a, 0, 0, 0x00000000),
     (0xa99c4651, 12, 0x4a, 0, 0, 0x00000000),
@@ -394,10 +394,10 @@ const CMAPDATA_E: &[(u32, i32, u8, u8, i16, u32)] = &[
     (0xb0199551, 392, 0x05, 0, 0, 0x793441f4),
     (0xe433d77d, 440, 0x05, 0, 0, 0xb7206e4a),
 ];
-const E_LODTYPE: EInfo = EInfo { name: 0x4b5acc2f, key: 0x6ea51086, entries: &[(0xc2485bbc, 0), (0x8e22c856, 1), (0x983c176c, 2), (0x12cd0c94, 3), (0x81046901, 4), (0x7d934f41, 5), (0x6f5d45b3, 6)] };
-const E_PRIORITY: EInfo = EInfo { name: 0x26a60207, key: 0x8326cb4f, entries: &[(0x73d556cb, 0), (0xee09c197, 1), (0x1ebb6975, 2), (0x13a5b7d4, 3)] };
+pub(crate) const E_LODTYPE: EInfo = EInfo { name: 0x4b5acc2f, key: 0x6ea51086, entries: &[(0xc2485bbc, 0), (0x8e22c856, 1), (0x983c176c, 2), (0x12cd0c94, 3), (0x81046901, 4), (0x7d934f41, 5), (0x6f5d45b3, 6)] };
+pub(crate) const E_PRIORITY: EInfo = EInfo { name: 0x26a60207, key: 0x8326cb4f, entries: &[(0x73d556cb, 0), (0xee09c197, 1), (0x1ebb6975, 2), (0x13a5b7d4, 3)] };
 const CBASEARCH: SInfo = SInfo { name: 0x82d6fc83, key: 0x8fbadaa4, unk8: 0x400, size: 144, entries: CBASEARCH_E };
-const CBASEARCH_E: &[(u32, i32, u8, u8, i16, u32)] = &[
+pub(crate) const CBASEARCH_E: &[(u32, i32, u8, u8, i16, u32)] = &[
     (0xbf74dfa7, 8, 0x21, 0, 0, 0x00000000),
     (0x67d26872, 12, 0x15, 0, 0, 0x00000000),
     (0x6c1523e4, 16, 0x15, 0, 0, 0x00000000),
@@ -416,7 +416,7 @@ const CBASEARCH_E: &[(u32, i32, u8, u8, i16, u32)] = &[
     (0x00000100, 0, 0x07, 0, 0, 0x00000000),
     (0xf17e7f28, 120, 0x52, 0, 15, 0x00000000),
 ];
-const CMAPTYPES: SInfo = SInfo { name: 0xd98bb561, key: 0x9b8046d4, unk8: 0x300, size: 80, entries: CMAPTYPES_E };
+pub(crate) const CMAPTYPES: SInfo = SInfo { name: 0xd98bb561, key: 0x9b8046d4, unk8: 0x300, size: 80, entries: CMAPTYPES_E };
 const CMAPTYPES_E: &[(u32, i32, u8, u8, i16, u32)] = &[
     (0x00000100, 0, 0x07, 0, 0, 0x00000000),
     (0xf17e7f28, 8, 0x52, 0, 0, 0x00000000),
@@ -428,20 +428,20 @@ const CMAPTYPES_E: &[(u32, i32, u8, u8, i16, u32)] = &[
     (0x00000100, 0, 0x05, 0, 0, 0x46ad6dff),
     (0x65e9d4eb, 64, 0x52, 0, 7, 0x00000000),
 ];
-const E_ASSETTYPE: EInfo = EInfo { name: 0x76baf7c7, key: 0x6f39632c, entries: &[(0x0b4f1fed, 0), (0x22097fe7, 1), (0x07c0cb71, 2), (0x5e2f6a14, 3), (0xf8051e71, 4)] };
+pub(crate) const E_ASSETTYPE: EInfo = EInfo { name: 0x76baf7c7, key: 0x6f39632c, entries: &[(0x0b4f1fed, 0), (0x22097fe7, 1), (0x07c0cb71, 2), (0x5e2f6a14, 3), (0xf8051e71, 4)] };
 
 // ---------------------------------------------------------------- meta builder
 
-const T_CMAPDATA: u32 = 0xd3593fa6;
-const T_CMAPTYPES: u32 = 0xd98bb561;
-const T_POINTER: u32 = 7;
+pub(crate) const T_CMAPDATA: u32 = 0xd3593fa6;
+pub(crate) const T_CMAPTYPES: u32 = 0xd98bb561;
+pub(crate) const T_POINTER: u32 = 7;
 const T_STRING: u32 = 0x10;
 /// MetaBuilder.MaxBlockLength: a data block takes new items while smaller.
 const MAX_BLOCK: usize = 0x4000;
 
 #[derive(Default)]
-struct MB {
-    blocks: Vec<(u32, Vec<u8>)>,
+pub(crate) struct MB {
+    pub(crate) blocks: Vec<(u32, Vec<u8>)>,
     sinfos: Vec<&'static SInfo>,
     einfos: Vec<&'static EInfo>,
 }
@@ -452,7 +452,7 @@ fn mptr(id: usize, off: usize) -> u64 {
 }
 
 impl MB {
-    fn ensure(&mut self, t: u32) -> usize {
+    pub(crate) fn ensure(&mut self, t: u32) -> usize {
         if let Some(i) = self.blocks.iter().position(|b| b.0 == t && b.1.len() < MAX_BLOCK) {
             return i;
         }
@@ -460,32 +460,32 @@ impl MB {
         self.blocks.len() - 1
     }
     /// AddItem / AddItemArray (data padded to 16).
-    fn add_item(&mut self, t: u32, mut d: Vec<u8>) -> u64 {
+    pub(crate) fn add_item(&mut self, t: u32, mut d: Vec<u8>) -> u64 {
         let i = self.ensure(t);
         d.resize(d.len().div_ceil(16) * 16, 0);
         let off = self.blocks[i].1.len();
         self.blocks[i].1.extend_from_slice(&d);
         mptr(i + 1, off)
     }
-    fn add_string(&mut self, s: &str) -> (u64, u16) {
+    pub(crate) fn add_string(&mut self, s: &str) -> (u64, u16) {
         let i = self.ensure(T_STRING);
         let off = self.blocks[i].1.len();
         self.blocks[i].1.extend_from_slice(s.as_bytes());
         self.blocks[i].1.push(0);
         (mptr(i + 1, off), s.len() as u16)
     }
-    fn sinfo(&mut self, s: &'static SInfo) {
+    pub(crate) fn sinfo(&mut self, s: &'static SInfo) {
         if !self.sinfos.iter().any(|x| x.name == s.name) {
             self.sinfos.push(s);
         }
     }
-    fn einfo(&mut self, e: &'static EInfo) {
+    pub(crate) fn einfo(&mut self, e: &'static EInfo) {
         if !self.einfos.iter().any(|x| x.name == e.name) {
             self.einfos.push(e);
         }
     }
     /// Array_StructurePointer: each item its own struct item, then a POINTER array.
-    fn ptr_array(&mut self, t: u32, items: Vec<Vec<u8>>) -> (u64, u16) {
+    pub(crate) fn ptr_array(&mut self, t: u32, items: Vec<Vec<u8>>) -> (u64, u16) {
         if items.is_empty() {
             return (0, 0);
         }
@@ -498,7 +498,7 @@ impl MB {
     }
 
     /// Emit the RSC7 resource (block order = CodeWalker GetBlocks order).
-    fn build(self) -> Result<Vec<u8>, String> {
+    pub(crate) fn build(self) -> Result<Vec<u8>, String> {
         let make = |pages: u8| -> Builder {
             let mut b = Builder::new();
             b.meta_packing = true;
@@ -558,7 +558,7 @@ impl MB {
 }
 
 /// Array_Structure / Array_StructurePointer / CharPointer (16 bytes).
-fn arr(w: &mut W, p: u64, n: u16) {
+pub(crate) fn arr(w: &mut W, p: u64, n: u16) {
     w.u64(p).u16(n).u16(n).u32(0);
 }
 

@@ -4,7 +4,7 @@ Done: Rust writers (`6ixpack convert`) and `6ixpack fivem build` (terrain, build
 
 Open gaps found:
 - Fragments convert as static ydr (no breakage). Textures missing from the ttdb pools come from the TTPF stores (re-encoded DXT1/DXT5); 3 in the test district are in neither.
-- Interior contents are opt-in (`--interiors`): the MLO shell model is not found, so multi-floor contents float. LOD parents that are prop batches (`*_batchlod`) are ignored.
+- Interiors convert to MLOs by default (`src/gta5/fivem/interiors.rs`; checked with CodeWalker, not yet in game). Portals are not decoded and interior collision has no room ids, so all entities are attached to limbo and the decoded rooms are empty; entity sets are written off by default. Decode 6m portals, then attach entities to their rooms. `--interiors` keeps the old world-space flattening. LOD parents that are prop batches (`*_batchlod`) are ignored.
 - Terrain tile numbering differs from the Python run (153 vs 158 tiles).
 - Nothing is checked in game yet; quaternion convention unverified (`--conjugate-rot`).
 

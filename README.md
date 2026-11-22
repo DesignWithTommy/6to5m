@@ -50,7 +50,8 @@ What works today:
 - [x] LOD/SLOD drawables with no linked model (unresolved archetypes 84,216 to 37; `#member` model ids resolved, so every airport placement converts)
 - [ ] Models outside `levels.rpf` (`pack/*` archives)
 - [ ] Collision surface materials (currently all default) (in progress)
-- [ ] Interior (MLO) shells, so interior contents stop needing `--interiors` (in progress)
+- [x] Interiors as GTA V MLOs: `t6m_int.ytyp` (CMloArchetypeDef with decoded rooms, entity sets and the interior entities) and `t6m_int_X_Y.ymap` (CMloInstanceDef); `--interiors` still flattens them into world space instead
+- [ ] MLO portals (not decoded yet: every entity sits in limbo, entity sets start off)
 - [ ] Tint palettes and vertex-colour materials (in progress)
 - [ ] Fragments with physics (currently static)
 - [ ] Peds to GTA V (any ped, skeleton retargeted to GTA V, ymt/peds.meta) (in progress)

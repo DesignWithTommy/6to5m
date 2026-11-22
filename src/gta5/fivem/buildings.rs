@@ -3,6 +3,8 @@
 //! the mesh, textureDictionary set) and 512 m t6m_bld_XX_YY.ymap cells.
 
 use super::geom::{aabb, push_geoms, V3};
+#[path = "interiors.rs"]
+mod interiors;
 use super::{safe_name, sha, write_atomic, Ctx, TOOL};
 use crate::gta5::{
     meta::{self, Archetype, Entity, MapData, MapTypes},
@@ -255,6 +257,39 @@ impl Pools {
         self.from_ttpf(hash, h64).and_then(|p| check_dds(&p).map(|_| p)).map_err(|e2| format!("{e1}; ttpf: {e2}"))
     }
 
+    /// A tint palette (one-row texture) as RGBA8, from the pools or the
+    /// TTPF stores; cached as <hash>_pal.dds. Not colour-checked.
+    fn palette(&self, hash: u32, key: u64, h64: u64) -> Option<Vec<[u8; 4]>> {
+        let p = self.dir.join(format!("{hash:08x}_pal.dds"));
+        let read = |p: &std::path::Path| {
+            let (w, h, rgba) = crate::texture::dds_preview(&fs::read(p).ok()?).ok()?;
+            (h == 1 && w > 0).then(|| rgba.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect())
+        };
+        if p.exists() {
+            return read(&p);
+        }
+        let dds = (|| {
+            if key != 0 {
+                let cat = self.catalog.as_ref()?;
+                let loc = cat.find(key).into_iter().find(|l| l.extractable)?;
+                let f = fs::File::open(&loc.path).ok()?;
+                // SAFETY: read-only map of a game file.
+                let map = unsafe { Mmap::map(&f) }.ok()?;
+                let pool = crate::texture::Pool::open(&map).ok()?;
+                if let Ok(d) = pool.create_dds(pool.textures.get(loc.index)?) {
+                    return Some(d);
+                }
+            }
+            let set = sixng_core::ttpf::global(&self.game);
+            let (store, t) = set.get(h64)?;
+            let (data, _) = store.data_ex(t).ok()?;
+            let (rgba, w, h) = sixng_core::ttpf::decode_rgba(t, &data, 0).ok()?;
+            Some(rgba_dds(&rgba, w, h))
+        })()?;
+        write_atomic(&p, &dds).ok()?;
+        read(&p)
+    }
+
     fn from_ttpf(&self, hash: u32, h64: u64) -> Result<PathBuf, String> {
         if h64 == 0 {
             return Err("no 64-bit hash".into());
@@ -307,6 +342,36 @@ impl Pools {
         write_atomic(&p, &dds).or_else(|e| if p.exists() { Ok(()) } else { Err(e.to_string()) })?;
         Ok(p)
     }
+}
+
+/// Shader slot of the per-model tint palette (one-row embedded texture).
+const TINT_PALETTE: u32 = 0x2c8d_7182;
+
+/// Cached copy of colour texture `tex` multiplied by `c` (sRGB), or a
+/// solid `c` when the model has no usable colour texture (the palette then
+/// gives the whole colour). Returns its texture name.
+fn tinted(pools: &Pools, tex: &str, c: [u8; 3]) -> Result<String, String> {
+    let stem = if tex == MISSING { "w".to_string() } else { tex[4..].to_string() };
+    let name = format!("r6m_{stem}_t{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
+    let p = pools.dir.join(format!("{}.dds", &name[4..]));
+    if p.exists() {
+        return Ok(name);
+    }
+    let (rgba, w, h) = if tex == MISSING {
+        ([255u8; 4].repeat(16), 4, 4)
+    } else {
+        let b = fs::read(pools.dir.join(format!("{stem}.dds"))).map_err(|e| e.to_string())?;
+        let (w, h, rgba) = crate::texture::dds_preview(&b).map_err(|e| e.to_string())?;
+        (rgba, w, h)
+    };
+    let mut out = rgba;
+    for px in out.chunks_exact_mut(4) {
+        for k in 0..3 {
+            px[k] = ((px[k] as u32 * c[k] as u32 + 127) / 255) as u8;
+        }
+    }
+    write_atomic(&p, &rgba_dds(&out, w, h)).or_else(|e| if p.exists() { Ok(()) } else { Err(e.to_string()) })?;
+    Ok(name)
 }
 
 fn placeholder() -> Tex {
@@ -422,15 +487,6 @@ fn load_places(ctx: &Ctx, dir: &Path) -> Result<Vec<Place>, Box<dyn Error>> {
     // Interiors (MLO instances): interior-space entities moved into world space.
     let (mut n_int, mut n_ent) = (0, 0);
     let int_text = fs::read_to_string(dir.join("interiors.jsonl")).ok();
-    if !ctx.o.interiors {
-        let n = int_text.iter().flat_map(|t| t.lines()).filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter(|v| {
-            let p = f3(&v["position"]);
-            ctx.o.in_bbox(p, p)
-        }).count();
-        if n > 0 {
-            ctx.skip(&format!("({n} interiors)"), "interior contents skipped (MLO shell not converted; use --interiors)", json!({"count": n}));
-        }
-    }
     if let Some(text) = int_text.filter(|_| ctx.o.interiors) {
         let mut cache: HashMap<String, Option<Arc<Value>>> = HashMap::new();
         for l in text.lines() {
@@ -548,7 +604,7 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, an: &str, off: usize) -> Resu
             || MISSING.to_string(),
             |mat| {
                 let mut cands: Vec<_> = COLOR_SLOTS.iter().filter_map(|slot| mat.textures.iter().find(|t| t.param == *slot)).collect();
-                cands.extend(mat.textures.iter().filter(|t| !COLOR_SLOTS.contains(&t.param)));
+                cands.extend(mat.textures.iter().filter(|t| !COLOR_SLOTS.contains(&t.param) && t.param != TINT_PALETTE));
                 let mut errs = Vec::new();
                 for t in cands {
                     let key = m.embedded.as_ref().and_then(|e| e.by_hash(t.hash)).and_then(|x| x.asset_key).unwrap_or(t.key);
@@ -565,6 +621,29 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, an: &str, off: usize) -> Resu
             texs.push(tex.clone());
         }
         let kind = sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).map_or(0, |mat| kind_of(mat.bucket));
+        // Tint palette: bake palette entry (row 0, column = vertex colour
+        // blue) into tinted copies of the colour texture, one per colour.
+        let palette = sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).and_then(|mat| mat.textures.iter().find(|t| t.param == TINT_PALETTE)).and_then(|t| {
+            m.palettes.iter().find(|p| p.0 == t.hash).map(|p| p.1.clone()).or_else(|| pools.palette(t.hash, m.embedded.as_ref().and_then(|e| e.by_hash(t.hash)).and_then(|x| x.asset_key).unwrap_or(t.key), t.h64))
+        });
+        if let (Some(pal), Some(cols)) = (palette.as_ref(), sm.colors.as_deref()) {
+            let mut groups: Vec<([u8; 3], Vec<u32>)> = Vec::new();
+            for t in sm.indices.chunks_exact(3) {
+                let c = cols.get(t[0] as usize).and_then(|c| pal.get((c >> 16 & 255) as usize)).map_or([255; 3], |p| [p[0], p[1], p[2]]);
+                match groups.iter_mut().find(|g| g.0 == c) {
+                    Some(g) => g.1.extend_from_slice(t),
+                    None => groups.push((c, t.to_vec())),
+                }
+            }
+            for (c, idx) in groups {
+                let t = if c == [255; 3] { tex.clone() } else { tinted(pools, &tex, c).unwrap_or_else(|_| tex.clone()) };
+                if t != MISSING && !texs.contains(&t) {
+                    texs.push(t.clone());
+                }
+                push_geoms(&mut mesh.geoms, &sm.positions, &idx, sm.uvs.as_deref(), sm.colors.as_deref(), &t, kind);
+            }
+            continue;
+        }
         push_geoms(&mut mesh.geoms, &sm.positions, &sm.indices, sm.uvs.as_deref(), sm.colors.as_deref(), &tex, kind);
     }
     Ok(Some((mesh, texs, missing, frag_out)))
@@ -700,10 +779,15 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
 pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     let dir = placements_dir(ctx, index)?;
     let places = load_places(ctx, &dir)?;
+    // interiors as MLOs (default; --interiors flattens them into world space instead)
+    let mlos = if ctx.o.interiors { Vec::new() } else { interiors::load(ctx, &dir) };
     // archetype name -> model offset (first wins), most used first
     let mut use_count: HashMap<&str, (usize, usize)> = HashMap::new();
     for p in &places {
         use_count.entry(&p.name).or_insert((p.off, 0)).1 += 1;
+    }
+    for c in mlos.iter().flat_map(|i| &i.children) {
+        use_count.entry(&c.name).or_insert((c.off, 0));
     }
     let mut arch: Vec<(&str, usize)> = use_count.iter().map(|(n, (o, _))| (*n, *o)).collect();
     arch.sort_by(|a, b| use_count[b.0].1.cmp(&use_count[a.0].1).then(a.0.cmp(b.0)));
@@ -891,6 +975,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         .collect();
     let yt = meta::build_ytyp(&MapTypes { name: "t6m_bld".into(), archetypes: archetypes.clone() })?;
     emit_meta(ctx, "t6m_bld.ytyp", yt)?;
+    interiors::emit(ctx, &mlos, &done.iter().map(|(n, a)| (n.clone(), a.an.clone())).collect(), &archetypes)?;
     {
         // for --split (split.rs): which txd each archetype uses
         let mut l = ctx.layout.lock().unwrap();
