@@ -20,7 +20,8 @@ const BUDGET: usize = 40000;
 pub(crate) struct Rec {
     pub lanes: Vec<Vec<u16>>,
     pub nb: usize,
-    pub tgt: Vec<Option<[f64; 3]>>,
+    /// per 2x2 quadrant (qy * 2 + qx), the sibling pixel mean
+    pub tgt: Vec<Option<[[f64; 3]; 4]>>,
 }
 
 const W3: [u32; 8] = [0, 9, 18, 27, 37, 46, 55, 64];
@@ -34,9 +35,9 @@ struct Blk {
     parent: usize,
     k: i16,
     dz: [[i64; 4]; 3],
-    /// region weights: (A0, B0, A1, B1), mean = A0 e0 + B0 e1 + A1 e2 + B1 e3
-    wt: [f64; 4],
-    tgt: Option<[f64; 3]>,
+    /// per quadrant region weights: (A0, B0, A1, B1), quadrant mean = A0 e0 + B0 e1 + A1 e2 + B1 e3
+    wt: [[f64; 4]; 4],
+    tgt: Option<[[f64; 3]; 4]>,
 }
 
 fn unq(v: i64, bits: u32) -> f64 {
@@ -57,8 +58,8 @@ fn sx(v: u32, bits: u32) -> i64 {
     (v as i64 ^ s) - s
 }
 
-/// Channel step: state in, (state out, block mean).
-fn step(b: &Blk, c: usize, r: [u32; 4]) -> ([u32; 4], f64) {
+/// Channel step: state in, (state out, quadrant means).
+fn step(b: &Blk, c: usize, r: [u32; 4]) -> ([u32; 4], [f64; 4]) {
     let mode = b.mode as usize;
     let (trans, base, deltas, reg, _) = bp::b6_info(bp::B6_CODE[mode]);
     let dc = deltas[c];
@@ -89,7 +90,10 @@ fn step(b: &Blk, c: usize, r: [u32; 4]) -> ([u32; 4], f64) {
     } else {
         [unq(wv, base), unq(x as i64, dc), unq(y as i64, dc), unq(z as i64, dc)]
     };
-    let mean = if reg == 2 { b.wt[0] * e[0] + b.wt[1] * e[1] + b.wt[2] * e[2] + b.wt[3] * e[3] } else { b.wt[0] * e[0] + b.wt[1] * e[1] };
+    let mean = std::array::from_fn(|k| {
+        let w = &b.wt[k];
+        if reg == 2 { w[0] * e[0] + w[1] * e[1] + w[2] * e[2] + w[3] * e[3] } else { w[0] * e[0] + w[1] * e[1] }
+    });
     (st, mean)
 }
 
@@ -104,7 +108,7 @@ fn blocks(rec: &Rec, h: &History) -> Vec<Blk> {
         let ms = l15[a] as usize;
         let di = bp::inter8(l[1][a], l[1][b]) as usize;
         let de = ((di as i32 + bp::unzig(bp::inter8(l[0][a], l[0][b]))) & 255) as usize;
-        let mut blk = Blk { mode: 0, parent: usize::MAX, k: -1, dz: [[0; 4]; 3], wt: [0.0; 4], tgt: rec.tgt.get(i).copied().flatten() };
+        let mut blk = Blk { mode: 0, parent: usize::MAX, k: -1, dz: [[0; 4]; 3], wt: [[0.0; 4]; 4], tgt: rec.tgt.get(i).copied().flatten() };
         if ms > 13 {
             out.push(blk);
             st_i.push([8; 16]);
@@ -127,7 +131,7 @@ fn blocks(rec: &Rec, h: &History) -> Vec<Blk> {
         let imask = (1i32 << ibits) - 1;
         let ish = 4 - ibits;
         let mut si = [0u32; 16];
-        let mut wt = [0.0f64; 4];
+        let mut wt = [[0.0f64; 4]; 4];
         for y in 0..4 {
             let d = bp::row_digits(l[11 + y][a], l[11 + y][b], y);
             for off in 0..4 {
@@ -136,8 +140,9 @@ fn blocks(rec: &Rec, h: &History) -> Vec<Blk> {
                 si[p] = v << ish;
                 let w = if reg == 2 { W3[v as usize] } else { W4[v as usize] } as f64;
                 let s2 = if reg == 2 { (((t::BC7_PART2[part] >> p) & 1) * 2) as usize } else { 0 };
-                wt[s2] += (64.0 - w) / 64.0 / 16.0;
-                wt[s2 + 1] += w / 64.0 / 16.0;
+                let qd = (y / 2) * 2 + off / 2;
+                wt[qd][s2] += (64.0 - w) / 64.0 / 4.0;
+                wt[qd][s2 + 1] += w / 64.0 / 4.0;
             }
         }
         st_i.push(si);
@@ -184,8 +189,12 @@ fn chain_err(ch: &Chain, c: usize, r: [u32; 4], st: &mut Vec<[u32; 4]>) -> f64 {
         let (s, mean) = step(b, c, src);
         st.push(s);
         if let Some(tg) = b.tgt {
-            let d = ((mean.max(0.0) + 1.0).log2() - (tg[c].max(0.0) + 1.0).log2()).abs();
-            e += d.min(4.0);
+            // per-quadrant error with the decoded indices: a block-mean score
+            // lets the second region's endpoints drift (GTA6-Asset-Info d62cc61)
+            for k in 0..4 {
+                let d = ((mean[k].max(0.0) + 1.0).log2() - (tg[k][c].max(0.0) + 1.0).log2()).abs();
+                e += d.min(4.0) / 4.0;
+            }
         }
     }
     e

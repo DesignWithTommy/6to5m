@@ -103,7 +103,7 @@ pub const BCPACK_DECODER_VERSION: u32 = 2;
 /// Per-codec decoder versions (bump the codec whose decoded output changed):
 /// BC1, BC3, BC4, BC5, BC6H, BC7. `cache_tag` builds a texture-cache key
 /// from them so a change re-decodes only that codec's textures.
-pub const BCPACK_CODEC_VERSION: [(u8, u32); 6] = [(CODEC_BC1, 1), (CODEC_BC3, 1), (CODEC_BC4, 1), (CODEC_BC5, 1), (CODEC_BC6H, 2), (CODEC_BC7, 1)];
+pub const BCPACK_CODEC_VERSION: [(u8, u32); 6] = [(CODEC_BC1, 1), (CODEC_BC3, 1), (CODEC_BC4, 1), (CODEC_BC5, 1), (CODEC_BC6H, 3), (CODEC_BC7, 1)];
 
 /// Decoder version for a DXGI format's BCPack codec (0 = not BCPack-coded).
 pub fn codec_version_for_dxgi(dxgi: u32) -> u32 {

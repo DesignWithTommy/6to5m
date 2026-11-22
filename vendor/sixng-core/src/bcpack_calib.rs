@@ -707,7 +707,7 @@ fn calibrate_ex(set: &TtpfSet, base: Option<History>) -> History {
                     };
                     if cid == bp::CODEC_BC6H {
                         let full = vlen / 16;
-                        let tgt = (0..full).map(|i| q(i).map(|qq| std::array::from_fn(|c| qq.iter().map(|p| p[c]).sum::<f64>() / 4.0))).collect();
+                        let tgt = (0..full).map(|i| q(i).map(|qq| std::array::from_fn(|k| std::array::from_fn(|c| qq[k][c])))).collect();
                         recs6.push(crate::bcpack_refine6::Rec { lanes: lo.clone(), nb: full, tgt });
                     }
                     match cid {
