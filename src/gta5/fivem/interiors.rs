@@ -9,8 +9,10 @@
 //! portals: roomFrom/roomTo indices, 4 corners) and each entity goes in its
 //! 6m room. Interiors whose portals do not decode keep every entity in
 //! limbo (room 0, drawn from outside); T6M_MLO_LIMBO=1 forces that for all.
-//! Converted interior collision carries no room ids yet, so in game the
-//! player may count as outside and see rooms only through portals.
+//! Interior collision (the bounds sixng links to the interior) is written
+//! per instance as t6m_intcol_<hash>_<n>.ybn in world space, each polygon
+//! carrying the room id of the room whose bounds contain it (6m bounds have
+//! no room ids; limbo when none), so the game knows the player is inside.
 //! Entity-set entities go in CMloEntitySets, off by default
 //! (ActivateInteriorEntitySet turns them on).
 
@@ -19,7 +21,7 @@ use super::emit_meta;
 use crate::gta5::meta::{self, arr, Archetype, EInfo, SInfo, MB};
 use crate::gta5::rsc::W;
 use serde_json::{json, Value};
-use sixng_core::{meta7a, resource::Resource, scan::ArchiveIndex};
+use sixng_core::{meta7a, resource::Resource, scan::{ArchiveIndex, Entry}};
 use std::{
     collections::{BTreeMap, HashMap},
     fs,
@@ -53,6 +55,8 @@ pub struct Interior {
     instances: Vec<(V3, Q)>,
     /// decoded 6m portals; None = not decoded (entities stay in limbo)
     portals: Option<Vec<Portal>>,
+    /// interior-space collision bounds linked by sixng (exact or high/medium)
+    col: Option<Entry>,
 }
 
 #[derive(Clone)]
@@ -108,6 +112,7 @@ pub fn load(ctx: &Ctx, dir: &Path, index: &ArchiveIndex) -> Vec<Interior> {
     let levels = ctx.o.game.join("levels.rpf");
     let limbo = std::env::var_os("T6M_MLO_LIMBO").is_some();
     let mut meta: HashMap<String, HashMap<u32, Vec<Portal>>> = HashMap::new();
+    let by_id: HashMap<&str, &Entry> = index.entries.iter().map(|e| (e.id.as_str(), e)).collect();
     let Ok(text) = fs::read_to_string(dir.join("interiors.jsonl")) else { return Vec::new() };
     let mut files: HashMap<String, Option<Arc<Value>>> = HashMap::new();
     let mut by_hash: BTreeMap<u32, Interior> = BTreeMap::new();
@@ -166,7 +171,10 @@ pub fn load(ctx: &Ctx, dir: &Path, index: &ArchiveIndex) -> Vec<Interior> {
             let off = u64::from_str_radix(file, 16).unwrap_or(0);
             meta.entry(file.to_string()).or_insert_with(|| file_portals(&levels, index, off)).get(&h).cloned().filter(|p| p.iter().all(|p| (p.from as usize) < rooms.len() && (p.to as usize) < rooms.len()))
         };
-        by_hash.insert(h, Interior { hash: h, bbox, rooms, children, instances: vec![(ip, ri)], portals });
+        let l = &inst["collision_linked"];
+        let col_id = inst["collision"].as_array().and_then(|a| a.first()).and_then(Value::as_str).or_else(|| l["id"].as_str().filter(|_| matches!(l["confidence"].as_str(), Some("high" | "medium"))));
+        let col = col_id.and_then(|id| by_id.get(id)).map(|e| (*e).clone());
+        by_hash.insert(h, Interior { hash: h, bbox, rooms, children, instances: vec![(ip, ri)], portals, col });
     }
     if missing > 0 {
         ctx.skip(&format!("({missing} interior instances)"), "interior archetype file missing", json!({"count": missing}));
@@ -347,6 +355,10 @@ pub fn emit(ctx: &Ctx, ints: &[Interior], an: &HashMap<String, String>, archetyp
         }
     };
     let by_an: HashMap<&str, &Archetype> = archetypes.iter().map(|a| (a.name.as_str(), a)).collect();
+    let levels = ctx.o.game.join("levels.rpf");
+    let surf = surface_map(ctx);
+    let mut cols = 0;
+    stale_ybn(ctx);
     let name = |h: u32| format!("t6m_int_{h:08x}");
     let mut mb = MB::default();
     mb.ensure(meta::T_CMAPTYPES);
@@ -388,6 +400,12 @@ pub fn emit(ctx: &Ctx, ints: &[Interior], an: &HashMap<String, String>, archetyp
             continue;
         }
         kept.push(it);
+        if it.portals.is_some() {
+            if let Some(e) = &it.col {
+                let order: Vec<u32> = it.rooms.iter().map(|r| r.0).collect();
+                cols += collision(ctx, &levels, e, it, &order, &rbox, &surf)?;
+            }
+        }
         let (ep, en) = mb.ptr_array(meta::CENTITYDEF.name, main);
         let ports = it.portals.clone().unwrap_or_default();
         let mut all = EMPTY;
@@ -455,6 +473,9 @@ pub fn emit(ctx: &Ctx, ints: &[Interior], an: &HashMap<String, String>, archetyp
         w.zeros(8);
         debug_assert_eq!(w.len(), 240);
         ptrs.push(mb.add_item(MLOARCH.name, w.b));
+    }
+    if cols > 0 {
+        eprintln!("interiors: {cols} collision ybns with room ids");
     }
     if dropped > 0 {
         ctx.skip(&format!("({dropped} interior entities)"), "interior entity archetype not converted", json!({"count": dropped}));
@@ -540,4 +561,82 @@ pub fn emit(ctx: &Ctx, ints: &[Interior], an: &HashMap<String, String>, archetyp
 /// MLO lodDist from the interior's bounding radius (100..500 m).
 fn lod_of(r: f32) -> f32 {
     (r * 10.0).clamp(100.0, 500.0)
+}
+
+/// 6m surface id -> GTA V material (as collision.rs; DEFAULT when unknown).
+fn surface_map(ctx: &Ctx) -> HashMap<u16, u8> {
+    let p = ctx.o.work.join("collision").join("levels").join("surface_categories.json");
+    let doc = fs::read_to_string(p).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).unwrap_or(Value::Null);
+    doc["surfaces"]
+        .as_object()
+        .map(|m| m.iter().filter_map(|(k, v)| Some((u16::from_str_radix(k, 16).ok()?, super::super::collision::gta_material(v["category"].as_str()?)))).collect())
+        .unwrap_or_default()
+}
+
+fn stale_ybn(ctx: &Ctx) {
+    if let Ok(rd) = fs::read_dir(&ctx.stream) {
+        for e in rd.flatten() {
+            let n = e.file_name().to_string_lossy().to_string();
+            if n.starts_with("t6m_intcol_") && n.ends_with(".ybn") {
+                let _ = fs::remove_file(e.path());
+            }
+        }
+    }
+}
+
+/// Writes one world-space ybn per instance of `it` from its interior bounds
+/// `e`; polygons get the index (in `order`) of the smallest room whose box
+/// (`rbox`, grown 0.5 m) holds their centroid, else 0 (limbo). Returns the
+/// number of files written.
+fn collision(ctx: &Ctx, levels: &Path, e: &Entry, it: &Interior, order: &[u32], rbox: &HashMap<u32, [V3; 2]>, surf: &HashMap<u16, u8>) -> Result<usize, String> {
+    let Some(c) = Resource::load_sys(levels, e).ok().and_then(|r| sixng_core::bounds::decode_movement(&r)) else {
+        ctx.skip(&format!("t6m_int_{:08x}", it.hash), "interior collision does not decode", json!({"bounds": e.id}));
+        return Ok(0);
+    };
+    let rooms: Vec<(u8, [V3; 2], f32)> = order
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter_map(|(i, h)| {
+            let b = rbox.get(h)?;
+            let b = [b[0].map(|v| v - 0.5), b[1].map(|v| v + 0.5)];
+            let vol = (0..3).map(|k| (b[1][k] - b[0][k]).max(0.0)).product::<f32>();
+            (i < 32 && vol > 0.0).then_some((i as u8, b, vol))
+        })
+        .collect();
+    let (mut verts, mut tris, mut words) = (Vec::new(), Vec::new(), Vec::new());
+    let mut inside = 0usize;
+    for (id, (v, idx)) in &c.by_mat {
+        let base = verts.len() as u32;
+        verts.extend_from_slice(v);
+        let mat = surf.get(id).copied().unwrap_or(0);
+        for t in idx.chunks_exact(3) {
+            let ctr: V3 = std::array::from_fn(|k| (v[t[0] as usize][k] + v[t[1] as usize][k] + v[t[2] as usize][k]) / 3.0);
+            let room = rooms
+                .iter()
+                .filter(|(_, b, _)| (0..3).all(|k| ctr[k] >= b[0][k] && ctr[k] <= b[1][k]))
+                .min_by(|a, b| a.2.total_cmp(&b.2))
+                .map_or(0, |r| r.0);
+            inside += (room != 0) as usize;
+            tris.push([base + t[0], base + t[1], base + t[2]]);
+            words.push(crate::gta5::ybn::material_word(mat, room));
+        }
+    }
+    if tris.is_empty() {
+        return Ok(0);
+    }
+    let mut n = 0;
+    for (k, (p, q)) in it.instances.iter().enumerate() {
+        let wv: Vec<V3> = verts.iter().map(|v| {
+            let d = qrot(*q, *v);
+            [p[0] + d[0], p[1] + d[1], p[2] + d[2]]
+        }).collect();
+        let file = format!("t6m_intcol_{:08x}_{k}.ybn", it.hash);
+        let bytes = crate::gta5::ybn::build_ybn_words(&wv, &tris, &words).map_err(|e| format!("{file}: {e}"))?;
+        let fp = format!("intcol|{}|{:?}|{:?}", e.id, p, q);
+        let s = ctx.emit(&file, &fp, json!({"bounds": e.id, "triangles": tris.len(), "in_rooms": inside}), Some(bytes))?;
+        ctx.report.lock().unwrap().converted.push(json!({"kind": "interior collision", "ybn": s, "triangles": tris.len(), "in_rooms": inside}));
+        n += 1;
+    }
+    Ok(n)
 }

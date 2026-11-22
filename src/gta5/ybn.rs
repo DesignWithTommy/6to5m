@@ -290,7 +290,7 @@ fn write_bounds_hdr(w: &mut W, h: &BoundsHdr) {
 
 /// One BoundGeometryBVH from local verts/tris (all indices valid, < MAX_VERTS).
 /// Returns (block id, world box min, box max).
-fn write_geometry(b: &mut Builder, id: BlockId, verts: &[V3], tris: &[[u32; 3]], tri_mats: &[u8]) -> (V3, V3) {
+fn write_geometry(b: &mut Builder, id: BlockId, verts: &[V3], tris: &[[u32; 3]], tri_mats: &[u32]) -> (V3, V3) {
     // Centre of the vertex bounding box (GeometryCenter in the XML pipeline).
     let mut vmn = [f32::MAX; 3];
     let mut vmx = [f32::MIN; 3];
@@ -314,7 +314,7 @@ fn write_geometry(b: &mut Builder, id: BlockId, verts: &[V3], tris: &[[u32; 3]],
     let (bvh, order) = build_bvh(&items, 4);
     let polys: Vec<[u32; 3]> = order.iter().map(|&i| tris[i]).collect();
     // material list (first-use order) and per-polygon index into it
-    let mut mat_list: Vec<u8> = Vec::new();
+    let mut mat_list: Vec<u32> = Vec::new();
     let poly_mi: Vec<u8> = order
         .iter()
         .map(|&i| {
@@ -396,7 +396,7 @@ fn write_geometry(b: &mut Builder, id: BlockId, verts: &[V3], tris: &[[u32; 3]],
 
     let mut mw = W::new();
     for m in &mat_list {
-        mw.u32(*m as u32).u32(0);
+        mw.u32(*m).u32(0);
     }
     mw.zeros(8 * 4usize.saturating_sub(mat_list.len())); // padded to 4 materials
     let mats_b = b.add(Seg::Sys, mw);
@@ -462,11 +462,23 @@ pub fn build_ybn(verts: &[[f32; 3]], tris: &[[u32; 3]], material: u8) -> Result<
 /// As [`build_ybn`] with one GTA V material index per triangle
 /// (materials.dat order; at most 255 distinct per geometry).
 pub fn build_ybn_mats(verts: &[[f32; 3]], tris: &[[u32; 3]], tri_mats: &[u8]) -> Result<Vec<u8>, String> {
+    build_ybn_words(verts, tris, &tri_mats.iter().map(|&m| m as u32).collect::<Vec<_>>())
+}
+
+/// BoundMaterial data word (low u32): material type in bits 0-7, room id
+/// (MLO room index, 0 = limbo) in bits 16-20.
+pub fn material_word(material: u8, room: u8) -> u32 {
+    material as u32 | ((room as u32 & 31) << 16)
+}
+
+/// As [`build_ybn_mats`] with full BoundMaterial words per triangle
+/// (see [`material_word`]).
+pub fn build_ybn_words(verts: &[[f32; 3]], tris: &[[u32; 3]], tri_mats: &[u32]) -> Result<Vec<u8>, String> {
     if tri_mats.len() != tris.len() {
         return Err("material count != triangle count".into());
     }
     let n = verts.len() as u32;
-    let (tris, mats): (Vec<[u32; 3]>, Vec<u8>) = tris
+    let (tris, mats): (Vec<[u32; 3]>, Vec<u32>) = tris
         .iter()
         .copied()
         .zip(tri_mats.iter().copied())
@@ -485,7 +497,7 @@ pub fn build_ybn_mats(verts: &[[f32; 3]], tris: &[[u32; 3]], tri_mats: &[u8]) ->
     split(verts, &tris, (0..tris.len()).collect(), &mut chunks);
 
     // Remap each chunk to local vertex arrays (first-use order).
-    let local: Vec<(Vec<V3>, Vec<[u32; 3]>, Vec<u8>)> = chunks
+    let local: Vec<(Vec<V3>, Vec<[u32; 3]>, Vec<u32>)> = chunks
         .iter()
         .map(|ids| {
             let mut map = std::collections::HashMap::new();
