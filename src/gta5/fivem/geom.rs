@@ -86,7 +86,10 @@ pub fn push_geoms_n(out: &mut Vec<Geom>, pos: &[V3], idx: &[u32], normals: Optio
                 // black under artificial light. Keep r as both, b/a = 255.
                 let col = colours.map_or(0xFFFF_FFFF, |c| {
                     let r = c[s] & 0xFF;
-                    r | r << 8 | 0xFFFF_0000
+                    // decals keep a: GTA V decal.sps multiplies alpha by Colour0.a,
+                    // where 6m decals fade their edges (0..255, mean ~130)
+                    let a = if kind == 2 { c[s] & 0xFF00_0000 } else { 0xFF00_0000 };
+                    r | r << 8 | 0x00FF_0000 | a
                 });
                 // 6m UVs are DirectX top-left like GTA V: no flip (the old
                 // obj2ydrxml 1-v flip assumed OBJ bottom-left input).
