@@ -452,8 +452,8 @@ fn decode_part(game: &Path, e: &Entry, six: &sixng_core::pedskel::PedSkeleton, m
             let Some(h) = info.buffers[g.vertex_buffer].mesh_blob.as_ref() else { continue };
             let m = drawable::decode_mesh(slice(g.vertex_buffer), h, slice(g.index_buffer));
             let n = m.positions.len();
-            if m.indices.is_empty() || n == 0 {
-                continue;
+            if m.indices.is_empty() || n <= 3 {
+                continue; // hair/brows/lashes are 3-vertex stubs: the strands are separate type-3 resources
             }
             if n > 65535 {
                 part.warnings.push(format!("geometry {gi}: {n} vertices (max 65535), skipped"));
