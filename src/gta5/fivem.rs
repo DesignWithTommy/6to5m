@@ -70,7 +70,6 @@ usage: 6ixpack fivem build --game <dir> --out <resource dir> [options]
                        default because the MLO shell itself is not converted,
                        so contents of multi-floor interiors float
   --no-lod            HD entities only, all ORPHANHD (no LOD/SLOD chain)
-  --simplify          simplify dense meshes (meshopt; off by default, flattens buildings)
   --weapon-collision  keep weapon-only collision shapes (bullets); off by default (~20% of triangles)
   --conjugate-rot      write the conjugate of the stored placement quaternion
   --force              rebuild outputs even when up to date
@@ -357,7 +356,6 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "--conjugate-rot" => o.conjugate = true,
             "--interiors" => o.interiors = true,
             "--no-lod" => o.no_lod = true,
-            "--simplify" => geom::SIMPLIFY.store(true, std::sync::atomic::Ordering::Relaxed),
             "--weapon-collision" => o.weapon_collision = true,
             "--force" => o.force = true,
             "--max-tex" => o.max_tex = Some(val(&mut it, a)?.parse().map_err(|e| format!("--max-tex: {e}"))?),
