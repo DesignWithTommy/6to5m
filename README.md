@@ -14,6 +14,7 @@ What works today:
   - Textures picked from every material slot until one is a real colour map (normal, mask and flat maps rejected); texture size capped by prop size (128 px for small clutter).
   - Road and apron tiles: one opaque base layer plus alpha-blended decal layers, with the terrain sunk underneath.
   - Draw distances: big buildings never vanish before the props on them; small clutter streams only within 40-100 m.
+  - Dense meshes simplified (meshopt-rs, 0.5% error, UV seams kept); textures capped by prop size.
   - Texture dictionaries share common textures through a gtxd.meta parent chain.
   - Correct render buckets (opaque, alpha, decal, cutout).
   - LOD/SLOD chains (or `--no-lod`).
@@ -28,17 +29,19 @@ What works today:
 - [ ] LOD/SLOD drawables with no linked model (unnamed hashes)
 - [ ] Models outside `levels.rpf` (`pack/*` archives)
 - [ ] Collision surface materials (currently all default)
-- [ ] Interior (MLO) shells, so interior contents stop needing `--interiors`
+- [ ] Interior (MLO) shells, so interior contents stop needing `--interiors` (in progress)
 - [ ] Tint palettes and vertex-colour materials
 - [ ] Fragments with physics (currently static)
-- [ ] Peds, vehicles and weapons to GTA V formats
+- [ ] Peds to GTA V (any ped, skeleton retargeted to GTA V, ymt/peds.meta) (in progress)
+- [ ] Vehicles to GTA V (yft + vehicles/handling/carcols metas) (in progress)
+- [ ] Weapons to GTA V formats
 - [ ] Verify the gtxd.meta parent chain in game
 - [ ] Road paths to .ynd (AI traffic), from `sixng paths`
 - [ ] Navmesh to .ynv (ped/AI pathing)
 - [ ] Lights to ymap LODLights / DistantLODLights (night lighting)
 - [ ] Instanced batches (grass, vegetation) to ymap grass instance lists
 - [ ] Minimap texture and zone names
-- [ ] Split output into several resources by region/size (the 2 km airport alone is 5.2 GB)
+- [ ] Split output into several resources by region/size (in progress; the 2 km airport is 2.8 GB after size work, down from 5.2 GB)
 - [ ] Coordinate offset option: GTA VI's map reaches y 9474, past GTA V's ~±8000 limit
 - [ ] Los Santos removal in Rust: stub ymaps/ybns for vanilla _citye/_cityw/_hills, packing the ~11k ybn stubs into fewer files
 
