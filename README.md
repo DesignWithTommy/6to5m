@@ -39,18 +39,19 @@ What works today:
   - Correct render buckets (opaque, alpha, decal, cutout).
   - LOD/SLOD chains (or `--no-lod`).
   - Static collision as ybn (welded, deduplicated, weapon-only shapes dropped unless `--weapon-collision`).
+  - Water only over low or empty ground (no ocean ambience under the land); stale outputs pruned on a full build.
   - Every output is checked against a CodeWalker loader.
 
 ## Roadmap
 
 - [x] BCPack BC4
-- [ ] BCPack BC6H (modes m10/m14) and the remaining inconsistent BC7 blocks (in progress)
+- [ ] BCPack BC6H (modes m10/m14) and the remaining inconsistent BC7 blocks (in progress: mode 14 bad blocks 75% to 14%)
 - [x] Road and asphalt surfaces
-- [x] LOD/SLOD drawables with no linked model (unresolved archetypes 84,216 to 37; `#member` model ids in progress)
+- [x] LOD/SLOD drawables with no linked model (unresolved archetypes 84,216 to 37; `#member` model ids resolved, so every airport placement converts)
 - [ ] Models outside `levels.rpf` (`pack/*` archives)
-- [ ] Collision surface materials (currently all default)
+- [ ] Collision surface materials (currently all default) (in progress)
 - [ ] Interior (MLO) shells, so interior contents stop needing `--interiors` (in progress)
-- [ ] Tint palettes and vertex-colour materials
+- [ ] Tint palettes and vertex-colour materials (in progress)
 - [ ] Fragments with physics (currently static)
 - [ ] Peds to GTA V (any ped, skeleton retargeted to GTA V, ymt/peds.meta) (in progress)
 - [ ] Vehicles to GTA V (yft + vehicles/handling/carcols metas) (in progress)
