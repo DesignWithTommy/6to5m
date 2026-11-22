@@ -16,8 +16,10 @@
 //!   <out>/data/vehicles.meta, handling.meta, carvariations.meta, carcols.meta
 //!   <out>/fxmanifest.lua
 //!
-//! Limits: wheels are not separate meshes in 6m (not found), so each wheel
-//! gets a generated tyre cylinder; physics is a box per child (chassis + 4
+//! With `sixng vehicles` data: the configuration's rim + tyre drawables
+//! (scaled 1.625 x wheelScale, a fitted factor), wheelScale and the body
+//! colour (6m paint slot -> solid texture); without it a generated tyre.
+//! Limits: physics is a box per child (chassis + 4
 //! wheels), so doors, bonnet and boot are drawn on their bones but do not
 //! open or break; plain default/alpha shaders (no paint colours, no dirt or
 //! damage); handling/meta values are sedan defaults.
@@ -48,10 +50,17 @@ usage: 6ixpack fivem vehicle <name> --game <dir> --out <resource dir> [options]
   --wheel-radius <m>   tyre radius (default 0.34)
   --mass <kg>          handling mass (default 1500)
   --max-tex <px>       drop top mips so textures are at most this size
+  --vehicle-data <f>   vehicles.json from `6ixpack sixng vehicles --out <work>` (default <work>/vehicles/vehicles.json):
+                       real wheelScale, rim + tyre models and body colour; without it a generated tyre and grey paint
+  --config <n>         which 6m spawn configuration to take rim, tyre and colour from (default 0)
   --list               list 6m vehicle fragments in the index and exit";
 
 const MISSING: &str = "r6m_missing";
 const TYRE: &str = "r6m_tyre";
+const PAINT: &str = "r6m_paint";
+/// `diffusetex` on 6m vehicle shaders: an engine-default white that the
+/// runtime paint colour tints (GTA VI format notes, vehicle paint).
+const PAINT_SLOT: u32 = 0xc8e8_c282;
 const WHEELS: [&str; 4] = ["wheel_lf", "wheel_rf", "wheel_lr", "wheel_rr"];
 
 /// Diffuse/colour parameter hashes in priority order (buildings.rs).
@@ -76,6 +85,8 @@ struct Opts {
     wheel_r: f32,
     mass: f32,
     max_tex: Option<u16>,
+    vdata: Option<PathBuf>,
+    config: usize,
     list: bool,
 }
 
@@ -89,6 +100,8 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         wheel_r: 0.34,
         mass: 1500.0,
         max_tex: None,
+        vdata: None,
+        config: 0,
         list: false,
     };
     let mut it = args.iter();
@@ -102,6 +115,8 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "--wheel-radius" => o.wheel_r = val(&mut it, a)?.parse().map_err(|e| format!("{a}: {e}"))?,
             "--mass" => o.mass = val(&mut it, a)?.parse().map_err(|e| format!("{a}: {e}"))?,
             "--max-tex" => o.max_tex = Some(val(&mut it, a)?.parse().map_err(|e| format!("{a}: {e}"))?),
+            "--vehicle-data" => o.vdata = Some(val(&mut it, a)?.into()),
+            "--config" => o.config = val(&mut it, a)?.parse().map_err(|e| format!("{a}: {e}"))?,
             "--list" => o.list = true,
             x if !x.starts_with("--") && o.name.is_empty() => o.name = x.to_lowercase(),
             _ => return Err(format!("unknown argument {a}\n{USAGE}")),
@@ -368,6 +383,8 @@ fn load_source(game: &Path, e: &Entry, pools: &mut Pools, texs: &mut Vec<String>
                                 let key = emb.as_ref().and_then(|e| e.by_hash(hash)).and_then(|x| x.asset_key).unwrap_or_else(|| key_of(sh, t.param));
                                 match pools.get(hash, key, u64::from_str_radix(&t.hash64, 16).unwrap_or(0)) {
                                     Ok(_) => return format!("r6m_{hash:08x}"),
+                                    // the paint slot's white is in no store: the body colour
+                                    Err(_) if ph(&t) == Some(PAINT_SLOT) => return PAINT.to_string(),
                                     Err(e) => errs.push(format!("{hash:08x}: {e}")),
                                 }
                             }
@@ -428,6 +445,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     let ip = o.work.join("index").join("levels.json");
     let index = sixng_core::scan::load_index(&ip).map_err(|e| format!("{}: {e:#} (run `6ixpack sixng index levels.rpf --work ...` first)", ip.display()))?;
     let by_name: HashMap<&str, &Entry> = index.entries.iter().filter(|e| e.rtype.as_deref() == Some("ft")).filter_map(|e| Some((e.name.as_deref()?, e))).collect();
+    let drawables: HashMap<&str, &Entry> = index.entries.iter().filter(|e| e.rtype.as_deref() == Some("dr")).filter_map(|e| Some((e.name.as_deref()?, e))).collect();
     if o.list {
         return list(&o, &index.entries);
     }
@@ -451,6 +469,29 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     let s_mid = load(e_mid)?;
     let s_base = load(e_base)?;
     let s_hi = load(e_hi)?;
+    let vd = vehicle_data(&o);
+    // real rim + tyre drawables, vertices in wheel space scaled to the car
+    let mut wheel_geoms = |front: bool| -> Result<(Vec<Geom>, f32), String> {
+        let Some(vd) = &vd else { return Ok((Vec::new(), 0.0)) };
+        let s = 1.625 * if front { vd.wheel_scale } else { vd.wheel_scale_rear };
+        let (mut gs, mut radius) = (Vec::new(), 0.0f32);
+        for part in [&vd.tyre, &vd.rim].into_iter().flatten() {
+            let Some(e) = drawables.get(format!("{part}_mid").as_str()).or(drawables.get(part.as_str())).copied() else {
+                eprintln!("vehicle: wheel part {part} not in the index");
+                continue;
+            };
+            let src = load(Some(e))?.unwrap();
+            for (_, mut g) in src.lods.into_iter().next().unwrap_or_default() {
+                for p in g.positions.iter_mut() {
+                    *p = [p[0] * s, p[1] * s, p[2] * s];
+                    radius = radius.max((p[1] * p[1] + p[2] * p[2]).sqrt());
+                }
+                gs.push(g);
+            }
+        }
+        Ok((gs, radius))
+    };
+    let (wf, wr) = (wheel_geoms(true)?, wheel_geoms(false)?);
 
     // shared skeleton: from the richest source
     let skel = [&s_hi, &s_mid, &s_base].into_iter().flatten().map(|s| &s.bones).max_by_key(|b| b.len()).ok_or("no source")?;
@@ -516,13 +557,15 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     let (cmin, cmax) = aabb(chassis_parts.iter());
     let mut groups = vec![Group { name: "chassis".into(), parent: None }];
     let mut children = vec![Child { bone: 0, group: 0, min: cmin, max: cmax, mass: o.mass, drawable: Vec::new() }];
-    let (r, wd) = (o.wheel_r, o.wheel_r * 0.65);
-    let tyre = yft::tyre(r, wd, TYRE, 24);
+    let generated = |r: f32| vec![yft::tyre(r, r * 0.65, TYRE, 24)];
     let mut wheels = Vec::new();
     for w in WHEELS {
         if let Some(bi) = bones.iter().position(|b| b.name == w) {
             groups.push(Group { name: w.into(), parent: Some(0) });
-            children.push(Child { bone: bi, group: groups.len() - 1, min: [-wd / 2.0, -r, -r], max: [wd / 2.0, r, r], mass: 20.0, drawable: vec![tyre.clone()] });
+            let (gs, r) = if w.ends_with('f') { &wf } else { &wr };
+            let (drawable, r) = if gs.is_empty() { (generated(o.wheel_r), o.wheel_r) } else { (gs.clone(), *r) };
+            let wd = r * 0.65;
+            children.push(Child { bone: bi, group: groups.len() - 1, min: [-wd / 2.0, -r, -r], max: [wd / 2.0, r, r], mass: 20.0, drawable });
             wheels.push(w);
         }
     }
@@ -556,7 +599,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     // texture dictionary
     let mut tx = Vec::new();
     for t in &texs {
-        if t == MISSING {
+        if t == MISSING || t == PAINT {
             continue;
         }
         let p = cache.join(format!("{}.dds", &t[4..]));
@@ -567,14 +610,20 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
         }
         tx.push(x);
     }
-    tx.push(solid(TYRE, [0x20, 0x20, 0x20, 0xFF], 16));
+    if wf.0.is_empty() || wr.0.is_empty() {
+        tx.push(solid(TYRE, [0x20, 0x20, 0x20, 0xFF], 16));
+    }
+    if texs.iter().any(|t| t == PAINT) {
+        let [r, g, b] = vd.as_ref().map_or([0x80; 3], |v| v.colour);
+        tx.push(solid(PAINT, [b, g, r, 0xFF], 16));
+    }
     if texs.iter().any(|t| t == MISSING) {
         tx.push(solid(MISSING, [0x80, 0x80, 0x80, 0xFF], 16));
     }
     put(stream.join(format!("{}.ytd", o.model)), &ytd::build_ytd(&tx)?)?;
 
     // meta + manifest
-    put(data.join("vehicles.meta"), vehicles_meta(&o).as_bytes())?;
+    put(data.join("vehicles.meta"), vehicles_meta(&o, vd.as_ref()).as_bytes())?;
     put(data.join("handling.meta"), handling_meta(&o).as_bytes())?;
     put(data.join("carvariations.meta"), carvariations_meta(&o).as_bytes())?;
     put(data.join("carcols.meta"), CARCOLS.as_bytes())?;
@@ -697,7 +746,8 @@ const CARCOLS: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 </CVehicleModelInfoVarGlobal>
 ";
 
-fn vehicles_meta(o: &Opts) -> String {
+fn vehicles_meta(o: &Opts, vd: Option<&VData>) -> String {
+    let (wsf, wsr) = vd.map_or((0.25, 0.25), |v| (v.wheel_scale, v.wheel_scale_rear));
     let m = &o.model;
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -746,8 +796,8 @@ fn vehicles_meta(o: &Opts) -> String {
       <AllowJoyriding value="true" />
       <AllowSundayDriving value="true" />
       <AllowBodyColorMapping value="true" />
-      <wheelScale value="0.250000" />
-      <wheelScaleRear value="0.250000" />
+      <wheelScale value="{wsf:.6}" />
+      <wheelScaleRear value="{wsr:.6}" />
       <dirtLevelMin value="0.000000" />
       <dirtLevelMax value="0.300000" />
       <envEffScaleMin value="0.000000" />
@@ -929,4 +979,38 @@ fn carvariations_meta(o: &Opts) -> String {
 "#,
         m = o.model
     )
+}
+
+// ---------------------------------------------------------- vehicle data
+
+/// From `sixng vehicles` (vehicles.json): wheel scale, one spawn
+/// configuration's rim, tyre and body colour.
+struct VData {
+    wheel_scale: f32,
+    wheel_scale_rear: f32,
+    rim: Option<String>,
+    tyre: Option<String>,
+    /// sRGB, reading the stored ARGB as linear (format notes; unverified)
+    colour: [u8; 3],
+}
+
+fn vehicle_data(o: &Opts) -> Option<VData> {
+    let p = o.vdata.clone().unwrap_or_else(|| o.work.join("vehicles").join("vehicles.json"));
+    let Ok(bytes) = fs::read(&p) else {
+        eprintln!("vehicle: no {} (run `6ixpack sixng vehicles --out <work>`): generated tyre, grey paint, wheelScale 0.25", p.display());
+        return None;
+    };
+    let v: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| eprintln!("vehicle: {}: {e}", p.display())).ok()?;
+    let Some(m) = v["vehicles"].as_array()?.iter().find(|m| m["model"].as_str() == Some(o.name.as_str())) else {
+        eprintln!("vehicle: {} not in {}", o.name, p.display());
+        return None;
+    };
+    let mi = &m["model_info"];
+    let wsf = mi["wheelScale"].as_f64().unwrap_or(0.25) as f32;
+    let wsr = mi["wheelScaleRear"].as_f64().map_or(wsf, |x| x as f32);
+    let cfgs = m["configurations"].as_array().cloned().unwrap_or_default();
+    let c = cfgs.get(o.config).or(cfgs.first());
+    let s = |k: &str| c.and_then(|c| c[k].as_str()).map(String::from);
+    let hex = c.and_then(|c| c["colour"]["srgb_if_linear"].as_str()).and_then(|h| u32::from_str_radix(h.trim_start_matches('#'), 16).ok()).unwrap_or(0x808080);
+    Some(VData { wheel_scale: wsf, wheel_scale_rear: wsr, rim: s("rim"), tyre: s("tyre"), colour: [(hex >> 16) as u8, (hex >> 8) as u8, hex as u8] })
 }

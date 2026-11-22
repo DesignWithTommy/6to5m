@@ -31,8 +31,9 @@ Next, from the FiveM port's requests:
 ## fivem vehicle (`src/gta5/fivem/vehicles.rs`, `src/gta5/yft.rs`)
 Loads in CodeWalker; not yet tested in game.
 - Doors, bonnet and boot are drawn on their bones but are static: physics is at most 5 box children (chassis + 4 wheels) because more needs a BVH. Add the BVH and per-part children, groups and joint limits.
-- Wheels: 6m wheel meshes were not found, so each wheel gets a generated tyre cylinder. Find the 6m wheel drawables.
-- Shaders are default/alpha only: add vehicle_paint shaders so carcols colours apply, plus glass, lights, dirt and damage.
+- Wheels: rim + tyre drawables from `sixng vehicles` (scale 1.625 x wheelScale is fitted, not decoded); right-side rim orientation unverified.
+- Paint is a solid texture of the configuration's body colour (stored ARGB read as linear); add vehicle_paint shaders so carcols colours apply, plus glass, lights, dirt and damage.
+- Modular parts (bumpers, intakes, roof attachments in part_groups) are not added; handling PSO fields are unnamed, so handling stays default.
 - Handling, seats, layout and meta are sedan defaults; map 6m vehicle data when it is decoded.
 
 ## fivem ped (`src/gta5/fivem/ped.rs`, `src/gta5/ped.rs`, `src/gta5/ped_bones.rs`)
