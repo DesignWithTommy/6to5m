@@ -1,5 +1,7 @@
 //! Static collision: 6m physics bounds (sixng bounds decoder, already in
-//! world space) merged into one t6m_col_XX_YY.ybn per 512 m cell.
+//! world space) merged into one t6m_cc_XXX_YYY.ybn per 128 m cell
+//! (XXX = cell + 200), welded on a 5 cm grid and simplified per material:
+//! collision only needs the walkable shape, not render detail.
 //!
 //! The bounds' world bboxes are cached in <work>/fivem_collision_index.jsonl
 //! (one decode pass over every unnamed rageobj resource of levels.rpf).
@@ -21,7 +23,11 @@ use sixng_core::{
 };
 use std::{collections::BTreeMap, error::Error, fs, io::Write};
 
-const CELL: f32 = 512.0;
+const CELL: f32 = 128.0;
+/// meshopt error bound, relative to a cell's extent (~0.4 m at 128 m).
+const SIMPLIFY_ERR: f32 = 0.003;
+/// Triangles kept at most, as a fraction of the welded input.
+const SIMPLIFY_KEEP: f32 = 0.25;
 
 /// GTA V material index for an inferred 6m surface category.
 pub fn gta_material(category: &str) -> u8 {
@@ -117,7 +123,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     let res: Vec<Result<(), String>> = cells
         .par_iter()
         .map(|((cx, cy), es)| {
-            let file = format!("t6m_col_{:02}_{:02}.ybn", cx + 50, cy + 50);
+            let file = format!("t6m_cc_{:03}_{:03}.ybn", cx + 200, cy + 200);
             let fp = sha(&format!("{YBN_V}|col|{mats_fp}|{}|{}", ctx.o.weapon_collision, es.iter().map(|e| e.id.as_str()).collect::<Vec<_>>().join(",")));
             if let Some(info) = ctx.up_to_date(&file, &fp) {
                 ctx.emit(&file, &fp, info, None)?;
@@ -138,6 +144,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
             }
             let raw = tris.len();
             let (verts, tris, tm) = weld(&verts, &tris, &tm);
+            let (verts, tris, tm) = simplify(verts, &tris, &tm);
             let bytes = ybn::build_ybn_mats(&verts, &tris, &tm).map_err(|e| format!("{file}: {e}"))?;
             let info = json!({"bounds": es.len(), "triangles": tris.len(), "raw_triangles": raw});
             let s = ctx.emit(&file, &fp, info, Some(bytes))?;
@@ -151,7 +158,37 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Weld vertices on a 1 cm grid and drop degenerate and duplicate triangles
+/// Per-material meshopt simplification (materials stay separate so their
+/// borders are kept), then unused vertices are dropped.
+fn simplify(verts: Vec<[f32; 3]>, tris: &[[u32; 3]], mats: &[u8]) -> (Vec<[f32; 3]>, Vec<[u32; 3]>, Vec<u8>) {
+    let mut by: BTreeMap<u8, Vec<u32>> = BTreeMap::new();
+    for (t, m) in tris.iter().zip(mats) {
+        by.entry(*m).or_default().extend_from_slice(t);
+    }
+    let (mut out_t, mut out_m) = (Vec::new(), Vec::new());
+    for (m, idx) in by {
+        let mut dst = vec![0u32; idx.len()];
+        let target = ((idx.len() / 3) as f32 * SIMPLIFY_KEEP) as usize * 3;
+        let k = if idx.len() >= 300 { meshopt_rs::simplify::simplify(&mut dst, &idx, &verts, target, SIMPLIFY_ERR) } else { 0 };
+        let kept = if k >= 3 { &dst[..k] } else { &idx[..] };
+        out_t.extend(kept.chunks_exact(3).map(|t| [t[0], t[1], t[2]]));
+        out_m.resize(out_t.len(), m);
+    }
+    let mut remap = vec![u32::MAX; verts.len()];
+    let mut out_v = Vec::new();
+    for t in out_t.iter_mut() {
+        for i in t.iter_mut() {
+            if remap[*i as usize] == u32::MAX {
+                remap[*i as usize] = out_v.len() as u32;
+                out_v.push(verts[*i as usize]);
+            }
+            *i = remap[*i as usize];
+        }
+    }
+    (out_v, out_t, out_m)
+}
+
+/// Weld vertices on a 5 cm grid and drop degenerate and duplicate triangles
 /// (overlapping 6m bounds repeat the same surfaces many times).
 fn weld(verts: &[[f32; 3]], tris: &[[u32; 3]], mats: &[u8]) -> (Vec<[f32; 3]>, Vec<[u32; 3]>, Vec<u8>) {
     use std::collections::{HashMap, HashSet};
@@ -160,7 +197,7 @@ fn weld(verts: &[[f32; 3]], tris: &[[u32; 3]], mats: &[u8]) -> (Vec<[f32; 3]>, V
     let remap: Vec<u32> = verts
         .iter()
         .map(|v| {
-            let k = [(v[0] * 100.0).round() as i32, (v[1] * 100.0).round() as i32, (v[2] * 100.0).round() as i32];
+            let k = [(v[0] * 20.0).round() as i32, (v[1] * 20.0).round() as i32, (v[2] * 20.0).round() as i32];
             *ids.entry(k).or_insert_with(|| {
                 out_v.push(*v);
                 (out_v.len() - 1) as u32

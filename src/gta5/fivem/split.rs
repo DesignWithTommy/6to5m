@@ -59,6 +59,10 @@ const CELL: i64 = 512;
 
 /// (cx, cy) of a `<prefix>XX_YY.<ext>` cell file (XX = cell + 50).
 fn cell_of(stem: &str) -> Option<(i64, i64)> {
+    // 128 m collision cells (t6m_cc_XXX_YYY, XXX = cell + 200) -> their 512 m cell
+    if let Some((a, b)) = stem.strip_prefix("t6m_cc_").and_then(|r| r.split_once('_')) {
+        return Some(((a.parse::<i64>().ok()? - 200).div_euclid(CELL / 128), (b.parse::<i64>().ok()? - 200).div_euclid(CELL / 128)));
+    }
     let rest = stem.strip_prefix("t6m_bld_").or_else(|| stem.strip_prefix("t6m_col_"))?;
     let (a, b) = rest.split_once('_')?;
     Some((a.parse::<i64>().ok()? - 50, b.parse::<i64>().ok()? - 50))
@@ -125,7 +129,7 @@ pub fn split(ctx: &Ctx, metres: f32, max_mb: u64) -> Result<(), Box<dyn Error>> 
             let (stem, ext) = name.rsplit_once('.')?;
             match ext {
                 "ymap" if lay.ymaps.contains_key(stem) => cell_of(stem).map(|c| region_of(c, top, &sub)),
-                "ybn" if stem.starts_with("t6m_col_") => cell_of(stem).map(|c| region_of(c, top, &sub)),
+                "ybn" if stem.starts_with("t6m_col_") || stem.starts_with("t6m_cc_") => cell_of(stem).map(|c| region_of(c, top, &sub)),
                 "ydr" => arch_r.get(stem).copied().flatten(),
                 "ytd" => txd_r.get(stem).copied().flatten(),
                 _ => None,
