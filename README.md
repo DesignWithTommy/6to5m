@@ -59,6 +59,7 @@ What works today:
 - [x] Interiors as GTA V MLOs: `t6m_int.ytyp` (CMloArchetypeDef with decoded rooms, entity sets and the interior entities) and `t6m_int_X_Y.ymap` (CMloInstanceDef); `--interiors` still flattens them into world space instead
 - [x] MLO portals decoded from 6m (`995072ca`) and entities attached to their rooms (`T6M_MLO_LIMBO=1` puts them all in limbo); entity sets start off
 - [x] Room ids in interior collision (so the game knows the player is inside a room)
+- [x] MLO lights from 6m light sets; interior lodDist 60-200 m (being made lazy and bbox-scoped instead of a manual `sixng lights` pass)
 - [x] MLO lights: 6m light sets of each interior entity (archetype + entity, from `sixng lights`) as CExtensionDefLightEffect; intensity x0.04 (`T6M_LIGHT_SCALE`); MLO lodDist 60-200 m so interior contents only stream near the player
 - [x] Tint palettes: the embedded palette entry (vertex colour blue, row = the placement's `tintValue`) is baked into tinted copies of the colour texture (32-step colours, max 512 px); the palette is no longer picked as a colour map
 - [x] Quality audit: UVs no longer V-flipped (6m is DirectX top-left), COLOR0 mapped to GTA V ambient (r,r,255,255) so buildings are not black under artificial light
