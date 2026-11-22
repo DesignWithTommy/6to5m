@@ -61,3 +61,6 @@ Loads in CodeWalker; not yet tested in game.
 - Region split (`--split`) done; verify in game, and split the LOD/SLOD ymaps and terrain per region if common grows too big
 - Coordinate offset option: GTA VI's map reaches y 9474, past GTA V's ~±8000 limit
 - Los Santos removal in Rust: stub ymaps/ybns for vanilla _citye/_cityw/_hills, packing the ~11k ybn stubs into fewer files
+
+## Standard test region
+Airport spawn, 1 km: `--bbox -2921,-1312,-1921,-312` (centre -2421,-812). Use it for all timings, file counts and in-game checks.
