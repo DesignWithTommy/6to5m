@@ -57,7 +57,7 @@ What works today:
 - [ ] Tint palettes and vertex-colour materials (in progress)
 - [ ] Fragments with physics (currently static)
 - [ ] Peds to GTA V (any ped, skeleton retargeted to GTA V, ymt/peds.meta) (in progress)
-- [ ] Vehicles to GTA V (yft + vehicles/handling/carcols metas) (in progress)
+- [x] Vehicles to GTA V: `6ixpack fivem vehicle <name>` (yft + vehicles/handling/carvariations/carcols metas; in-game test pending)
 - [ ] Weapons to GTA V formats
 - [ ] Verify the gtxd.meta parent chain in game
 - [ ] Road paths to .ynd (AI traffic), from `sixng paths`
