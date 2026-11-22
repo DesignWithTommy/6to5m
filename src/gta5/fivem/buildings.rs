@@ -961,6 +961,34 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
             cells.entry(((p.pos[0] / 512.0).floor() as i64, (p.pos[1] / 512.0).floor() as i64)).or_default().push(i);
         }
     }
+    // Wide ground-anchored models (asphalt tiles, aprons, pads, buildings):
+    // footprint and underside z,
+    // so the coarse terrain can be sunk below them (terrain::sink).
+    {
+        let mut ground: Vec<[f32; 5]> = Vec::new();
+        for (i, p) in kept.iter().enumerate() {
+            let Some(a) = done.get(&p.name) else { continue };
+            if !alive[i] || p.level != 0 {
+                continue;
+            }
+            let s = p.sxy.max(0.01);
+            let (dx, dy, dz) = ((a.hi[0] - a.lo[0]) * s, (a.hi[1] - a.lo[1]) * s, (a.hi[2] - a.lo[2]) * p.sz);
+            // ground-anchored (model starts at its origin's height) and wide;
+            // tall ones are fine too: terrain under a building is hidden anyway
+            let _ = dz;
+            if dx.min(dy) >= 16.0 && (-1.5..=1.0).contains(&(a.lo[2] * p.sz)) {
+                // axis-aligned box of the rotated footprint
+                let r = (dx * dx + dy * dy).sqrt() / 2.0;
+                let c = [p.pos[0] + (a.lo[0] + a.hi[0]) / 2.0 * s, p.pos[1] + (a.lo[1] + a.hi[1]) / 2.0 * s];
+                let flat = p.rot[0].abs() < 0.01 && p.rot[1].abs() < 0.01 && (p.rot[2].abs() < 0.01 || p.rot[3].abs() < 0.01);
+                let (hx, hy) = if flat { (dx / 2.0, dy / 2.0) } else { (r, r) };
+                ground.push([c[0] - hx, c[1] - hy, c[0] + hx, c[1] + hy, p.pos[2] + a.lo[2] * p.sz]);
+            }
+        }
+        let gp = ctx.o.work.join("fivem_ground.json");
+        fs::write(&gp, serde_json::to_string(&ground)?)?;
+        eprintln!("buildings: {} flat ground tiles recorded for terrain", ground.len());
+    }
     let links_n = (0..kept.len()).filter(|&i| alive[i] && parent[i].is_some()).count();
     eprintln!("buildings: {} entities, {links_n} LOD links, {top} LOD levels", alive.iter().filter(|x| **x).count());
     for ((cx, cy), ids) in cells {

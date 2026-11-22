@@ -34,9 +34,7 @@ pub fn push_geoms(out: &mut Vec<Geom>, pos: &[V3], idx: &[u32], uvs: Option<&[[f
     };
     let uvs = uvs.filter(|u| u.len() == n);
     let colours = colours.filter(|c| c.len() == n);
-    // kind 4: opaque surface drawn as a decal in 6m (lifted, default shader)
-    let lift = if kind == 2 || kind == 4 { 0.005 } else { 0.0 };
-    let kind = if kind == 4 { 0 } else { kind };
+    let lift = if kind == 2 { 0.005 } else { 0.0 };
     let new = || Geom { texture: tex.to_string(), kind, ..Default::default() };
     let mut g = new();
     let mut remap: HashMap<u32, u16> = HashMap::new();

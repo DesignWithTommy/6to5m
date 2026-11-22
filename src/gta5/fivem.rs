@@ -59,7 +59,7 @@ usage: 6ixpack fivem build --game <dir> --out <resource dir> [options]
   --conjugate-rot      write the conjugate of the stored placement quaternion
   --force              rebuild outputs even when up to date";
 
-const TOOL: &str = "fivem-15";
+const TOOL: &str = "fivem-17";
 
 pub struct Opts {
     pub game: PathBuf,
@@ -294,12 +294,14 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
         } else {
             None
         };
-        if part("terrain") {
-            terrain::build(&ctx, index.as_ref().unwrap())?;
-            ctx.save_manifest()?;
-        }
+        // buildings first: it records the flat ground tiles (asphalt, pads)
+        // that terrain must sink below (<work>/fivem_ground.json)
         if part("buildings") {
             buildings::build(&ctx, index.as_ref().unwrap())?;
+            ctx.save_manifest()?;
+        }
+        if part("terrain") {
+            terrain::build(&ctx, index.as_ref().unwrap())?;
             ctx.save_manifest()?;
         }
         if part("collision") {

@@ -166,6 +166,14 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         })
         .collect();
     eprintln!("terrain: {} tiles, {} in region", tiles.len(), sel.len());
+    // sink terrain under flat ground tiles recorded by the buildings stage
+    let ground: Vec<[f32; 5]> = std::fs::read_to_string(ctx.o.work.join("fivem_ground.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    let sunk: Vec<(usize, Vec<V3>, u64)> = sel.iter().map(|&(i, t)| { let (v, n) = sink(&t.verts, &ground); (i, v, n) }).collect();
+    let sunk_n: u64 = sunk.iter().map(|x| x.2).sum();
+    if sunk_n > 0 {
+        eprintln!("terrain: {sunk_n} vertices sunk below {} ground tiles", ground.len());
+    }
+    let sunk: std::collections::HashMap<usize, (Vec<V3>, u64)> = sunk.into_iter().map(|(i, v, n)| (i, (v, n))).collect();
     if sel.is_empty() {
         return Ok(());
     }
@@ -173,7 +181,9 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         .par_iter()
         .map(|&(i, t)| {
             let name = format!("t6m_terrain_{i:03}");
-            let fp = format!("{TOOL}|terrain|{:x}|{:x}|{}", t.off, t.child, t.verts.len());
+            let (verts, n_sunk) = &sunk[&i];
+            let t = &Tile { off: t.off, child: t.child, verts: verts.clone(), tris: t.tris.clone() };
+            let fp = format!("{TOOL}|terrain|{:x}|{:x}|{}|{}|{:x}", t.off, t.child, t.verts.len(), n_sunk, t.verts.iter().fold(0u64, |h, v| h.rotate_left(5) ^ (v[2].to_bits() as u64)));
             let (ydr_f, ybn_f) = (format!("{name}.ydr"), format!("{name}.ybn"));
             let (lo, hi) = aabb(t.verts.iter());
             let c: V3 = std::array::from_fn(|k| (lo[k] + hi[k]) / 2.0);
@@ -244,4 +254,32 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     super::buildings::emit_meta(ctx, "t6m_terrain.ytyp", yt)?;
     super::buildings::emit_meta(ctx, "t6m_terrain.ymap", ym)?;
     Ok(())
+}
+
+/// Terrain vertices inside a flat ground tile's footprint drop to 0.3 m
+/// below the tile's underside: the terrain mesh is far coarser (one vertex
+/// per ~35 m) than 6m's road and apron tiles and otherwise covers them.
+/// Returns the new vertices and how many moved.
+/// One terrain vertex spacing: every terrain triangle over a tile gets
+/// all three corners sunk.
+const MARGIN: f32 = 40.0;
+
+fn sink(verts: &[V3], ground: &[[f32; 5]]) -> (Vec<V3>, u64) {
+    let mut n = 0;
+    let out = verts
+        .iter()
+        .map(|v| {
+            let mut z = v[2];
+            for g in ground {
+                if v[0] >= g[0] - MARGIN && v[0] <= g[2] + MARGIN && v[1] >= g[1] - MARGIN && v[1] <= g[3] + MARGIN {
+                    z = z.min(g[4] - 0.3);
+                }
+            }
+            if z < v[2] {
+                n += 1;
+            }
+            [v[0], v[1], z]
+        })
+        .collect();
+    (out, n)
 }
