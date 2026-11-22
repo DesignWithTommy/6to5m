@@ -1,0 +1,536 @@
+//! GTA V (legacy PC) .ydr drawable writer, ported from CodeWalker
+//! (Drawable.cs: Drawable/DrawableBase, ShaderGroup, ShaderFX,
+//! ShaderParametersBlock, DrawableModelsBlock, DrawableModel,
+//! DrawableGeometry, VertexBuffer, IndexBuffer, VertexDeclaration).
+//! Output matches obj2ydrxml.py run through CodeWalker's XML importer:
+//! shader default.sps, layout Position/Normal/Colour0/TexCoord0 (GTAV1),
+//! one geometry per material, one high-LOD model.
+
+use super::rsc::{joaat, BlockId, Builder, Seg, W};
+use std::collections::HashMap;
+
+/// One geometry (one shader). `colours` are RGBA with R in the low byte
+/// (written to the vertex as bytes R,G,B,A). `uvs` are final (already
+/// V-flipped). `indices` are triangles; at most 65535 vertices.
+#[derive(Clone, Default, Debug)]
+pub struct Geom {
+    pub positions: Vec<[f32; 3]>,
+    pub normals: Vec<[f32; 3]>,
+    pub colours: Vec<u32>,
+    pub uvs: Vec<[f32; 2]>,
+    pub indices: Vec<u16>,
+    pub texture: String,
+    /// GTA V render bucket: 0 opaque (default.sps), 1 alpha (alpha.sps),
+    /// 2 decal (decal.sps), 3 cutout (cutout.sps).
+    pub kind: u8,
+}
+
+#[derive(Clone, Default, Debug)]
+pub struct Mesh {
+    pub name: String,
+    pub geoms: Vec<Geom>,
+}
+
+const VFT_FILE: u32 = 1079456120;
+const VFT_SHADERGROUP: u32 = 1080113136;
+const VFT_MODEL: u32 = 1080101528;
+const VFT_GEOM: u32 = 1080133528;
+const VFT_VB: u32 = 1080153080;
+const VFT_IB: u32 = 1080152408;
+const GTAV1: u64 = 0x7755555555996996;
+const LAYOUT_FLAGS: u32 = 1 | (1 << 3) | (1 << 4) | (1 << 6); // Position Normal Colour0 TexCoord0
+const STRIDE: usize = 36;
+
+/// Shader parameters written for every geometry (obj2ydrxml.py order).
+const VECTORS: [(&str, [f32; 4]); 6] = [
+    ("matMaterialColorScale", [1.0, 0.0, 0.0, 1.0]),
+    ("HardAlphaBlend", [1.0, 0.0, 0.0, 0.0]),
+    ("useTessellation", [0.0, 0.0, 0.0, 0.0]),
+    ("wetnessMultiplier", [1.0, 0.0, 0.0, 0.0]),
+    ("globalAnimUV1", [0.0, 1.0, 0.0, 0.0]),
+    ("globalAnimUV0", [1.0, 0.0, 0.0, 0.0]),
+];
+
+fn pad16(o: usize) -> usize {
+    (16 - o % 16) % 16
+}
+
+fn aabb(pts: impl Iterator<Item = [f32; 3]>) -> ([f32; 3], [f32; 3]) {
+    let mut lo = [f32::MAX; 3];
+    let mut hi = [f32::MIN; 3];
+    for p in pts {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    (lo, hi)
+}
+
+/// TextureBase reference (legacy, 80 bytes) as CodeWalker builds it from a
+/// shader parameter <Name>: VFT 0, Unknown_32h = 2.
+fn add_texture_ref(b: &mut Builder, name: &str) -> BlockId {
+    let nm = b.string(name);
+    let mut w = W::new();
+    w.u32(0).u32(1).zeros(32); // VFT, 1, 8h..24h
+    w.ptr(Some(nm));
+    w.u16(1).u16(2).u32(0).u32(0).u32(0); // 30h, 32h, 34h, 38h, 3Ch
+    w.u32(0).u32(0).u32(0).u32(0); // UsageData, 44h, ExtraFlags, 4Ch
+    b.add(Seg::Sys, w)
+}
+
+fn add_shader(b: &mut Builder, texture: &str, kind: u8) -> BlockId {
+    let (sname, bucket) = match kind {
+        1 => ("alpha", 1u8),
+        2 => ("decal", 2),
+        3 => ("cutout", 3),
+        _ => ("default", 0),
+    };
+    let tex = add_texture_ref(b, texture);
+    let n = 1 + VECTORS.len();
+    // ShaderParametersBlock: params (16 each), vector data, hashes, padding.
+    let base_size = 32 + 16 * n + 16 * VECTORS.len() + 4 * n;
+    let data_size = base_size + pad16(base_size);
+    let pb = b.reserve(Seg::Sys);
+    let mut w = W::new();
+    // texture param: DataType 0, Unknown_1h = i + 2
+    w.u8(0).u8(2).u16(0).u32(0).ptr(Some(tex));
+    let mut voff = 16 * n;
+    for (i, _) in VECTORS.iter().enumerate() {
+        // vector params get 160.. counted from the last one
+        let unk = 160 + (VECTORS.len() - 1 - i);
+        w.u8(1).u8(unk as u8).u16(0).u32(0).ptr_at(Some(pb), voff as u64);
+        voff += 16;
+    }
+    for (_, v) in VECTORS {
+        w.v4(v);
+    }
+    w.u32(joaat("diffusesampler"));
+    for (name, _) in VECTORS {
+        w.u32(joaat(&name.to_ascii_lowercase()));
+    }
+    w.zeros(32 + data_size * 4);
+    debug_assert_eq!(w.len(), base_size + data_size * 4);
+    b.set(pb, w);
+
+    let mut w = W::new();
+    w.ptr(Some(pb));
+    w.u32(joaat(sname)).u32(0);
+    w.u8(n as u8).u8(bucket).u16(32768);
+    w.u16((16 * n + 16 * VECTORS.len()) as u16).u16(data_size as u16);
+    w.u32(joaat(&format!("{sname}.sps"))).u32(0);
+    w.u32((1u32 << bucket) | 0xFF00).u16(0).u8(0).u8(1).u64(0);
+    b.add(Seg::Sys, w)
+}
+
+/// Writes one DrawableGeometry (152 bytes) into `w` and its buffers as blocks.
+fn write_geom(b: &mut Builder, w: &mut W, g: &Geom) -> Result<(), String> {
+    let nv = g.positions.len();
+    if nv > 65535 {
+        return Err(format!("geometry has {nv} vertices (max 65535)"));
+    }
+    if g.normals.len() != nv || g.colours.len() != nv || g.uvs.len() != nv {
+        return Err("geometry attribute arrays differ in length".into());
+    }
+    let mut vb = Vec::with_capacity(nv * STRIDE);
+    for i in 0..nv {
+        for f in g.positions[i].iter().chain(&g.normals[i]) {
+            vb.extend_from_slice(&f.to_le_bytes());
+        }
+        vb.extend_from_slice(&g.colours[i].to_le_bytes());
+        for f in &g.uvs[i] {
+            vb.extend_from_slice(&f.to_le_bytes());
+        }
+    }
+    let vdata = b.sys_bytes(vb);
+    let mut d = W::new();
+    d.u32(LAYOUT_FLAGS).u16(STRIDE as u16).u8(0).u8(4).u64(GTAV1);
+    let decl = b.add(Seg::Sys, d);
+    let mut v = W::new();
+    v.u32(VFT_VB).u32(1).u16(STRIDE as u16).u16(0).u32(0);
+    v.ptr(Some(vdata)).u32(nv as u32).u32(0).ptr(Some(vdata)).u64(0).ptr(Some(decl));
+    v.zeros(128 - v.len());
+    let vbuf = b.add(Seg::Sys, v);
+
+    let mut ib = Vec::with_capacity(g.indices.len() * 2);
+    for i in &g.indices {
+        ib.extend_from_slice(&i.to_le_bytes());
+    }
+    let idata = b.sys_bytes(ib);
+    let mut x = W::new();
+    x.u32(VFT_IB).u32(1).u32(g.indices.len() as u32).u32(0).ptr(Some(idata));
+    x.zeros(96 - x.len());
+    let ibuf = b.add(Seg::Sys, x);
+
+    let ni = g.indices.len() as u32;
+    let start = w.len();
+    w.u32(VFT_GEOM).u32(1).u64(0).u64(0).ptr(Some(vbuf)).u64(0).u64(0).u64(0);
+    w.ptr(Some(ibuf)).u64(0).u64(0).u64(0);
+    w.u32(ni).u32(ni / 3).u16(nv as u16).u16(3).u32(0);
+    w.u64(0).u16(STRIDE as u16).u16(0).u32(0);
+    w.ptr(Some(vdata)).u64(0).u64(0).u64(0);
+    debug_assert_eq!(w.len() - start, 152);
+    Ok(())
+}
+
+/// DrawableModelsBlock with a single high-LOD model holding every geometry.
+fn add_models(b: &mut Builder, mesh: &Mesh, aabbs: &[([f32; 3], [f32; 3])]) -> Result<(BlockId, usize), String> {
+    let id = b.reserve(Seg::Sys);
+    let n = mesh.geoms.len();
+    let mut w = W::new();
+    // ResourcePointerListHeader + one model pointer
+    w.ptr_at(Some(id), 16).u16(1).u16(1).u32(0);
+    let model_off = 16 + 8 + pad16(16 + 8);
+    w.ptr_at(Some(id), model_off as u64);
+    w.align(16);
+    // DrawableModel
+    let mut off = model_off + 48;
+    let shmap = off;
+    off += n * 2;
+    off += if n == 1 { 6 } else { pad16(off) };
+    let geoptrs = off;
+    off += n * 8;
+    off += pad16(off);
+    let bounds = off;
+    let nb = n + usize::from(n > 1);
+    off += nb * 32;
+    let mut gofs = Vec::with_capacity(n);
+    for _ in 0..n {
+        off += pad16(off);
+        gofs.push(off);
+        off += 152;
+    }
+    w.u32(VFT_MODEL).u32(1).ptr_at(Some(id), geoptrs as u64);
+    w.u16(n as u16).u16(n as u16).u32(0);
+    w.ptr_at(Some(id), bounds as u64).ptr_at(Some(id), shmap as u64);
+    w.u32(0).u16(0x00FF).u16(n as u16); // SkeletonBinding, RenderMask 255 / Flags 0
+    for i in 0..n {
+        w.u16(i as u16);
+    }
+    if n == 1 {
+        w.zeros(6);
+    } else {
+        w.align(16);
+    }
+    for &g in &gofs {
+        w.ptr_at(Some(id), g as u64);
+    }
+    w.align(16);
+    let mut bl = Vec::new();
+    if n > 1 {
+        let (lo, hi) = aabb(aabbs.iter().flat_map(|a| [a.0, a.1]));
+        bl.push((lo, hi));
+    }
+    bl.extend_from_slice(aabbs);
+    for (lo, hi) in bl {
+        w.v3(lo).f32(0.0).v3(hi).f32(0.0);
+    }
+    for g in &mesh.geoms {
+        w.align(16);
+        write_geom(b, &mut w, g)?;
+    }
+    let len = w.len();
+    b.set(id, w);
+    Ok((id, len))
+}
+
+/// Add a Drawable (208 bytes) and everything it references. The drawable
+/// block is reserved first, so on an empty builder it becomes the root.
+/// `file_root` adds the ResourcePagesInfo block a standalone .ydr needs.
+/// `tex_dict` is an embedded texture dictionary block (ytd::add_dict).
+pub fn add_drawable(b: &mut Builder, mesh: &Mesh, lod_dist: f32, tex_dict: Option<BlockId>, file_root: bool) -> Result<BlockId, String> {
+    let id = b.reserve(Seg::Sys);
+    fill_drawable(b, id, mesh, lod_dist, tex_dict, file_root)?;
+    Ok(id)
+}
+
+/// Like `add_drawable`, into a block already reserved with `reserve(Seg::Sys)`.
+pub fn fill_drawable(b: &mut Builder, id: BlockId, mesh: &Mesh, lod_dist: f32, tex_dict: Option<BlockId>, file_root: bool) -> Result<(), String> {
+    if mesh.geoms.is_empty() {
+        return Err("mesh has no geometries".into());
+    }
+    let pages = if file_root {
+        let mut p = W::new();
+        p.u32(0).u32(0).u8(128).u8(0).u16(0).u32(0).zeros(8 * 128);
+        let p = b.add(Seg::Sys, p);
+        b.pages_info = Some(p);
+        Some(p)
+    } else {
+        None
+    };
+    let name = b.string(&mesh.name);
+
+    // shader group
+    let shaders: Vec<BlockId> = mesh.geoms.iter().map(|g| add_shader(b, &g.texture, g.kind)).collect();
+    let mut pa = W::new();
+    for &s in &shaders {
+        pa.ptr(Some(s));
+    }
+    let parr = b.add(Seg::Sys, pa);
+    let mut sg = W::new();
+    sg.u32(VFT_SHADERGROUP).u32(1).ptr(tex_dict).ptr(Some(parr));
+    sg.u16(shaders.len() as u16).u16(shaders.len() as u16).u32(0).u64(0).u64(0);
+    sg.u32(64 / 16).u32(0).u64(0);
+    let sgid = b.add(Seg::Sys, sg);
+
+    // bounds
+    let aabbs: Vec<_> = mesh.geoms.iter().map(|g| aabb(g.positions.iter().copied())).collect();
+    let (lo, hi) = aabb(aabbs.iter().flat_map(|a| [a.0, a.1]));
+    let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+    let mut r2 = 0f64;
+    for g in &mesh.geoms {
+        for p in &g.positions {
+            let d: f64 = (0..3).map(|k| ((p[k] - c[k]) as f64).powi(2)).sum();
+            r2 = r2.max(d);
+        }
+    }
+    let (models, mlen) = add_models(b, mesh, &aabbs)?;
+
+    let mut w = W::new();
+    w.u32(VFT_FILE).u32(1).ptr(pages);
+    w.ptr(Some(sgid)).u64(0);
+    w.v3(c).f32(r2.sqrt() as f32);
+    w.v3(lo).u32(0x7f800001).v3(hi).u32(0x7f800001);
+    w.ptr(Some(models)).u64(0).u64(0).u64(0);
+    w.f32(lod_dist).f32(lod_dist).f32(lod_dist).f32(lod_dist);
+    w.u32(0xFF01).u32(0).u32(0).u32(0); // FlagsHigh 1, RenderMaskHigh 255
+    w.u64(0).u16(0).u16(mlen.div_ceil(16) as u16).u32(0);
+    w.ptr(Some(models));
+    w.ptr(Some(name)).u64(0).u16(0).u16(0).u32(0).u64(0).u64(0);
+    debug_assert_eq!(w.len(), 208);
+    b.set(id, w);
+    Ok(())
+}
+
+/// Build a standalone .ydr (resource version 165). `embed` is a builder
+/// hook that adds an embedded texture dictionary and returns its block.
+pub fn build_ydr(mesh: &Mesh, lod_dist: f32, embed: Option<&dyn Fn(&mut Builder) -> Result<BlockId, String>>) -> Result<Vec<u8>, String> {
+    let mut b = Builder::new();
+    let root = b.reserve(Seg::Sys); // the drawable must be the root block
+    let dict = embed.map(|e| e(&mut b)).transpose()?;
+    fill_drawable(&mut b, root, mesh, lod_dist, dict, true)?;
+    b.build(165)
+}
+
+/// Parse a .mtl: material -> map_Kd file stem.
+pub fn parse_mtl(text: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let mut cur: Option<String> = None;
+    for line in text.lines() {
+        let q: Vec<&str> = line.split_whitespace().collect();
+        match q.first() {
+            Some(&"newmtl") if q.len() > 1 => cur = Some(q[1].to_string()),
+            Some(&"map_Kd") if q.len() > 1 => {
+                if let Some(m) = &cur {
+                    let f = q[1];
+                    let stem = std::path::Path::new(f).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                    out.insert(m.clone(), stem);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// OBJ -> Mesh with obj2ydrxml.py semantics: per-usemtl geometry (split at
+/// 65535 vertices), averaged face normals over source vertices, vertex
+/// colours from `v x y z r g b`, V flipped, texture `r6m_<map_Kd stem
+/// lowercase, 0x removed>` or `r6m_missing`. `mtl` maps material -> stem.
+pub fn obj_to_mesh(obj_text: &str, mtl: &HashMap<String, String>) -> Mesh {
+    let mut v: Vec<[f32; 3]> = Vec::new();
+    let mut vc: Vec<[f32; 3]> = Vec::new();
+    let mut vt: Vec<[f32; 2]> = Vec::new();
+    let mut order: Vec<Option<String>> = Vec::new();
+    let mut groups: HashMap<Option<String>, Vec<[(i64, i64); 3]>> = HashMap::new();
+    let mut cur: Option<String> = None;
+    let fl = |s: &str| s.parse::<f32>().unwrap_or(0.0);
+    for line in obj_text.lines() {
+        let p: Vec<&str> = line.split_whitespace().collect();
+        match p.first().copied() {
+            Some("v") if p.len() >= 4 => {
+                v.push([fl(p[1]), fl(p[2]), fl(p[3])]);
+                vc.push(if p.len() >= 7 { [fl(p[4]), fl(p[5]), fl(p[6])] } else { [1.0; 3] });
+            }
+            Some("vt") if p.len() >= 3 => vt.push([fl(p[1]), fl(p[2])]),
+            Some("usemtl") if p.len() >= 2 => {
+                cur = Some(p[1].to_string());
+                if !groups.contains_key(&cur) {
+                    order.push(cur.clone());
+                    groups.insert(cur.clone(), Vec::new());
+                }
+            }
+            Some("f") if p.len() >= 4 => {
+                let corner = |c: &str| {
+                    let mut it = c.split('/');
+                    let a = it.next().and_then(|x| x.parse::<i64>().ok()).map(|x| x - 1).unwrap_or(-1);
+                    let t = it.next().and_then(|x| x.parse::<i64>().ok()).map(|x| x - 1).unwrap_or(-1);
+                    (a, t)
+                };
+                if !groups.contains_key(&cur) {
+                    order.push(cur.clone());
+                    groups.insert(cur.clone(), Vec::new());
+                }
+                groups.get_mut(&cur).unwrap().push([corner(p[1]), corner(p[2]), corner(p[3])]);
+            }
+            _ => {}
+        }
+    }
+    // averaged (area-weighted) normals per source vertex
+    let mut nrm = vec![[0f32; 3]; v.len()];
+    for faces in groups.values() {
+        for f in faces {
+            let (a, b, c) = (f[0].0 as usize, f[1].0 as usize, f[2].0 as usize);
+            if a >= v.len() || b >= v.len() || c >= v.len() {
+                continue;
+            }
+            let e1 = [v[b][0] - v[a][0], v[b][1] - v[a][1], v[b][2] - v[a][2]];
+            let e2 = [v[c][0] - v[a][0], v[c][1] - v[a][1], v[c][2] - v[a][2]];
+            let n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+            for &i in &[a, b, c] {
+                for k in 0..3 {
+                    nrm[i][k] += n[k];
+                }
+            }
+        }
+    }
+    let norm = |n: [f32; 3]| {
+        let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        let l = if l == 0.0 { 1.0 } else { l };
+        [n[0] / l, n[1] / l, n[2] / l]
+    };
+    let texname = |m: &Option<String>| match m.as_ref().and_then(|m| mtl.get(m)) {
+        Some(st) => format!("r6m_{}", st.to_lowercase().replace("0x", "")),
+        None => "r6m_missing".to_string(),
+    };
+    let mut geoms = Vec::new();
+    for m in &order {
+        let tex = texname(m);
+        let mut g = Geom { texture: tex.clone(), ..Default::default() };
+        let mut remap: HashMap<(i64, i64), u16> = HashMap::new();
+        for f in &groups[m] {
+            if f.iter().any(|c| c.0 < 0 || c.0 as usize >= v.len()) {
+                continue;
+            }
+            let new = f.iter().filter(|c| !remap.contains_key(c)).count();
+            if g.positions.len() + new > 65535 {
+                geoms.push(std::mem::replace(&mut g, Geom { texture: tex.clone(), ..Default::default() }));
+                remap.clear();
+            }
+            for c in f {
+                let idx = *remap.entry(*c).or_insert_with(|| {
+                    let vi = c.0 as usize;
+                    g.positions.push(v[vi]);
+                    g.normals.push(norm(nrm[vi]));
+                    let col = vc[vi].map(|x| (x * 255.0).round().clamp(0.0, 255.0) as u32);
+                    g.colours.push(col[0] | col[1] << 8 | col[2] << 16 | 0xFF00_0000);
+                    let (u, w) = if c.1 >= 0 && (c.1 as usize) < vt.len() { (vt[c.1 as usize][0], vt[c.1 as usize][1]) } else { (0.0, 0.0) };
+                    g.uvs.push([u, 1.0 - w]);
+                    (g.positions.len() - 1) as u16
+                });
+                g.indices.push(idx);
+            }
+        }
+        if !g.indices.is_empty() {
+            geoms.push(g);
+        }
+    }
+    Mesh { name: String::new(), geoms }
+}
+
+/// Test path: rebuild a Mesh from a CodeWalker YDR XML dump (GTAV1
+/// Position/Normal/Colour0/TexCoord0 layout only).
+fn cwxml_to_mesh(xml: &str) -> Result<Mesh, String> {
+    let mut texes = Vec::new();
+    let mut in_shader_tex = false;
+    for line in xml.lines() {
+        let t = line.trim();
+        if t.starts_with("<Item name=\"DiffuseSampler\"") {
+            in_shader_tex = true;
+        } else if in_shader_tex && t.starts_with("<Name>") {
+            texes.push(t.trim_start_matches("<Name>").trim_end_matches("</Name>").to_string());
+            in_shader_tex = false;
+        }
+    }
+    let mut geoms = Vec::new();
+    let mut g = Geom::default();
+    let mut mode = 0; // 1 vertex data, 2 index data
+    let mut in_ib = false;
+    for line in xml.lines() {
+        let t = line.trim();
+        if let Some(r) = t.strip_prefix("<ShaderIndex value=\"") {
+            let si: usize = r.split('"').next().unwrap_or("0").parse().unwrap_or(0);
+            g = Geom { texture: texes.get(si).cloned().unwrap_or_default(), ..Default::default() };
+        } else if t == "<IndexBuffer>" {
+            in_ib = true;
+        } else if t == "<Data>" {
+            mode = if in_ib { 2 } else { 1 };
+        } else if t == "</Data>" {
+            mode = 0;
+        } else if t == "</IndexBuffer>" {
+            in_ib = false;
+            geoms.push(std::mem::take(&mut g));
+        } else if mode == 1 {
+            let f: Vec<f32> = t.split_whitespace().map(|x| x.parse().unwrap_or(0.0)).collect();
+            if f.len() != 12 {
+                return Err(format!("unexpected vertex line: {t}"));
+            }
+            g.positions.push([f[0], f[1], f[2]]);
+            g.normals.push([f[3], f[4], f[5]]);
+            g.colours.push(f[6] as u32 | (f[7] as u32) << 8 | (f[8] as u32) << 16 | (f[9] as u32) << 24);
+            g.uvs.push([f[10], f[11]]);
+        } else if mode == 2 {
+            g.indices.extend(t.split_whitespace().map(|x| x.parse::<u16>().unwrap_or(0)));
+        }
+    }
+    Ok(Mesh { name: String::new(), geoms })
+}
+
+pub fn cli(args: &[String]) -> Result<(), String> {
+    let mut pos = Vec::new();
+    let mut ytd = None;
+    let mut cwxml = false;
+    let mut lod = 9998.0f32;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--ytd" => {
+                ytd = Some(args.get(i + 1).ok_or("--ytd needs a path")?.clone());
+                i += 1;
+            }
+            "--lod" => {
+                lod = args.get(i + 1).and_then(|s| s.parse().ok()).ok_or("--lod needs a number")?;
+                i += 1;
+            }
+            "--from-cwxml" => cwxml = true,
+            a => pos.push(a.to_string()),
+        }
+        i += 1;
+    }
+    if pos.len() != 2 {
+        return Err("usage: ydr <in.obj> <out.ydr> [--ytd <embed.ytd>] [--lod <dist>]".into());
+    }
+    if ytd.is_some() {
+        return Err("ydr: --ytd embedding not wired yet".into());
+    }
+    let (src, dst) = (std::path::Path::new(&pos[0]), std::path::Path::new(&pos[1]));
+    let text = std::fs::read_to_string(src).map_err(|e| format!("{}: {e}", src.display()))?;
+    let mut mesh = if cwxml {
+        cwxml_to_mesh(&text)?
+    } else {
+        let mut mtl = HashMap::new();
+        if let Some(lib) = text.lines().find_map(|l| l.trim().strip_prefix("mtllib ")) {
+            let p = src.parent().unwrap_or(std::path::Path::new(".")).join(lib.trim());
+            if let Ok(t) = std::fs::read_to_string(&p) {
+                mtl = parse_mtl(&t);
+            }
+        }
+        obj_to_mesh(&text, &mtl)
+    };
+    mesh.name = dst.file_name().map(|s| s.to_string_lossy().split('.').next().unwrap_or("").to_string()).unwrap_or_default();
+    let data = build_ydr(&mesh, lod, None)?;
+    std::fs::write(dst, &data).map_err(|e| format!("{}: {e}", dst.display()))?;
+    let nv: usize = mesh.geoms.iter().map(|g| g.positions.len()).sum();
+    println!("{}: {} geometries, {} verts, {} bytes", dst.display(), mesh.geoms.len(), nv, data.len());
+    Ok(())
+}

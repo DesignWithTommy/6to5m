@@ -1,0 +1,181 @@
+// Research probe for BCPack (not part of the library).
+use sixng_core::ttpf::*;
+use std::collections::BTreeMap;
+use std::path::Path;
+fn main() {
+    let a: Vec<String> = std::env::args().collect();
+    let set = TtpfSet::open_dir(Path::new(&a[1]));
+    match a[2].as_str() {
+        "stats" => {
+            let mut st: BTreeMap<u8, (u64, u64, u64)> = BTreeMap::new();
+            let mut fm: BTreeMap<(u8, u32), u64> = BTreeMap::new();
+            for s in &set.stores {
+                for w in s.chunks.windows(2) {
+                    let c = w[0].2 & 0x3F;
+                    let e = st.entry(c).or_default();
+                    e.0 += 1; e.1 += w[1].1 - w[0].1; e.2 += w[1].0 - w[0].0;
+                }
+                for t in &s.textures {
+                    for w in s.chunks.windows(2) {
+                        if w[1].1 > t.virt && w[0].1 < t.virt + t.size && w[0].2 & 0x1C != 0 {
+                            *fm.entry((w[0].2 & 0x3F, t.dxgi_format)).or_default() += 1; break;
+                        }
+                    }
+                }
+            }
+            for (c, v) in st { println!("codec {c:#04x}: {} chunks, virt {} MB, comp {} MB", v.0, v.1 >> 20, v.2 >> 20); }
+            for (k, v) in fm { println!("codec {:#04x} dxgi {}: {v} textures", k.0, k.1); }
+        }
+        "full" => {
+            let mut st: BTreeMap<u8, [usize; 5]> = BTreeMap::new();
+            for s in &set.stores { for (i, w) in s.chunks.windows(2).enumerate() {
+                let c = w[0].2 & 0x3F;
+                if w[0].2 & 0x1C == 0 || !sixng_core::bcpack::supported(c) { continue; }
+                let comp = chunk_comp(s, i);
+                let e = st.entry(c).or_default();
+                e[0] += 1;
+                match sixng_core::bcpack::decode(c, &comp, (w[1].1 - w[0].1) as usize) {
+                    Ok(d) => { e[2] += d.data.len() / if c == 0x10 { 8 } else { 16 }; e[3] += d.unknown; e[4] += d.inconsistent; }
+                    Err(x) => { e[1] += 1; if e[1] <= 2 { println!("{c:#x} {} {i}: {x}", s.label()); } }
+                }
+            } }
+            for (c, v) in st { println!("codec {c:#04x}: chunks {} failed {} blocks {} unknown-hist {} inconsistent {}", v[0], v[1], v[2], v[3], v[4]); }
+        }
+        "calib" => {
+            let t0 = std::time::Instant::now();
+            let h = sixng_core::bcpack_calib::calibrate(&set);
+            std::fs::write(&a[3], h.to_bytes()).unwrap();
+            let ep = h.bc7_ep_bits.iter().flatten().filter(|&&b| b > 0).count();
+            let ix = h.bc7_ix_bits.iter().flatten().filter(|&&b| b > 0).count();
+            println!("{:.1}s bc4 {} bc7 ep slots {ep} ix slots {ix} bc6h ep {} ix {}", t0.elapsed().as_secs_f64(), h.bc4.iter().flatten().count(), h.bc6h_ecls.iter().filter(|&&c| c > 0).count(), h.bc6h_icls.iter().filter(|&&c| c > 0).count());
+        }
+        "dump" => {
+            // dump <store label substr> <chunk> <outdir>
+            let s = set.stores.iter().find(|s| s.label().contains(a[3].as_str())).unwrap();
+            let i: usize = a[4].parse().unwrap();
+            let comp = chunk_comp(s, i);
+            let c = s.chunks[i].2 & 0x3F;
+            let vlen = (s.chunks[i + 1].1 - s.chunks[i].1) as usize;
+            let d = sixng_core::bcpack::decode(c, &comp, vlen).unwrap();
+            std::fs::write(format!("{}/comp.bin", a[5]), &comp).unwrap();
+            std::fs::write(format!("{}/rust.bin", a[5]), &d.data).unwrap();
+            println!("codec {c} vlen {vlen} unknown {} inconsistent {}", d.unknown, d.inconsistent);
+        }
+        "lanes" => {
+            // lanes <codec> <widths comma> <target num/den> <count>
+            let codec = u8::from_str_radix(&a[3], 16).unwrap();
+            let ab: Vec<u8> = a[4].split(',').map(|x| x.parse::<u8>().unwrap() - 1).collect();
+            let (num, den): (usize, usize) = { let v: Vec<usize> = a[5].split('/').map(|x| x.parse().unwrap()).collect(); (v[0], v[1]) };
+            let cnt: usize = a[6].parse().unwrap();
+            let (mut ok, mut tot) = (0, 0);
+            'o: for s in &set.stores {
+                for (i, w) in s.chunks.windows(2).enumerate() {
+                    if w[0].2 & 0x3F != codec { continue; }
+                    let comp = chunk_comp(s, i);
+                    let vlen = (w[1].1 - w[0].1) as usize;
+                    let tgt = vlen / 16 * num / den;
+                    let r = bcpack::rans::decode_slice(&comp, &ab, tgt);
+                    tot += 1;
+                    match r { Ok(_) => ok += 1, Err(e) => if tot <= 3 { println!("{} {i} vlen {vlen}: {e}", s.label()) } }
+                    if tot >= cnt { break 'o; }
+                }
+            }
+            println!("{ok}/{tot}");
+        }
+        "dups" => {
+            // textures touching BCPack (non-BC1) whose hash also exists in a store with mip 0 clean
+            let mut byhash: std::collections::HashMap<u64, Vec<(usize, usize)>> = Default::default();
+            for (si, s) in set.stores.iter().enumerate() { for (ti, t) in s.textures.iter().enumerate() { byhash.entry(t.hash).or_default().push((si, ti)); } }
+            let mut n: BTreeMap<u32, (u32, u32)> = BTreeMap::new();
+            for v in byhash.values() {
+                let bad: Vec<_> = v.iter().filter(|&&(si, ti)| { let s = &set.stores[si]; let t = &s.textures[ti]; s.bcpack_bytes(t.virt, t.size) > 0 }).collect();
+                if bad.is_empty() { continue; }
+                let t0 = &set.stores[bad[0].0].textures[bad[0].1];
+                let e = n.entry(t0.dxgi_format).or_default();
+                e.0 += 1;
+                let good = v.iter().find(|&&(si, ti)| { let s = &set.stores[si]; let t = &s.textures[ti]; s.bcpack_bytes(t.virt, t.size) == 0 && t.d0 == t0.d0 });
+                if let Some(&(si, ti)) = good { e.1 += 1; if e.1 <= 3 { println!("dxgi {} {:016x} bad {} good {} {}x{}", t0.dxgi_format, t0.hash, set.stores[bad[0].0].label(), set.stores[si].label(), t0.width, t0.height); } let _ = ti; }
+            }
+            for (k, v) in n { println!("dxgi {k}: {} hashes, {} with clean twin", v.0, v.1); }
+        }
+        "syms" => {
+            // syms <store substr> <chunk idx> <widths> -> writes raw u16 lane-major symbols to stdout file
+            let s = set.stores.iter().find(|s| s.label().contains(&a[3])).unwrap();
+            let i: usize = a[4].parse().unwrap();
+            let ab: Vec<u8> = a[5].split(',').map(|x| x.parse::<u8>().unwrap() - 1).collect();
+            let vlen = (s.chunks[i + 1].1 - s.chunks[i].1) as usize;
+            let comp = chunk_comp(s, i);
+            let mul: usize = a[6].parse().unwrap();
+            let r = bcpack::rans::decode_slice(&comp, &ab, vlen / 16 * mul).unwrap();
+            let mut out = Vec::new();
+            for v in &r.symbols { out.extend_from_slice(&v.to_le_bytes()); }
+            std::fs::write(&a[7], out).unwrap();
+            println!("lanes {} target {} codec {:#x}", r.lanes, r.target, s.chunks[i].2);
+        }
+        "list" => {
+            // list <codec>: chunks with textures overlapping
+            let codec = u8::from_str_radix(&a[3], 16).unwrap();
+            for s in &set.stores { for (i, w) in s.chunks.windows(2).enumerate() { if w[0].2 & 0x3F != codec { continue; }
+                let ts: Vec<String> = s.textures.iter().filter(|t| t.virt < w[1].1 && t.virt + t.size > w[0].1).map(|t| format!("{:016x}:{}x{}:m{}:@{}", t.hash, t.width, t.height, t.mips(), t.virt as i64 - w[0].1 as i64)).collect();
+                println!("{} {i} vlen {} {}", s.label(), w[1].1 - w[0].1, ts.join(" "));
+            } }
+        }
+        "export" => {
+            // export <codec> <count> <outdir> <maxblocks> <lanewidths> <mul>
+            let codec = u8::from_str_radix(&a[3], 16).unwrap();
+            let cnt: usize = a[4].parse().unwrap();
+            let od = Path::new(&a[5]); std::fs::create_dir_all(od).unwrap();
+            let maxb: usize = a[6].parse().unwrap();
+            let ab: Vec<u8> = a[7].split(',').map(|x| x.parse::<u8>().unwrap() - 1).collect();
+            let mul: usize = a[8].parse().unwrap();
+            let skip: usize = a.get(9).map(|x| x.parse().unwrap()).unwrap_or(1);
+            let mut n = 0; let mut seen = 0;
+            'o: for s in &set.stores { for (ci, w) in s.chunks.windows(2).enumerate() {
+                if w[0].2 & 0x3F != codec { continue; }
+                let (v0, v1) = (w[0].1, w[1].1);
+                let fmt = sixng_core::texture::Fmt::from_dxgi(0);
+                let _ = fmt;
+                let Some(t) = s.textures.iter().find(|t| t.virt < v1 && t.virt + t.size > v0) else { continue };
+                let Some(l) = t.layout() else { continue };
+                if l.slices != 1 { continue; }
+                let bpe = l.bpe as u64;
+                let nb = ((v1 - v0) / bpe) as usize;
+                if nb > maxb { continue; }
+                // which mip does this chunk hold?
+                let Some(m) = (0..l.mips.len()).find(|&m| { let (a0, b0) = l.mip_span(m); t.virt + a0 < v1 && t.virt + b0 > v0 }) else { continue };
+                if m + 1 >= l.mips.len() { continue; }
+                let (a1, b1) = l.mip_span(m + 1);
+                if s.bcpack_bytes(t.virt + a1, b1 - a1) > 0 { continue; }
+                seen += 1; if seen % skip != 0 { continue; }
+                let comp = chunk_comp(s, ci);
+                let Ok(r) = bcpack::rans::decode_slice(&comp, &ab, nb * mul) else { println!("fail {} {ci}", s.label()); continue };
+                let (mw, mh) = (l.mips[m].w, l.mips[m].h);
+                let mut map = vec![-1i32; nb];
+                for y in 0..mh { for x in 0..mw { let ad = t.virt + l.addr(m, 0, x, y); if ad >= v0 && ad < v1 { map[((ad - v0) / bpe) as usize] = (y * mw + x) as i32; } } }
+                let data = s.data(t).unwrap();
+                let (rgba, w1, h1) = decode_rgba(t, &data, (m + 1) as u32).unwrap();
+                let name = format!("{}_{ci}", s.label().replace(['/', '.'], "_"));
+                let mut sb = Vec::new(); for v in &r.symbols { sb.extend_from_slice(&v.to_le_bytes()); }
+                std::fs::write(od.join(format!("{name}.syms")), sb).unwrap();
+                let mb: Vec<u8> = map.iter().flat_map(|v| v.to_le_bytes()).collect();
+                std::fs::write(od.join(format!("{name}.map")), mb).unwrap();
+                std::fs::write(od.join(format!("{name}.ref")), &rgba).unwrap();
+                std::fs::write(od.join(format!("{name}.json")), format!("{{\"blocks\":{nb},\"lanes\":{},\"mul\":{mul},\"bw\":{mw},\"bh\":{mh},\"rw\":{w1},\"rh\":{h1},\"dxgi\":{},\"hash\":\"{:016x}\",\"mip\":{m},\"w\":{},\"h\":{}}}", ab.len(), t.dxgi_format, t.hash, t.width, t.height)).unwrap();
+                n += 1; if n >= cnt { break 'o; }
+            } }
+            println!("exported {n}");
+        }
+        _ => {}
+    }
+}
+
+pub fn chunk_comp(s: &Ttpf, i: usize) -> Vec<u8> {
+    use std::io::{Read, Seek, SeekFrom};
+    let (foff, _, _, pad) = s.chunks[i];
+    let fnext = s.chunks[i + 1].0;
+    let mut f = std::fs::File::open(&s.path).unwrap();
+    f.seek(SeekFrom::Start(foff)).unwrap();
+    let mut v = vec![0u8; (fnext - foff - pad) as usize];
+    f.read_exact(&mut v).unwrap();
+    v
+}
