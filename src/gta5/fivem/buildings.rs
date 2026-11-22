@@ -182,6 +182,9 @@ fn is_emissive(shader_hash: u32) -> bool {
     sixng_core::material::classify(&format!("{shader_hash:08x}"), &[])["class"] == "emissive"
 }
 
+/// Tangent-space normal map parameter hashes (sixng-core export NORMAL_PARAMS).
+const NORMAL_SLOTS: [u32; 3] = [0x84c69350, 0x58b6e707, 0x1e77bf4c];
+
 fn kind_of(bucket: u8) -> u8 {
     match bucket {
         x if x & 0x04 != 0 => 2,
@@ -263,6 +266,53 @@ impl Pools {
             Err(e) => e,
         };
         self.from_ttpf(hash, h64).and_then(|p| check_dds(&p).map(|_| p)).map_err(|e2| format!("{e1}; ttpf: {e2}"))
+    }
+
+    /// Cached tangent-space normal map `<hash>_n.dds` (texture
+    /// `r6m_<hash>_n`), decoded once and reused by every later build; also
+    /// makes sure the shared flat spec map exists. Flat decodes (undecoded
+    /// BCPack) are rejected so they never bend the lighting.
+    fn get_normal(&self, hash: u32, key: u64, h64: u64) -> Result<String, String> {
+        let name = format!("r6m_{hash:08x}_n");
+        let p = self.dir.join(format!("{hash:08x}_n.dds"));
+        if !p.exists() {
+            let (w, h, rgba) = self.raw_rgba(hash, key, h64)?;
+            if bad_colour(&rgba) == Some("flat decode (undecoded BCPack data)") {
+                return Err("flat normal decode".into());
+            }
+            let dds = rgba_dds(&rgba, w, h);
+            ytd::from_dds("check", &dds)?;
+            write_atomic(&p, &dds).or_else(|e| if p.exists() { Ok(()) } else { Err(e.to_string()) })?;
+        }
+        let sp = self.dir.join(format!("{}.dds", &ydr::FLAT_SPEC[4..]));
+        if !sp.exists() {
+            let px: Vec<u8> = (0..16 * 16).flat_map(|_| [32u8, 32, 32, 255]).collect();
+            write_atomic(&sp, &rgba_dds(&px, 16, 16)).or_else(|e| if sp.exists() { Ok(()) } else { Err(e.to_string()) })?;
+        }
+        Ok(name)
+    }
+
+    /// Decoded RGBA without the colour-map check: ttdb pools, then TTPF.
+    fn raw_rgba(&self, hash: u32, key: u64, h64: u64) -> Result<(u32, u32, Vec<u8>), String> {
+        let e1 = match self.from_pools(hash, key).and_then(|p| fs::read(&p).map_err(|e| e.to_string())).and_then(|b| crate::texture::dds_preview(&b).map_err(|e| e.to_string())) {
+            Ok(x) => return Ok(x),
+            Err(e) => e,
+        };
+        let ttpf = || -> Result<(u32, u32, Vec<u8>), String> {
+            if h64 == 0 {
+                return Err("no 64-bit hash".into());
+            }
+            let set = sixng_core::ttpf::global(&self.game);
+            let (store, t) = set.get(h64).ok_or("not in any ttpf store")?;
+            if !t.decodable() {
+                return Err(format!("format {} / tile mode {} not decodable", t.dxgi_format, t.tile_mode()));
+            }
+            let (data, skipped) = store.data_ex(t).map_err(|e| e.to_string())?;
+            let mip = if skipped == 0 { 0 } else { store.best_mip(t).ok_or("only BCPack mips")? };
+            let (rgba, w, h) = sixng_core::ttpf::decode_rgba(t, &data, mip).map_err(|e| e.to_string())?;
+            Ok((w, h, rgba))
+        };
+        ttpf().map_err(|e2| format!("{e1}; ttpf: {e2}"))
     }
 
     fn from_ttpf(&self, hash: u32, h64: u64) -> Result<PathBuf, String> {
@@ -643,6 +693,25 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: us
             texs.push(tex.clone());
         }
         let kind = sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).map_or(0, |mat| if kind_of(mat.bucket) == 0 && is_emissive(mat.shader_hash) { 4 } else { kind_of(mat.bucket) });
+        // normal map (opaque only): normal_spec.sps with the material's bump texture
+        let nrm = if kind != 0 || tex == MISSING {
+            None
+        } else {
+            sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).and_then(|mat| {
+                mat.textures.iter().filter(|t| NORMAL_SLOTS.contains(&t.param)).find_map(|t| {
+                    let key = m.embedded.as_ref().and_then(|e| e.by_hash(t.hash)).and_then(|x| x.asset_key).unwrap_or(t.key);
+                    pools.get_normal(t.hash, key, t.h64).ok()
+                })
+            })
+        };
+        if let Some(n) = &nrm {
+            for t in [n.clone(), ydr::FLAT_SPEC.to_string()] {
+                if !texs.contains(&t) {
+                    texs.push(t);
+                }
+            }
+        }
+        let g0 = mesh.geoms.len();
         // Tint palette: bake palette entry (placement row, column = vertex colour
         // blue) into tinted copies of the colour texture, one per colour.
         let palette = sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).and_then(|mat| mat.textures.iter().find(|t| t.param == TINT_PALETTE)).and_then(|t| {
@@ -667,9 +736,15 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: us
                 }
                 push_geoms_n(&mut mesh.geoms, &sm.positions, &idx, sm.normals.as_deref(), sm.uvs.as_deref(), sm.colors.as_deref(), &t, kind);
             }
+            if let Some(n) = &nrm {
+                mesh.geoms[g0..].iter_mut().for_each(|g| g.normal = n.clone());
+            }
             continue;
         }
         push_geoms_n(&mut mesh.geoms, &sm.positions, &sm.indices, sm.normals.as_deref(), sm.uvs.as_deref(), sm.colors.as_deref(), &tex, kind);
+        if let Some(n) = nrm {
+            mesh.geoms[g0..].iter_mut().for_each(|g| g.normal = n.clone());
+        }
     }
     Ok(Some((mesh, texs, missing, frag_out)))
 }

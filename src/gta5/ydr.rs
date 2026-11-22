@@ -23,7 +23,13 @@ pub struct Geom {
     /// GTA V render bucket: 0 opaque (default.sps), 1 alpha (alpha.sps),
     /// 2 decal (decal.sps), 3 cutout (cutout.sps).
     pub kind: u8,
+    /// Tangent-space normal map (DirectX green); non-empty switches the
+    /// geometry to normal_spec.sps with a flat spec map and adds tangents.
+    pub normal: String,
 }
+
+/// Flat specular map shared by every normal_spec.sps geometry.
+pub const FLAT_SPEC: &str = "r6m_flatspec";
 
 #[derive(Clone, Default, Debug)]
 pub struct Mesh {
@@ -40,6 +46,9 @@ const VFT_IB: u32 = 1080152408;
 const GTAV1: u64 = 0x7755555555996996;
 const LAYOUT_FLAGS: u32 = 1 | (1 << 3) | (1 << 4) | (1 << 6); // Position Normal Colour0 TexCoord0
 const STRIDE: usize = 36;
+/// + Tangent (Float4): the normal-mapped layout.
+const LAYOUT_FLAGS_T: u32 = LAYOUT_FLAGS | (1 << 14);
+const STRIDE_T: usize = 52;
 
 /// Shader parameters written for every geometry (obj2ydrxml.py order).
 const VECTORS: [(&str, [f32; 4]); 6] = [
@@ -50,6 +59,49 @@ const VECTORS: [(&str, [f32; 4]); 6] = [
     ("globalAnimUV1", [0.0, 1.0, 0.0, 0.0]),
     ("globalAnimUV0", [1.0, 0.0, 0.0, 0.0]),
 ];
+
+/// Per-vertex tangents from UV derivatives (w = bitangent sign).
+pub fn uv_tangents(p: &[[f32; 3]], nrm: &[[f32; 3]], uv: &[[f32; 2]], idx: &[u32]) -> Vec<[f32; 4]> {
+    let n = p.len();
+    let (mut t, mut bt) = (vec![[0f32; 3]; n], vec![[0f32; 3]; n]);
+    for tri in idx.chunks_exact(3) {
+        let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+        if a >= n || b >= n || c >= n {
+            continue;
+        }
+        let e1 = [p[b][0] - p[a][0], p[b][1] - p[a][1], p[b][2] - p[a][2]];
+        let e2 = [p[c][0] - p[a][0], p[c][1] - p[a][1], p[c][2] - p[a][2]];
+        let (du1, dv1, du2, dv2) = (uv[b][0] - uv[a][0], uv[b][1] - uv[a][1], uv[c][0] - uv[a][0], uv[c][1] - uv[a][1]);
+        let d = du1 * dv2 - du2 * dv1;
+        if d.abs() < 1e-12 {
+            continue;
+        }
+        let r = 1.0 / d;
+        for k in 0..3 {
+            let sk = (e1[k] * dv2 - e2[k] * dv1) * r;
+            let tk = (e2[k] * du1 - e1[k] * du2) * r;
+            for i in [a, b, c] {
+                t[i][k] += sk;
+                bt[i][k] += tk;
+            }
+        }
+    }
+    (0..n)
+        .map(|i| {
+            let nn = nrm[i];
+            let d = t[i][0] * nn[0] + t[i][1] * nn[1] + t[i][2] * nn[2];
+            let tt = unit3([t[i][0] - nn[0] * d, t[i][1] - nn[1] * d, t[i][2] - nn[2] * d]);
+            let c = [nn[1] * tt[2] - nn[2] * tt[1], nn[2] * tt[0] - nn[0] * tt[2], nn[0] * tt[1] - nn[1] * tt[0]];
+            let s = if c[0] * bt[i][0] + c[1] * bt[i][1] + c[2] * bt[i][2] < 0.0 { -1.0 } else { 1.0 };
+            [tt[0], tt[1], tt[2], s]
+        })
+        .collect()
+}
+
+fn unit3(v: [f32; 3]) -> [f32; 3] {
+    let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if l > 1e-12 { [v[0] / l, v[1] / l, v[2] / l] } else { [0.0, 0.0, 1.0] }
+}
 
 fn pad16(o: usize) -> usize {
     (16 - o % 16) % 16
@@ -79,8 +131,9 @@ fn add_texture_ref(b: &mut Builder, name: &str) -> BlockId {
     b.add(Seg::Sys, w)
 }
 
-fn add_shader(b: &mut Builder, texture: &str, kind: u8) -> BlockId {
+fn add_shader(b: &mut Builder, texture: &str, kind: u8, normal: &str) -> BlockId {
     let (sname, bucket) = match kind {
+        0 if !normal.is_empty() => ("normal_spec", 0u8),
         1 => ("alpha", 1u8),
         2 => ("decal", 2),
         3 => ("cutout", 3),
@@ -92,15 +145,29 @@ fn add_shader(b: &mut Builder, texture: &str, kind: u8) -> BlockId {
     if kind == 4 {
         vectors.insert(0, ("emissiveMultiplier", [1.0, 0.0, 0.0, 0.0]));
     }
-    let tex = add_texture_ref(b, texture);
-    let n = 1 + vectors.len();
+    let mut samplers = vec![("diffusesampler", texture)];
+    if sname == "normal_spec" {
+        samplers.push(("bumpsampler", normal));
+        samplers.push(("specsampler", FLAT_SPEC));
+        vectors.extend([
+            ("specularIntensityMult", [0.25, 0.0, 0.0, 0.0]),
+            ("specularFalloffMult", [40.0, 0.0, 0.0, 0.0]),
+            ("specularFresnel", [0.97, 0.0, 0.0, 0.0]),
+            ("bumpiness", [1.0, 0.0, 0.0, 0.0]),
+        ]);
+    }
+    let texs: Vec<BlockId> = samplers.iter().map(|(_, t)| add_texture_ref(b, t)).collect();
+    let nt = texs.len();
+    let n = nt + vectors.len();
     // ShaderParametersBlock: params (16 each), vector data, hashes, padding.
     let base_size = 32 + 16 * n + 16 * vectors.len() + 4 * n;
     let data_size = base_size + pad16(base_size);
     let pb = b.reserve(Seg::Sys);
     let mut w = W::new();
-    // texture param: DataType 0, Unknown_1h = i + 2
-    w.u8(0).u8(2).u16(0).u32(0).ptr(Some(tex));
+    // texture params: DataType 0, Unknown_1h = i + 2
+    for (i, t) in texs.iter().enumerate() {
+        w.u8(0).u8((i + 2) as u8).u16(0).u32(0).ptr(Some(*t));
+    }
     let mut voff = 16 * n;
     for (i, _) in vectors.iter().enumerate() {
         // vector params get 160.. counted from the last one
@@ -111,7 +178,9 @@ fn add_shader(b: &mut Builder, texture: &str, kind: u8) -> BlockId {
     for (_, v) in &vectors {
         w.v4(*v);
     }
-    w.u32(joaat("diffusesampler"));
+    for (name, _) in &samplers {
+        w.u32(joaat(name));
+    }
     for (name, _) in &vectors {
         w.u32(joaat(&name.to_ascii_lowercase()));
     }
@@ -125,7 +194,7 @@ fn add_shader(b: &mut Builder, texture: &str, kind: u8) -> BlockId {
     w.u8(n as u8).u8(bucket).u16(32768);
     w.u16((16 * n + 16 * vectors.len()) as u16).u16(data_size as u16);
     w.u32(joaat(&format!("{sname}.sps"))).u32(0);
-    w.u32((1u32 << bucket) | 0xFF00).u16(0).u8(0).u8(1).u64(0);
+    w.u32((1u32 << bucket) | 0xFF00).u16(0).u8(0).u8(nt as u8).u64(0);
     b.add(Seg::Sys, w)
 }
 
@@ -138,7 +207,15 @@ fn write_geom(b: &mut Builder, w: &mut W, g: &Geom) -> Result<(), String> {
     if g.normals.len() != nv || g.colours.len() != nv || g.uvs.len() != nv {
         return Err("geometry attribute arrays differ in length".into());
     }
-    let mut vb = Vec::with_capacity(nv * STRIDE);
+    let bump = !g.normal.is_empty() && g.kind == 0;
+    let (flags, stride) = if bump { (LAYOUT_FLAGS_T, STRIDE_T) } else { (LAYOUT_FLAGS, STRIDE) };
+    let tangents = if bump {
+        let idx: Vec<u32> = g.indices.iter().map(|&i| i as u32).collect();
+        uv_tangents(&g.positions, &g.normals, &g.uvs, &idx)
+    } else {
+        Vec::new()
+    };
+    let mut vb = Vec::with_capacity(nv * stride);
     for i in 0..nv {
         for f in g.positions[i].iter().chain(&g.normals[i]) {
             vb.extend_from_slice(&f.to_le_bytes());
@@ -147,13 +224,18 @@ fn write_geom(b: &mut Builder, w: &mut W, g: &Geom) -> Result<(), String> {
         for f in &g.uvs[i] {
             vb.extend_from_slice(&f.to_le_bytes());
         }
+        if let Some(t) = tangents.get(i) {
+            for f in t {
+                vb.extend_from_slice(&f.to_le_bytes());
+            }
+        }
     }
     let vdata = b.sys_bytes(vb);
     let mut d = W::new();
-    d.u32(LAYOUT_FLAGS).u16(STRIDE as u16).u8(0).u8(4).u64(GTAV1);
+    d.u32(flags).u16(stride as u16).u8(0).u8(if bump { 5 } else { 4 }).u64(GTAV1);
     let decl = b.add(Seg::Sys, d);
     let mut v = W::new();
-    v.u32(VFT_VB).u32(1).u16(STRIDE as u16).u16(0).u32(0);
+    v.u32(VFT_VB).u32(1).u16(stride as u16).u16(0).u32(0);
     v.ptr(Some(vdata)).u32(nv as u32).u32(0).ptr(Some(vdata)).u64(0).ptr(Some(decl));
     v.zeros(128 - v.len());
     let vbuf = b.add(Seg::Sys, v);
@@ -173,7 +255,7 @@ fn write_geom(b: &mut Builder, w: &mut W, g: &Geom) -> Result<(), String> {
     w.u32(VFT_GEOM).u32(1).u64(0).u64(0).ptr(Some(vbuf)).u64(0).u64(0).u64(0);
     w.ptr(Some(ibuf)).u64(0).u64(0).u64(0);
     w.u32(ni).u32(ni / 3).u16(nv as u16).u16(3).u32(0);
-    w.u64(0).u16(STRIDE as u16).u16(0).u32(0);
+    w.u64(0).u16(stride as u16).u16(0).u32(0);
     w.ptr(Some(vdata)).u64(0).u64(0).u64(0);
     debug_assert_eq!(w.len() - start, 152);
     Ok(())
@@ -267,7 +349,7 @@ pub fn fill_drawable(b: &mut Builder, id: BlockId, mesh: &Mesh, lod_dist: f32, t
     let name = b.string(&mesh.name);
 
     // shader group
-    let shaders: Vec<BlockId> = mesh.geoms.iter().map(|g| add_shader(b, &g.texture, g.kind)).collect();
+    let shaders: Vec<BlockId> = mesh.geoms.iter().map(|g| add_shader(b, &g.texture, g.kind, &g.normal)).collect();
     let mut pa = W::new();
     for &s in &shaders {
         pa.ptr(Some(s));

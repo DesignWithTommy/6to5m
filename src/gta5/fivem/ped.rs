@@ -18,6 +18,7 @@
 #[path = "ped_groom.rs"]
 mod groom;
 
+use crate::gta5::ydr::uv_tangents;
 use crate::gta5::ped::{self as gp, ShaderDef, SkelBone, Skeleton, SkinDrawable, SkinGeom, SkinVert};
 use crate::gta5::{meta, ped_bones, ytd};
 use serde_json::json;
@@ -421,49 +422,6 @@ fn tri_area(p: &[[f32; 3]], idx: &[u32]) -> f64 {
             ((x[0] * x[0] + x[1] * x[1] + x[2] * x[2]) as f64).sqrt() * 0.5
         })
         .sum()
-}
-
-fn unit(v: [f32; 3]) -> [f32; 3] {
-    let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-    if l > 1e-12 { [v[0] / l, v[1] / l, v[2] / l] } else { [0.0, 0.0, 1.0] }
-}
-
-/// Per-vertex tangents from UV derivatives (w = bitangent sign).
-fn uv_tangents(p: &[[f32; 3]], nrm: &[[f32; 3]], uv: &[[f32; 2]], idx: &[u32]) -> Vec<[f32; 4]> {
-    let n = p.len();
-    let (mut t, mut bt) = (vec![[0f32; 3]; n], vec![[0f32; 3]; n]);
-    for tri in idx.chunks_exact(3) {
-        let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
-        if a >= n || b >= n || c >= n {
-            continue;
-        }
-        let e1 = [p[b][0] - p[a][0], p[b][1] - p[a][1], p[b][2] - p[a][2]];
-        let e2 = [p[c][0] - p[a][0], p[c][1] - p[a][1], p[c][2] - p[a][2]];
-        let (du1, dv1, du2, dv2) = (uv[b][0] - uv[a][0], uv[b][1] - uv[a][1], uv[c][0] - uv[a][0], uv[c][1] - uv[a][1]);
-        let d = du1 * dv2 - du2 * dv1;
-        if d.abs() < 1e-12 {
-            continue;
-        }
-        let r = 1.0 / d;
-        for k in 0..3 {
-            let sk = (e1[k] * dv2 - e2[k] * dv1) * r;
-            let tk = (e2[k] * du1 - e1[k] * du2) * r;
-            for i in [a, b, c] {
-                t[i][k] += sk;
-                bt[i][k] += tk;
-            }
-        }
-    }
-    (0..n)
-        .map(|i| {
-            let nn = nrm[i];
-            let d = t[i][0] * nn[0] + t[i][1] * nn[1] + t[i][2] * nn[2];
-            let tt = unit([t[i][0] - nn[0] * d, t[i][1] - nn[1] * d, t[i][2] - nn[2] * d]);
-            let c = [nn[1] * tt[2] - nn[2] * tt[1], nn[2] * tt[0] - nn[0] * tt[2], nn[0] * tt[1] - nn[1] * tt[0]];
-            let s = if c[0] * bt[i][0] + c[1] * bt[i][1] + c[2] * bt[i][2] < 0.0 { -1.0 } else { 1.0 };
-            [tt[0], tt[1], tt[2], s]
-        })
-        .collect()
 }
 
 /// Decode one 6m drawable into skinned geometry on the GTA V skeleton.
