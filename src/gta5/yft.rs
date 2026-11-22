@@ -19,6 +19,8 @@ pub type V3 = [f32; 3];
 pub type Q = [f32; 4];
 
 const VFT_FRAG: u32 = 1079456040;
+/// Drawable as a .ydr file root (ydr.rs VFT_FILE).
+const VFT_DRAWABLE_FILE: u32 = 1079456120;
 const VFT_FRAGDRAWABLE: u32 = 1080060872;
 const VFT_SKELETON: u32 = 1080114336;
 const VFT_SHADERGROUP: u32 = 1080113136;
@@ -937,4 +939,89 @@ pub fn tyre(r: f32, wd: f32, texture: &str, seg: usize) -> Geom {
         }
     }
     g
+}
+
+/// Standalone .ydr with a skeleton (rigid models bound to bones), e.g. a
+/// GTA V weapon: same shader group, skeleton and models as the fragment
+/// drawable, under a Drawable file root (208 bytes, CodeWalker Drawable).
+pub fn build_ydr_skel(name: &str, bones: &[Bone], lods: &[Vec<Model>; 4], lod_dist: [f32; 4]) -> Result<Vec<u8>, String> {
+    let nb = bones.len();
+    if nb == 0 || nb > 255 {
+        return Err(format!("{nb} bones (1..255 supported)"));
+    }
+    let mut b = Builder::new();
+    let root = b.reserve(Seg::Sys);
+    let mut p = W::new();
+    p.u32(0).u32(0).u8(128).u8(0).u16(0).u32(0).zeros(8 * 128);
+    let pages = b.add(Seg::Sys, p);
+    b.pages_info = Some(pages);
+    let mut shaders: Vec<(String, u8)> = Vec::new();
+    let mut ml: [Vec<M>; 4] = Default::default();
+    for (li, l) in lods.iter().enumerate() {
+        for m in l {
+            if m.geoms.is_empty() {
+                continue;
+            }
+            if m.bone >= nb {
+                return Err(format!("model bound to bone {} of {nb}", m.bone));
+            }
+            let geoms = m
+                .geoms
+                .iter()
+                .map(|gm| {
+                    let k = (gm.texture.clone(), gm.kind);
+                    let i = shaders.iter().position(|s| *s == k).unwrap_or_else(|| {
+                        shaders.push(k);
+                        shaders.len() - 1
+                    });
+                    (gm, i as u16)
+                })
+                .collect();
+            ml[li].push(M { bone: m.bone as u8, geoms });
+        }
+    }
+    if ml[0].is_empty() {
+        return Err("no high LOD models".into());
+    }
+    let sh: Vec<BlockId> = shaders.iter().map(|(t, k)| add_shader(&mut b, t, *k)).collect();
+    let mut pa = W::new();
+    for &s in &sh {
+        pa.ptr(Some(s));
+    }
+    let parr = b.add(Seg::Sys, pa);
+    let mut sg = W::new();
+    sg.u32(VFT_SHADERGROUP).u32(1).u64(0).ptr(Some(parr));
+    sg.u16(sh.len() as u16).u16(sh.len() as u16).u32(0).u64(0).u64(0);
+    sg.u32(64 / 16).u32(0).u64(0);
+    let sgid = b.add(Seg::Sys, sg);
+    let skel = add_skeleton(&mut b, bones);
+    let nm = b.string(name);
+    let pts: Vec<V3> = ml.iter().flatten().flat_map(|m| m.geoms.iter().flat_map(|(g, _)| g.positions.iter().copied())).collect();
+    let (lo, hi) = aabb(pts.iter().copied());
+    let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
+    let r = pts.iter().map(|p| len(sub(*p, c))).fold(0.0f32, f32::max);
+    let (models, heads, mlen) = add_models_block(&mut b, &ml)?;
+    let mut w = W::new();
+    w.u32(VFT_DRAWABLE_FILE).u32(1).ptr(Some(pages));
+    w.ptr(Some(sgid)).ptr(Some(skel));
+    w.v3(c).f32(r);
+    w.v3(lo).u32(NAN_BITS).v3(hi).u32(NAN_BITS);
+    for h in heads {
+        match h {
+            Some(o) => w.ptr_at(Some(models), o),
+            None => w.u64(0),
+        };
+    }
+    for d in lod_dist {
+        w.f32(d);
+    }
+    let mask = |i: usize| if heads[i].is_some() { 0xFF01 } else { 0 };
+    w.u32(mask(0)).u32(mask(1)).u32(mask(2)).u32(mask(3));
+    w.u64(0).u16(0).u16(mlen.div_ceil(16) as u16).u32(0);
+    w.ptr(Some(models));
+    debug_assert_eq!(w.len(), 0xA8);
+    w.ptr(Some(nm)).u64(0).u16(0).u16(0).u32(0).u64(0).u64(0);
+    debug_assert_eq!(w.len(), 208);
+    b.set(root, w);
+    b.build(165)
 }

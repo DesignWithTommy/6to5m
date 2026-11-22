@@ -59,7 +59,7 @@ usage: 6ixpack fivem vehicle <name> --game <dir> --out <resource dir> [options]
   --config <n>         which 6m spawn configuration to take rim, tyre and colour from (default 0)
   --list               list 6m vehicle fragments in the index and exit";
 
-const MISSING: &str = "r6m_missing";
+pub(super) const MISSING: &str = "r6m_missing";
 const TYRE: &str = "r6m_tyre";
 const PAINT: &str = "r6m_paint";
 /// `diffusetex` on 6m vehicle shaders: an engine-default white that the
@@ -145,14 +145,21 @@ fn parse(args: &[String]) -> Result<Opts, String> {
 
 /// Keyed textures from the ttdb pools / TTPF stores, cached as DDS under
 /// <work>/fivem_tex_cache_v{N}/<hash>.dds (same cache and checks as buildings).
-struct Pools {
+pub(super) struct Pools {
     game: PathBuf,
     catalog: Option<crate::texture::Catalog>,
     maps: HashMap<PathBuf, Mmap>,
-    dir: PathBuf,
+    pub(super) dir: PathBuf,
 }
 
 impl Pools {
+    /// Pools over <game>/data/ttdb + TTPF stores, cache under <work>.
+    pub(super) fn new(game: &Path, work: &Path) -> Result<Pools, String> {
+        let dir = work.join(format!("fivem_tex_cache_v{}", sixng_core::bcpack::BCPACK_DECODER_VERSION));
+        fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let ttdb = game.join("data").join("ttdb");
+        Ok(Pools { game: game.to_path_buf(), catalog: crate::texture::Catalog::build(&ttdb).map_err(|e| eprintln!("{}: {e}", ttdb.display())).ok(), maps: HashMap::new(), dir })
+    }
     fn path(&self, hash: u32) -> PathBuf {
         self.dir.join(format!("{hash:08x}.dds"))
     }
@@ -311,7 +318,7 @@ fn rgba_dds(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
 }
 
 /// Solid-colour A8R8G8B8 texture with a full mip chain.
-fn solid(name: &str, bgra: [u8; 4], size: usize) -> Tex {
+pub(super) fn solid(name: &str, bgra: [u8; 4], size: usize) -> Tex {
     let mut data = Vec::new();
     let (mut w, mut levels) = (size, 0u8);
     while w >= 1 {
@@ -337,9 +344,9 @@ fn kind_of(bucket: u8) -> u8 {
 
 /// One decoded source fragment: skeleton, and per LOD a list of
 /// (6m bone index, model-space geometry) parts.
-struct Source {
-    bones: Vec<drawable::Bone>,
-    lods: Vec<Vec<(usize, Geom)>>,
+pub(super) struct Source {
+    pub(super) bones: Vec<drawable::Bone>,
+    pub(super) lods: Vec<Vec<(usize, Geom)>>,
     groups: Vec<PGroup>,
 }
 
@@ -375,8 +382,8 @@ fn phys_groups(r: &Resource, bones: &[drawable::Bone]) -> Vec<PGroup> {
         .collect()
 }
 
-fn load_source(game: &Path, e: &Entry, pools: &mut Pools, texs: &mut Vec<String>, missing: &mut Vec<String>) -> Result<Source, String> {
-    let r = Resource::load(&game.join("levels.rpf"), e).map_err(|x| x.to_string())?;
+pub(super) fn load_source(rpf: &Path, e: &Entry, pools: &mut Pools, texs: &mut Vec<String>, missing: &mut Vec<String>) -> Result<Source, String> {
+    let r = Resource::load(rpf, e).map_err(|x| x.to_string())?;
     let info = drawable::describe(&r);
     let slice = |i: usize| {
         let b = &info.buffers[i];
@@ -503,7 +510,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     let mut load = |e: Option<&Entry>| -> Result<Option<Source>, String> {
         e.map(|e| {
             eprintln!("vehicle: decoding {} ({})", e.name.as_deref().unwrap_or("?"), e.id);
-            load_source(&o.game, e, &mut pools, &mut texs, &mut missing)
+            load_source(&o.game.join("levels.rpf"), e, &mut pools, &mut texs, &mut missing)
         })
         .transpose()
     };

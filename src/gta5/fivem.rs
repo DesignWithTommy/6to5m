@@ -26,6 +26,7 @@ mod geom;
 pub mod split;
 mod terrain;
 mod vehicles;
+mod weapons;
 pub mod verify;
 
 use memmap2::Mmap;
@@ -69,7 +70,8 @@ usage: 6ixpack fivem build --game <dir> --out <resource dir> [options]
   --bake               whole-map pass (no --bbox) that only fills the output cache
                        <work>/fivem_out_cache; --out defaults to <work>/fivem_bake.
                        Later regional builds then hardlink from the cache
-also: 6ixpack fivem vehicle <name> --game <dir> --out <dir>   (one 6m vehicle -> FiveM vehicle resource; --help)";
+also: 6ixpack fivem vehicle <name> --game <dir> --out <dir>   (one 6m vehicle -> FiveM vehicle resource; --help)
+      6ixpack fivem weapon <name|all> --game <dir> --out <dir>  (6m weapons -> FiveM weapon resource; --help)";
 
 /// Per-stage output versions: bump only the one whose writer changed, so
 /// other outputs stay cached (each goes into its own outputs' fingerprints).
@@ -364,6 +366,7 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
         Some("build") => {}
         Some("ped") => return ped::run(&args[1..]),
         Some("vehicle") => return vehicles::run(&args[1..]),
+        Some("weapon") => return weapons::run(&args[1..]),
         _ => {
             println!("{USAGE}");
             return Ok(());

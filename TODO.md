@@ -28,6 +28,12 @@ Next, from the FiveM port's requests:
 - LOD/SLOD drawables without a model link (unnamed hash) not converted.
 - Airport: roads missing, far-apron floating poles, canopy cutout look — uninvestigated.
 
+## fivem weapon (`src/gta5/fivem/weapons.rs`, `yft::build_ydr_skel`)
+
+- [ ] Test in game (give WEAPON_W_PI_SCORPIO_01): grip/muzzle sockets, hand IK, animations.
+- [ ] Missing weapon textures (24 of 26 on w_pi_scorpio_01): find the store that holds them.
+- [ ] Real stats from 6m weapon data instead of GTA V class defaults; component variants (mags, sights) as GTA V components.
+
 ## fivem vehicle (`src/gta5/fivem/vehicles.rs`, `src/gta5/yft.rs`)
 Loads in CodeWalker; not yet tested in game.
 - Physics: one box child per exterior 6m physics group (doors, bonnet, boot, bumpers, windows, wings, mirrors, plates) with 6m collider masses, composite BVH past 5 children; joint limits are left to GTA V (6m vehicle fragments have no limits block). Unverified in game whether doors open; boxes are AABBs of each part, not the 6m hull colliders.

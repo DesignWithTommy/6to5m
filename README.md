@@ -21,6 +21,7 @@ cargo build --release                       # -> target/release/6ixpack.exe (pur
 6ixpack levels.rpf out/                     # extract an RPF9 archive
 6ixpack fivem build --game <GTA VI dir> --out <resource> --bbox x0,y0,x1,y1   # map area -> FiveM resource
 6ixpack fivem vehicle chino --game <GTA VI dir> --out <resource>              # one vehicle -> FiveM vehicle resource
+6ixpack fivem weapon w_pi_scorpio_01 --game <GTA VI dir> --out <resource>       # guns -> FiveM add-on weapon resource (`all` for every gun)
 6ixpack fivem ped cs_lucia --game <GTA VI dir> --out <resource>               # one ped -> FiveM ped resource (--list to preview)
 ```
 
@@ -33,6 +34,7 @@ What works today:
 - **Models**: drawables and fragments to OBJ/GLB.
 - **GTA V / FiveM** (`6ixpack fivem build`): a ready resource for any map area.
   - `6ixpack fivem vehicle <name>`: a 6m vehicle (`<name>`, `_mid`, `_hi` fragments) to `<model>.yft`, `<model>_hi.yft` and `<model>.ytd` (GTA V bone names, skeleton pruned to 255 bones, rigid parts per bone, box physics for chassis and 4 wheels), plus vehicles/handling/carvariations/carcols meta and fxmanifest. With `6ixpack sixng vehicles --out <work>` data it uses the real rim, tyre, wheelScale and body colour. Doors stay shut.
+  - `6ixpack fivem weapon <name|all>`: 6m modular guns (data.rpf base `w_<class>_<name>_<nn>` plus its parts, assembled at the `WAP_`/`AAP_` sockets with the first variant per slot) to `<model>.ydr` (GTA V weapon skeleton: Gun_Root, Gun_Muzzle/Nuzzle, Gun_GripR/L, Gun_VFX_Eject, WAPClip/Supp/Scop/FlshLasr/Grip) and `<model>.ytd`, plus weaponarchetypes/weapons/weaponanimations meta and fxmanifest. Stats, anims and audio are GTA V defaults per class; melee and thrown items are skipped. Many weapon textures are still missing (grey).
   - `6ixpack fivem ped <name>`: every packs.rpf drawable named `<name>_*` becomes a component (`head_000_u`, `uppr_000_u`, `jbib_000_u`, ...) of `<ped>.ydd`, skinned onto `<ped>.yft`, the standard GTA V ped skeleton (SKEL_ROOT, GTA V bone names and tags) with the 6m joint positions; plus `<ped>.ytd`, `<ped>.ymt`, peds.meta and fxmanifest. Diffuse only (flat normal/spec maps), one texture per drawable. Parts follow SixNG's default look (`--all` for every part). `--hair` / `--beard <groom>` add strand-hair grooms as cards; `--grooms` lists the grooms that fit the head.
   - Terrain tiles, water and buildings/props as ydr, with ytd textures re-encoded to DXT1/DXT5.
   - Textures picked from every material slot until one is a real colour map (normal, mask and flat maps rejected); texture size capped by prop size (128 px for small clutter).
@@ -70,7 +72,7 @@ What works today:
 - [ ] Fragments with physics (currently static)
 - [x] Peds to GTA V: `6ixpack fivem ped <name>` (skinned ydd components, yft skeleton retargeted to the GTA V ped skeleton, ytd, ymt, peds.meta; loads in CodeWalker, in-game test pending)
 - [x] Vehicles to GTA V: `6ixpack fivem vehicle <name>` (yft + vehicles/handling/carvariations/carcols metas; in-game test pending)
-- [ ] Weapons to GTA V formats
+- [x] Weapons to GTA V formats: `6ixpack fivem weapon <name|all>` (ydr/ytd + weapons.meta; in-game test pending)
 - [ ] Verify the gtxd.meta parent chain in game
 - [ ] Road paths to .ynd (AI traffic), from `sixng paths`
 - [ ] Navmesh to .ynv (ped/AI pathing)
@@ -103,6 +105,7 @@ Pure Rust, no C code, DLLs or external tools. `cargo build --release` → `targe
 6ixpack convert <kind> ...              GTA V files: ytd, ydr, ybn, ymap, ytyp
 6ixpack fivem build --game .. --out ..   ready FiveM map resource (terrain, buildings, water)
 6ixpack fivem vehicle <name> ..          FiveM vehicle resource from one 6m vehicle
+6ixpack fivem weapon <name|all> ..       FiveM weapon resource from 6m guns
 6ixpack fivem ped <name> ..              FiveM ped resource from one 6m ped (cs_lucia, NPCs)
 6ixpack mcp                             stdio MCP server: extract, audio, texture, model, convert, sixng, fivem tools
 ```
