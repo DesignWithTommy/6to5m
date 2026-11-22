@@ -11,7 +11,7 @@ use std::collections::HashMap;
 
 /// One geometry (one shader). `colours` are RGBA with R in the low byte
 /// (written to the vertex as bytes R,G,B,A). `uvs` are final (already
-/// V-flipped). `indices` are triangles; at most 65535 vertices.
+/// DirectX top-left, not flipped). `indices` are triangles; at most 65535 vertices.
 #[derive(Clone, Default, Debug)]
 pub struct Geom {
     pub positions: Vec<[f32; 3]>,

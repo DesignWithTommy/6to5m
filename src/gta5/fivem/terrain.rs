@@ -207,7 +207,8 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
                 let y0 = ((lo[1] / 1024.0 + 0.01).floor()) * 1024.0;
                 let tex_name = format!("t6m_g{i:03}");
                 let tex = bake(&tex_name, &t.verts, &t.tris, x0, y0);
-                let uvs: Vec<[f32; 2]> = t.verts.iter().map(|v| [(v[0] - x0) / 1024.0, (v[1] - y0) / 1024.0]).collect();
+                // image row 0 is north (see the rasteriser): v grows southward
+                let uvs: Vec<[f32; 2]> = t.verts.iter().map(|v| [(v[0] - x0) / 1024.0, 1.0 - (v[1] - y0) / 1024.0]).collect();
                 let idx: Vec<u32> = t.tris.iter().flatten().copied().collect();
                 let mut mesh = Mesh { name: name.clone(), geoms: Vec::new() };
                 push_geoms(&mut mesh.geoms, &t.verts, &idx, Some(&uvs), None, &tex_name, 0);

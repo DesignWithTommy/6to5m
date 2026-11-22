@@ -1,5 +1,5 @@
 //! Triangle lists -> ydr geometries (obj2ydrxml.py semantics): area-weighted
-//! normals over source vertices, V flipped, vertex colours with alpha 255,
+//! normals over source vertices, UVs as stored (DirectX top-left), vertex colours as GTA V ambient,
 //! split so no geometry exceeds 65535 vertices.
 
 use crate::gta5::ydr::Geom;
@@ -80,9 +80,17 @@ pub fn push_geoms_n(out: &mut Vec<Geom>, pos: &[V3], idx: &[u32], normals: Optio
                 let s = i as usize;
                 let nn = normals.filter(|v| v.len() == n).map_or_else(|| unit(nrm[s]), |v| unit(v[s]));
                 let p = [pos[s][0] + nn[0] * lift, pos[s][1] + nn[1] * lift, pos[s][2] + nn[2] * lift];
-                let col = colours.map_or(0xFFFF_FFFF, |c| c[s] | 0xFF00_0000);
+                // 6m COLOR0: r = baked occlusion, g ~0.05 (unknown), b = tint
+                // palette index, a = layer-2 weight. GTA V reads r/g as natural
+                // and artificial ambient scale, so raw g made every building
+                // black under artificial light. Keep r as both, b/a = 255.
+                let col = colours.map_or(0xFFFF_FFFF, |c| {
+                    let r = c[s] & 0xFF;
+                    r | r << 8 | 0xFFFF_0000
+                });
+                // 6m UVs are DirectX top-left like GTA V: no flip (the old
+                // obj2ydrxml 1-v flip assumed OBJ bottom-left input).
                 let uv = uvs.map_or([0.0, 0.0], |u| u[s]);
-                let uv = [uv[0], 1.0 - uv[1]];
                 let key = (
                     p.map(|x| (x * 1000.0).round() as i32),
                     nn.map(|x| (x * 127.0).round() as i8),
