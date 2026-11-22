@@ -20,6 +20,7 @@
 //!   Not verified in game; `--conjugate-rot` writes the conjugate instead.
 
 mod buildings;
+pub mod ped;
 mod collision;
 mod geom;
 pub mod split;
@@ -280,8 +281,9 @@ fn resolve_placements(p: &std::path::Path) -> Result<PathBuf, String> {
 pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
     match args.first().map(String::as_str) {
-        Some("vehicle") => return vehicles::run(&args[1..]),
         Some("build") => {}
+        Some("ped") => return ped::run(&args[1..]),
+        Some("vehicle") => return vehicles::run(&args[1..]),
         _ => {
             println!("{USAGE}");
             return Ok(());

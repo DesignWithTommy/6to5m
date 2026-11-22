@@ -35,6 +35,13 @@ Loads in CodeWalker; not yet tested in game.
 - Shaders are default/alpha only: add vehicle_paint shaders so carcols colours apply, plus glass, lights, dirt and damage.
 - Handling, seats, layout and meta are sedan defaults; map 6m vehicle data when it is decoded.
 
+## fivem ped (`src/gta5/fivem/ped.rs`, `src/gta5/ped.rs`, `src/gta5/ped_bones.rs`)
+Loads in CodeWalker; not yet tested in game.
+- Textures: diffuse only, the one on the largest geometry; normal and spec maps are flat. Some clothing textures are not in TTPF ("not found"), so those drawables get grey.
+- Some clothing vertices name bones in neither the 6m ped skeleton nor the drawable (e.g. cs_lucia tshirtcrop: 6681 influences dropped). Find those palette bones.
+- Slots come from name keywords; 6m pieces with no GTA V slot go to accs. No props, no texture variations, no base body under clothing.
+- Facial bones keep GTA V reference positions (only 78 of 101 bones are placed from 6m).
+
 ## fivem features (from the FiveM migration)
 - Road paths to .ynd (AI traffic), from `sixng paths`
 - Navmesh to .ynv (ped/AI pathing)

@@ -671,6 +671,131 @@ pub fn build_ytyp(t: &MapTypes) -> Result<Vec<u8>, String> {
     mb.build()
 }
 
+// ---------------------------------------------------------------- ped ymt
+
+const CPEDVARIATIONINFO: SInfo = SInfo { name: 0x16760659, key: 0xf0423679, unk8: 0x300, size: 112, entries: CPEDVARIATIONINFO_E };
+const CPEDVARIATIONINFO_E: &[(u32, i32, u8, u8, i16, u32)] = &[
+    (0x49a0e46c, 0, 0x01, 0, 0, 0x00000000),
+    (0xf3928a70, 1, 0x01, 0, 0, 0x00000000),
+    (0x364f037b, 2, 0x01, 0, 0, 0x00000000),
+    (0x12caf91f, 3, 0x01, 0, 0, 0x00000000),
+    (0x00000100, 0, 0x11, 0, 0, 0x00000000),
+    (0xb29be228, 4, 0x50, 0, 4, 0x0000000c),
+    (0x00000100, 0, 0x05, 0, 0, 0xd2e926f4),
+    (0xe2489c4f, 16, 0x52, 0, 6, 0x00000000),
+    (0x00000100, 0, 0x05, 0, 0, 0x0f1763df),
+    (0x7f049899, 32, 0x52, 0, 8, 0x00000000),
+    (0x00000100, 0, 0x05, 0, 0, 0x6f419fc9),
+    (0x23532a3b, 48, 0x52, 0, 10, 0x00000000),
+    (0x8590add8, 64, 0x05, 0, 0, 0xaa681042),
+    (0x8b566ea2, 104, 0x4a, 0, 0, 0x00000000),
+];
+const CPVCOMPONENTDATA: SInfo = SInfo { name: 0xd2e926f4, key: 0x78a5141f, unk8: 0x300, size: 24, entries: CPVCOMPONENTDATA_E };
+const CPVCOMPONENTDATA_E: &[(u32, i32, u8, u8, i16, u32)] = &[(0xc8f5438b, 0, 0x11, 0, 0, 0x00000000), (0x00000100, 0, 0x05, 0, 0, 0x5b7ef462), (0x68ac8351, 8, 0x52, 0, 1, 0x00000000)];
+const CPVDRAWBLDATA: SInfo = SInfo { name: 0x5b7ef462, key: 0x076536be, unk8: 0x300, size: 48, entries: CPVDRAWBLDATA_E };
+const CPVDRAWBLDATA_E: &[(u32, i32, u8, u8, i16, u32)] = &[
+    (0xaecfe243, 0, 0x11, 0, 0, 0x00000000),
+    (0xa7431fba, 1, 0x11, 0, 0, 0x00000000),
+    (0x00000100, 0, 0x05, 0, 0, 0x3dceca65),
+    (0x4a92222a, 8, 0x52, 0, 2, 0x00000000),
+    (0x92e68db3, 24, 0x05, 0, 0, 0x85559cf3),
+];
+const CPVCLOTHCOMPONENTDATA: SInfo = SInfo { name: 0x85559cf3, key: 0x1e55be07, unk8: 0x0, size: 24, entries: &[(0xa893a361, 0, 0x01, 0, 0, 0x00000000)] };
+const CPVTEXTUREDATA: SInfo = SInfo { name: 0x3dceca65, key: 0xfeac7fe2, unk8: 0x0, size: 3, entries: &[(0x6a6b87c3, 0, 0x11, 0, 0, 0x00000000), (0x36896d17, 1, 0x11, 0, 0, 0x00000000)] };
+const CCOMPONENTINFO: SInfo = SInfo { name: 0x6f419fc9, key: 0xdc2ba2d2, unk8: 0x200, size: 48, entries: CCOMPONENTINFO_E };
+const CCOMPONENTINFO_E: &[(u32, i32, u8, u8, i16, u32)] = &[
+    (0x2fd08cef, 0, 0x4a, 0, 0, 0x00000000),
+    (0xfc507d28, 4, 0x4a, 0, 0, 0x00000000),
+    (0x00000100, 0, 0x21, 0, 0, 0x00000000),
+    (0x07ae529d, 8, 0x50, 0, 2, 0x00000005),
+    (0x67d26872, 28, 0x15, 0, 0, 0x00000000),
+    (0x817af4d5, 32, 0x65, 0, 32, 0x00000000),
+    (0x72039cc8, 36, 0x65, 0, 32, 0x00000000),
+    (0x6032815c, 40, 0x64, 0, 16, 0x34b4a664),
+    (0x7e103c8b, 42, 0x13, 0, 0, 0x00000000),
+    (0xd12f579d, 44, 0x11, 0, 0, 0x00000000),
+    (0xfa1f27bf, 45, 0x11, 0, 0, 0x00000000),
+];
+const CPEDPROPINFO: SInfo = SInfo { name: 0xaa681042, key: 0x6ad7318b, unk8: 0x300, size: 40, entries: CPEDPROPINFO_E };
+const CPEDPROPINFO_E: &[(u32, i32, u8, u8, i16, u32)] = &[
+    (0x9ae1215f, 0, 0x11, 0, 0, 0x00000000),
+    (0x00000100, 0, 0x05, 0, 0, 0x05a2b494),
+    (0xe8a00d49, 8, 0x52, 0, 1, 0x00000000),
+    (0x00000100, 0, 0x05, 0, 0, 0x815d6e03),
+    (0x09ad30fa, 24, 0x52, 0, 3, 0x00000000),
+];
+const E_EPEDVARCOMP: EInfo = EInfo {
+    name: 0x34b4a664,
+    key: 0xcef3cd96,
+    entries: &[(0x1c6c1df7, -1), (0x451af524, 0), (0x2986ab03, 1), (0xadf45cf6, 2), (0xdcfd492a, 3), (0xc20348d4, 4), (0xa67e51a2, 5), (0x891ef1d1, 6), (0x5aa4d585, 7), (0xe01d3a0e, 8), (0x3eaf3c2a, 9), (0xd870de38, 10), (0x8da34b66, 11), (0x36e4e25a, 12)],
+};
+
+/// One drawable of a component ped: ePedVarComp slot (0..12) and its index
+/// within the slot (drawables of a slot are numbered 0..n).
+#[derive(Clone, Copy, Debug)]
+pub struct PedComponent {
+    pub slot: u8,
+    pub drawable: u8,
+}
+
+/// Ped variation .ymt (CPedVariationInfo) for drawables named
+/// `<slot>_<nnn>_u` with one `uni` texture each.
+pub fn build_ped_ymt(comps: &[PedComponent]) -> Result<Vec<u8>, String> {
+    let mut mb = MB::default();
+    mb.ensure(CPEDVARIATIONINFO.name);
+    let mut avail = [255u8; 12];
+    let mut cdata = W::new();
+    let mut k = 0u8;
+    for slot in 0..12u8 {
+        let mut ds: Vec<&PedComponent> = comps.iter().filter(|c| c.slot == slot).collect();
+        if ds.is_empty() {
+            continue;
+        }
+        ds.sort_by_key(|c| c.drawable);
+        avail[slot as usize] = k;
+        k += 1;
+        let mut dw = W::new();
+        for _ in &ds {
+            let tex = mb.add_item(CPVTEXTUREDATA.name, vec![0, 255, 0]);
+            dw.u8(if slot == 2 { 17 } else { 1 }).u8(0).zeros(6);
+            arr(&mut dw, tex, 1);
+            dw.u8(0).zeros(23); // clothData.ownsCloth
+        }
+        let dp = mb.add_item(CPVDRAWBLDATA.name, dw.b);
+        cdata.u8(ds.len() as u8).zeros(7);
+        arr(&mut cdata, dp, ds.len() as u16);
+    }
+    let np = (cdata.len() / 24) as u16;
+    let cp = mb.add_item(CPVCOMPONENTDATA.name, cdata.b);
+    let mut iw = W::new();
+    let mut ordered = comps.to_vec();
+    ordered.sort_by_key(|c| (c.slot, c.drawable));
+    let none = hash("none")?;
+    for c in &ordered {
+        iw.u32(none).u32(none).zeros(20).u32(0).u32(0).u32(0).u16(0).u16(0).u8(c.slot).u8(c.drawable).zeros(2);
+    }
+    let ip = mb.add_item(CCOMPONENTINFO.name, iw.b);
+    mb.einfo(&E_EPEDVARCOMP);
+    for s in [&CPVTEXTUREDATA, &CPVCLOTHCOMPONENTDATA, &CPVDRAWBLDATA, &CPVCOMPONENTDATA, &CCOMPONENTINFO, &CPEDPROPINFO, &CPEDVARIATIONINFO] {
+        mb.sinfo(s);
+    }
+    let mut w = W::new();
+    w.u8(0).u8(1).u8(0).u8(0);
+    for a in avail {
+        w.u8(a);
+    }
+    arr(&mut w, cp, np); // aComponentData3
+    arr(&mut w, 0, 0); // aSelectionSets
+    arr(&mut w, ip, ordered.len() as u16); // compInfos
+    w.u8(0).zeros(7); // propInfo.numAvailProps
+    arr(&mut w, 0, 0); // propInfo.aPropMetaData
+    arr(&mut w, 0, 0); // propInfo.aAnchors
+    w.u32(0).u32(0); // dlcName, pad
+    debug_assert_eq!(w.len(), 112);
+    mb.blocks[0].1.extend_from_slice(&w.b);
+    mb.build()
+}
+
 // ---------------------------------------------------------------- cli
 
 /// `ymap <in.json> <out.ymap> [types.json]` | `ytyp <in.json> <out.ytyp>`.

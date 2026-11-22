@@ -3,6 +3,8 @@
 
 pub mod fivem;
 pub mod meta;
+pub mod ped;
+pub mod ped_bones;
 pub mod rsc;
 pub mod ybn;
 pub mod ydr;
