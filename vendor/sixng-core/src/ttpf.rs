@@ -546,8 +546,21 @@ pub fn global(game_root: &Path) -> &'static TtpfSet {
 
 /// BCPack preset history fitted to these stores, cached under
 /// `%LOCALAPPDATA%/sixng` (keyed by the stores' names and sizes) since a fit
-/// takes about a minute. Game-derived: never shipped.
+/// takes about a minute; the shipped copy below is tried first.
+/// Fitted preset history shipped with the crate (fitted on the retail
+/// stores), and the `BCPACK_HISTORY_VERSION` it was fitted with: used while
+/// the two match, so a fresh machine skips calibration; after a version bump
+/// the stale copy is ignored until it is refitted (`bcprobe calib
+/// data/bcpack-history-v<N>.bin`, then update both lines).
+const EMBEDDED_HISTORY: &[u8] = include_bytes!("../data/bcpack-history-v1.bin");
+const EMBEDDED_HISTORY_VERSION: u32 = 1;
+
 pub fn cached_history(set: &TtpfSet) -> crate::bcpack::History {
+    if EMBEDDED_HISTORY_VERSION == crate::bcpack::BCPACK_HISTORY_VERSION {
+        if let Some(h) = crate::bcpack::History::from_bytes(EMBEDDED_HISTORY) {
+            return h;
+        }
+    }
     use std::hash::{Hash, Hasher};
     let mut hs = std::collections::hash_map::DefaultHasher::new();
     for s in &set.stores {

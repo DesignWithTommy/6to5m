@@ -117,6 +117,7 @@ Built on the work of:
 - **dexyfex** — [CodeWalker](https://github.com/dexyfex/CodeWalker) (MIT): GTA V resource formats (RSC7, ytd, ydr, ybn, ymap/ytyp), ported to Rust.
 - **Ahmet Dedeler** — [bcpack-rs](https://github.com/Ahmet-Dedeler/bcpack-rs) (MIT/Apache-2.0): BCPack rANS lanes and BC1 decoder (git dependency).
 - **ItsNotRexed** — [Leonida](https://github.com/ItsNotRexed/Leonida) (GPL-3.0): clean-room BCPack BC3/BC4/BC5/BC6H/BC7 rebuilders and tables, and the pool self-calibrator, ported in `vendor/sixng-core/src/bcpack*.rs`.
+  Ships a fitted BCPack history (`vendor/sixng-core/data/bcpack-history-v1.bin`, embedded at build) so fresh machines skip calibration while `BCPACK_HISTORY_VERSION` matches.
 - **R0Y00** — [Xbox2Windows](https://github.com/R0Y00/Xbox2Windows) (MIT): BCPack BC7 mode-6 golden test vector.
 - **TrinitronClient** — [GTA6-Asset-Info](https://github.com/TrinitronClient/GTA6-Asset-Info) (GPL-3.0, docs): MLO portal, tint palette and format references.
 - **Sollumz** — [Sollumz](https://github.com/Sollumz/Sollumz) (GPL-3.0): GTA V ped bone ids and yft/ytyp/meta format reference.
