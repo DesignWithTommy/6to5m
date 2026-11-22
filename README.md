@@ -1,6 +1,6 @@
 # 6to5m
 
-GTA VI (6m) to GTA V / FiveM (5m) toolkit: extract RPF9 assets and convert map areas into ready FiveM resources. The binary is `6ixpack`.
+GTA VI (Xbox Series X|S version) to GTA V / FiveM toolkit: extract RPF9 assets and convert map areas into ready FiveM resources. The binary is `6ixpack`.
 
 ## Status
 
@@ -34,7 +34,7 @@ What works today:
 - [ ] Instanced batches (grass, vegetation) to ymap grass instance lists
 - [ ] Minimap texture and zone names
 - [ ] Split output into several resources by region/size (the 2 km airport alone is 5.2 GB)
-- [ ] Coordinate offset option: 6m reaches y 9474, past GTA V's ~±8000 limit
+- [ ] Coordinate offset option: GTA VI's map reaches y 9474, past GTA V's ~±8000 limit
 - [ ] Los Santos removal in Rust: stub ymaps/ybns for vanilla _citye/_cityw/_hills, packing the ~11k ybn stubs into fewer files
 
 ## Contributing

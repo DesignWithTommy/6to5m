@@ -8,12 +8,12 @@ Open gaps found:
 - Terrain tile numbering differs from the Python run (153 vs 158 tiles).
 - Nothing is checked in game yet; quaternion convention unverified (`--conjugate-rot`).
 
-Next, from the 6m-port session's requests:
+Next, from the FiveM port's requests:
 
 1. `6ixpack fivem build --out <res> [--bbox ..] [--name ..]`: writes stream/ (ydr/ybn/ytd/ytyp/ymap), fxmanifest.lua (this_is_a_map, DLC_ITYP_REQUEST, WATER_FILE) and water.xml. Incremental: skip outputs that are up to date.
 2. Reload every written file in Rust and report counts (verts, polys, textures); fail loudly on a bad file.
 3. Shared txds: dedupe textures by key, group them per area/name family, cap each ytd at ~48 MB, set the ytyp textureDictionary, use a placeholder for keys that don't resolve, keep full mip chains.
-4. Materials: map 6m shader params to GTA V shaders (normal_spec, cutout/decal, terrain_cb_w_4lyr with vertex-colour weights), driven by the `texture-gaps` and `shaders` census.
+4. Materials: map GTA VI shader params to GTA V shaders (normal_spec, cutout/decal, terrain_cb_w_4lyr with vertex-colour weights), driven by the `texture-gaps` and `shaders` census.
 5. Placements: put interior- and group-local entities in world space (or emit MLO ytyp), keep the LOD chain from lod-links (parentIndex/numChildren), split ymaps spatially with correct extents, verify the quaternion convention (GTA V may store the inverse) against a known placement.
 6. Collision: sixng collision → ybn with GTA V material ids from surface categories, one ybn per map cell.
 7. Limits: names < 64 chars (hash fallback), ≤ 65k verts per geometry, drawable size caps, archetype bounds from the mesh.
@@ -28,12 +28,12 @@ Next, from the 6m-port session's requests:
 - LOD/SLOD drawables without a model link (unnamed hash) not converted.
 - Airport: roads missing, far-apron floating poles, canopy cutout look — uninvestigated.
 
-## fivem features (from the 5m migration)
+## fivem features (from the FiveM migration)
 - Road paths to .ynd (AI traffic), from `sixng paths`
 - Navmesh to .ynv (ped/AI pathing)
 - Lights to ymap LODLights / DistantLODLights (night lighting)
 - Instanced batches (grass, vegetation) to ymap grass instance lists
 - Minimap texture and zone names
 - Split output into several resources by region/size (the 2 km airport alone is 5.2 GB)
-- Coordinate offset option: 6m reaches y 9474, past GTA V's ~±8000 limit
+- Coordinate offset option: GTA VI's map reaches y 9474, past GTA V's ~±8000 limit
 - Los Santos removal in Rust: stub ymaps/ybns for vanilla _citye/_cityw/_hills, packing the ~11k ybn stubs into fewer files
