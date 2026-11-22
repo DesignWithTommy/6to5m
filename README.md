@@ -121,6 +121,7 @@ Built on the work of:
 - **R0Y00** — [Xbox2Windows](https://github.com/R0Y00/Xbox2Windows) (MIT): BCPack BC7 mode-6 golden test vector.
 - **TrinitronClient** — [GTA6-Asset-Info](https://github.com/TrinitronClient/GTA6-Asset-Info) (GPL-3.0, docs): MLO portal, tint palette and format references.
 - **Sollumz** — [Sollumz](https://github.com/Sollumz/Sollumz) (GPL-3.0): GTA V ped bone ids and yft/ytyp/meta format reference.
+- **TomBox** (MIT/Apache-2.0): the vertex-normal stream layout (octahedral 10:10 / 8:8, from the game's mesh shader) in `tools/rage/meshlets.py`, ported in `src/model/decode.rs`.
 
 If you are one of these authors and want your credit, link or code changed or removed, open an issue.
 
