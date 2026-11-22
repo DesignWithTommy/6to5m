@@ -176,6 +176,12 @@ fn check_dds(p: &std::path::Path) -> Result<(), String> {
     }
 }
 
+/// Self-lit shader family (lamps, signs, screens; sixng-core material
+/// families, from SixNG 4a1bd3d): written as GTA V emissive.sps.
+fn is_emissive(shader_hash: u32) -> bool {
+    sixng_core::material::classify(&format!("{shader_hash:08x}"), &[])["class"] == "emissive"
+}
+
 fn kind_of(bucket: u8) -> u8 {
     match bucket {
         x if x & 0x04 != 0 => 2,
@@ -636,7 +642,7 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: us
         if tex != MISSING && !texs.contains(&tex) {
             texs.push(tex.clone());
         }
-        let kind = sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).map_or(0, |mat| kind_of(mat.bucket));
+        let kind = sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).map_or(0, |mat| if kind_of(mat.bucket) == 0 && is_emissive(mat.shader_hash) { 4 } else { kind_of(mat.bucket) });
         // Tint palette: bake palette entry (placement row, column = vertex colour
         // blue) into tinted copies of the colour texture, one per colour.
         let palette = sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).and_then(|mat| mat.textures.iter().find(|t| t.param == TINT_PALETTE)).and_then(|t| {

@@ -73,7 +73,7 @@ also: 6ixpack fivem vehicle <name> --game <dir> --out <dir>   (one 6m vehicle ->
 /// Per-stage output versions: bump only the one whose writer changed, so
 /// other outputs stay cached (each goes into its own outputs' fingerprints).
 pub const TEX_V: &str = "tex1";
-pub const YDR_V: &str = "ydr1";
+pub const YDR_V: &str = "ydr2";
 pub const YBN_V: &str = "ybn1";
 pub const TERRAIN_V: &str = "terrain1";
 /// Meta files (ymap/ytyp) and water.xml are rebuilt every run and compared

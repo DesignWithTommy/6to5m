@@ -84,29 +84,35 @@ fn add_shader(b: &mut Builder, texture: &str, kind: u8) -> BlockId {
         1 => ("alpha", 1u8),
         2 => ("decal", 2),
         3 => ("cutout", 3),
+        // self-lit (lamps, signs, screens): emissive.sps, opaque bucket
+        4 => ("emissive", 0),
         _ => ("default", 0),
     };
+    let mut vectors: Vec<(&str, [f32; 4])> = VECTORS.to_vec();
+    if kind == 4 {
+        vectors.insert(0, ("emissiveMultiplier", [1.0, 0.0, 0.0, 0.0]));
+    }
     let tex = add_texture_ref(b, texture);
-    let n = 1 + VECTORS.len();
+    let n = 1 + vectors.len();
     // ShaderParametersBlock: params (16 each), vector data, hashes, padding.
-    let base_size = 32 + 16 * n + 16 * VECTORS.len() + 4 * n;
+    let base_size = 32 + 16 * n + 16 * vectors.len() + 4 * n;
     let data_size = base_size + pad16(base_size);
     let pb = b.reserve(Seg::Sys);
     let mut w = W::new();
     // texture param: DataType 0, Unknown_1h = i + 2
     w.u8(0).u8(2).u16(0).u32(0).ptr(Some(tex));
     let mut voff = 16 * n;
-    for (i, _) in VECTORS.iter().enumerate() {
+    for (i, _) in vectors.iter().enumerate() {
         // vector params get 160.. counted from the last one
-        let unk = 160 + (VECTORS.len() - 1 - i);
+        let unk = 160 + (vectors.len() - 1 - i);
         w.u8(1).u8(unk as u8).u16(0).u32(0).ptr_at(Some(pb), voff as u64);
         voff += 16;
     }
-    for (_, v) in VECTORS {
-        w.v4(v);
+    for (_, v) in &vectors {
+        w.v4(*v);
     }
     w.u32(joaat("diffusesampler"));
-    for (name, _) in VECTORS {
+    for (name, _) in &vectors {
         w.u32(joaat(&name.to_ascii_lowercase()));
     }
     w.zeros(32 + data_size * 4);
@@ -117,7 +123,7 @@ fn add_shader(b: &mut Builder, texture: &str, kind: u8) -> BlockId {
     w.ptr(Some(pb));
     w.u32(joaat(sname)).u32(0);
     w.u8(n as u8).u8(bucket).u16(32768);
-    w.u16((16 * n + 16 * VECTORS.len()) as u16).u16(data_size as u16);
+    w.u16((16 * n + 16 * vectors.len()) as u16).u16(data_size as u16);
     w.u32(joaat(&format!("{sname}.sps"))).u32(0);
     w.u32((1u32 << bucket) | 0xFF00).u16(0).u8(0).u8(1).u64(0);
     b.add(Seg::Sys, w)
