@@ -10,7 +10,7 @@
 //! (<work>/collision/levels/surface_categories.json). Without that file, or
 //! for an id it doesn't cover, the material is 0 (DEFAULT).
 
-use super::{sha, Ctx, TOOL};
+use super::{sha, Ctx, YBN_V};
 use crate::gta5::ybn;
 use rayon::prelude::*;
 use serde_json::{json, Value};
@@ -96,7 +96,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         eprintln!("collision: indexing {} resources (once; cached in {})", cands.len(), ip.display());
         let found: Vec<(String, [[f32; 3]; 2])> = cands.par_iter().filter_map(|e| decode(&rpf, e, true).map(|c| (e.id.clone(), c.bbox))).collect();
         let mut f = fs::File::create(&ip)?;
-        writeln!(f, "{}", json!({"tool": TOOL, "entries": cands.len()}))?;
+        writeln!(f, "{}", json!({"tool": YBN_V, "entries": cands.len()}))?;
         for (id, b) in &found {
             writeln!(f, "{}", json!({"id": id, "bbox": b}))?;
             boxes.insert(id.clone(), *b);
@@ -118,7 +118,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         .par_iter()
         .map(|((cx, cy), es)| {
             let file = format!("t6m_col_{:02}_{:02}.ybn", cx + 50, cy + 50);
-            let fp = sha(&format!("{TOOL}|col|{mats_fp}|{}|{}", ctx.o.weapon_collision, es.iter().map(|e| e.id.as_str()).collect::<Vec<_>>().join(",")));
+            let fp = sha(&format!("{YBN_V}|col|{mats_fp}|{}|{}", ctx.o.weapon_collision, es.iter().map(|e| e.id.as_str()).collect::<Vec<_>>().join(",")));
             if let Some(info) = ctx.up_to_date(&file, &fp) {
                 ctx.emit(&file, &fp, info, None)?;
                 return Ok(());

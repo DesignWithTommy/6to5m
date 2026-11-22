@@ -65,9 +65,20 @@ usage: 6ixpack fivem build --game <dir> --out <resource dir> [options]
                        (rounded to 512 m cells) plus <name>_common (ytyps, LOD/SLOD
                        ymaps, shared txds, terrain, water); see ensure.cfg there
   --split-max <MB>     quarter any region resource bigger than this (default 1024)
+  --bake               whole-map pass (no --bbox) that only fills the output cache
+                       <work>/fivem_out_cache; --out defaults to <work>/fivem_bake.
+                       Later regional builds then hardlink from the cache
 also: 6ixpack fivem vehicle <name> --game <dir> --out <dir>   (one 6m vehicle -> FiveM vehicle resource; --help)";
 
-const TOOL: &str = "fivem-20";
+/// Per-stage output versions: bump only the one whose writer changed, so
+/// other outputs stay cached (each goes into its own outputs' fingerprints).
+pub const TEX_V: &str = "tex1";
+pub const YDR_V: &str = "ydr1";
+pub const YBN_V: &str = "ybn1";
+pub const TERRAIN_V: &str = "terrain1";
+/// Meta files (ymap/ytyp) and water.xml are rebuilt every run and compared
+/// byte for byte, so they need no version. MANIFEST_V is the manifest layout.
+const MANIFEST_V: &str = "fivem-m2";
 
 pub struct Opts {
     pub game: PathBuf,
@@ -86,6 +97,7 @@ pub struct Opts {
     pub max_tex: Option<u16>,
     pub split: Option<f32>,
     pub split_max: u64,
+    pub bake: bool,
 }
 
 impl Opts {
@@ -105,6 +117,16 @@ struct MEntry {
     fp: String,
     #[serde(default)]
     info: Value,
+    /// verify summary, so up-to-date files are not re-read
+    #[serde(default)]
+    summary: String,
+}
+
+/// Output cache sidecar (<key>.<ext>.json): info and verify summary.
+#[derive(Serialize, Deserialize)]
+struct CEntry {
+    info: Value,
+    summary: String,
 }
 
 #[derive(Default, Serialize)]
@@ -128,43 +150,88 @@ pub struct Ctx {
     pub layout: Mutex<split::Layout>,
     /// stream files emitted this run (for pruning stale outputs)
     emitted: Mutex<std::collections::HashSet<String>>,
+    /// <work>/fivem_out_cache
+    cache: PathBuf,
+    /// levels.rpf size and mtime, part of every cache key
+    input_stamp: String,
 }
 
 impl Ctx {
-    /// Manifest info for `file` when it is present, newer than the inputs and
-    /// was built from the same fingerprint.
+    fn cache_key(&self, fp: &str) -> String {
+        sha(&format!("{fp}|{}", self.input_stamp))
+    }
+
+    fn cache_path(&self, file: &str, key: &str) -> PathBuf {
+        let ext = file.rsplit_once('.').map_or("bin", |x| x.1);
+        self.cache.join(format!("{key}.{ext}"))
+    }
+
+    /// Manifest info for `file` when stream/ already holds it from the same
+    /// fingerprint and inputs; else, when the output cache has it, link it
+    /// into stream/ and return the cached info. None = convert it.
     pub fn up_to_date(&self, file: &str, fp: &str) -> Option<Value> {
         if self.o.force {
             return None;
         }
-        let e = self.manifest.lock().unwrap().files.get(file).cloned()?;
-        let m = fs::metadata(self.stream.join(file)).ok()?.modified().ok()?;
-        (e.fp == fp && m >= self.input_time).then_some(e.info)
+        let key = self.cache_key(fp);
+        if let Some(e) = self.manifest.lock().unwrap().files.get(file).cloned() {
+            if e.fp == key && self.stream.join(file).is_file() {
+                return Some(e.info);
+            }
+        }
+        let c = self.cache_path(file, &key);
+        let ce: CEntry = serde_json::from_slice(&fs::read(side(&c)).ok()?).ok()?;
+        if !c.is_file() {
+            return None;
+        }
+        link_into(&c, &self.stream.join(file)).ok()?;
+        self.manifest.lock().unwrap().files.insert(file.to_string(), MEntry { fp: key, info: ce.info.clone(), summary: ce.summary });
+        Some(ce.info)
     }
 
-    /// Write (or keep) a stream file, then re-parse it. `info` is stored in
-    /// the manifest for later incremental runs. Returns the verify summary.
+    /// Write (or keep) a stream file. New bytes are verified, stored in the
+    /// output cache and linked into stream/ unless stream/ already holds the
+    /// same bytes (left untouched: mtime and FXServer's hash stay valid).
+    /// `info` goes to the manifest for later runs. Returns the verify summary.
     pub fn emit(&self, file: &str, fp: &str, info: Value, bytes: Option<Vec<u8>>) -> Result<String, String> {
         let path = self.stream.join(file);
-        let status = match &bytes {
+        let meta = fp == "meta";
+        let key = if meta { "meta".to_string() } else { self.cache_key(fp) };
+        let (status, summary, len) = match bytes {
             Some(b) => {
                 if file.len() > 63 + 5 {
                     return Err(format!("{file}: name too long"));
                 }
-                let tmp = path.with_extension("tmp");
-                fs::write(&tmp, b).and_then(|_| fs::rename(&tmp, &path)).map_err(|e| format!("{}: {e}", path.display()))?;
-                "written"
+                let summary = verify::verify(file, &b)?;
+                let same = fs::metadata(&path).is_ok_and(|m| m.len() == b.len() as u64) && fs::read(&path).is_ok_and(|x| x == b);
+                if meta {
+                    if !same {
+                        write_atomic(&path, &b).map_err(|e| format!("{}: {e}", path.display()))?;
+                    }
+                } else {
+                    let c = self.cache_path(file, &key);
+                    write_atomic(&c, &b).map_err(|e| format!("{}: {e}", c.display()))?;
+                    let j = serde_json::to_vec(&CEntry { info: info.clone(), summary: summary.clone() }).unwrap();
+                    write_atomic(&side(&c), &j).map_err(|e| format!("{}: {e}", c.display()))?;
+                    if !same {
+                        link_into(&c, &path).map_err(|e| format!("{}: {e}", path.display()))?;
+                    }
+                }
+                (if same { "unchanged" } else { "written" }, summary, b.len() as u64)
             }
-            None => "up-to-date",
+            None => {
+                let known = self.manifest.lock().unwrap().files.get(file).filter(|e| e.fp == key && !e.summary.is_empty()).map(|e| e.summary.clone());
+                let len = fs::metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?.len();
+                let summary = match known {
+                    Some(s) => s,
+                    None => verify::verify(file, &fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?)?,
+                };
+                ("up-to-date", summary, len)
+            }
         };
-        let data = match bytes {
-            Some(b) => b,
-            None => fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?,
-        };
-        let summary = verify::verify(file, &data)?;
         self.emitted.lock().unwrap().insert(file.to_string());
-        self.manifest.lock().unwrap().files.insert(file.to_string(), MEntry { fp: fp.to_string(), info });
-        self.report.lock().unwrap().outputs.push(json!({"file": file, "status": status, "bytes": data.len(), "verify": summary}));
+        self.manifest.lock().unwrap().files.insert(file.to_string(), MEntry { fp: key, info, summary: summary.clone() });
+        self.report.lock().unwrap().outputs.push(json!({"file": file, "status": status, "bytes": len, "verify": summary}));
         Ok(summary)
     }
 
@@ -216,6 +283,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
         max_tex: None,
         split: None,
         split_max: 1024,
+        bake: false,
     };
     let mut it = args.iter();
     let val = |it: &mut std::slice::Iter<String>, k: &str| it.next().cloned().ok_or(format!("{k} needs a value"));
@@ -240,9 +308,19 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "--force" => o.force = true,
             "--max-tex" => o.max_tex = Some(val(&mut it, a)?.parse().map_err(|e| format!("--max-tex: {e}"))?),
             "--split" => o.split = Some(val(&mut it, a)?.parse().map_err(|e| format!("--split: {e}"))?),
+            "--bake" => o.bake = true,
             "--split-max" => o.split_max = val(&mut it, a)?.parse().map_err(|e| format!("--split-max: {e}"))?,
             _ => return Err(format!("unknown argument {a}\n{USAGE}")),
         }
+    }
+    if o.bake {
+        if o.bbox.is_some() || o.name.is_some() {
+            return Err("--bake is a whole-map pass: drop --bbox / --name".into());
+        }
+        if o.out.as_os_str().is_empty() {
+            o.out = o.work.join("fivem_bake");
+        }
+        o.split = None;
     }
     if o.game.as_os_str().is_empty() || o.out.as_os_str().is_empty() {
         return Err(USAGE.into());
@@ -299,11 +377,15 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
     // SAFETY: read-only map; nothing writes the archive while we run.
     let levels = unsafe { Mmap::map(&lf) }?;
     let mut manifest: Manifest = fs::read(o.out.join(".fivem-manifest.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-    if manifest.tool != TOOL {
-        manifest = Manifest { tool: TOOL.into(), ..Default::default() };
+    if manifest.tool != MANIFEST_V {
+        // older manifest layout; outputs come back from the cache
+        manifest = Manifest { tool: MANIFEST_V.into(), ..Default::default() };
     }
     let layout = split::load(&o.out);
-    let ctx = Ctx { o, stream, levels, input_time, manifest: Mutex::new(manifest), report: Mutex::new(Report::default()), layout: Mutex::new(layout), emitted: Default::default() };
+    let cache = o.work.join("fivem_out_cache");
+    fs::create_dir_all(&cache)?;
+    let input_stamp = format!("{}:{}", lf.metadata()?.len(), input_time.duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
+    let ctx = Ctx { o, stream, levels, input_time, manifest: Mutex::new(manifest), report: Mutex::new(Report::default()), layout: Mutex::new(layout), emitted: Default::default(), cache, input_stamp };
     let part = |p: &str| ctx.o.only.iter().any(|x| x == p);
 
     let result = (|| -> Result<(), Box<dyn Error>> {
@@ -473,6 +555,24 @@ fn fxmanifest(ctx: &Ctx) -> Result<(), Box<dyn Error>> {
     }
     fs::write(ctx.o.out.join("fxmanifest.lua"), t)?;
     Ok(())
+}
+
+/// Sidecar json of a cache file.
+fn side(c: &Path) -> PathBuf {
+    let mut n = c.as_os_str().to_owned();
+    n.push(".json");
+    PathBuf::from(n)
+}
+
+/// Put `src` at `dst` as a hard link (copy when linking fails, e.g. across
+/// volumes), replacing what was there.
+pub fn link_into(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let tmp = dst.with_extension(format!("lnk{}", std::process::id()));
+    let _ = fs::remove_file(&tmp);
+    if fs::hard_link(src, &tmp).is_err() {
+        fs::copy(src, &tmp)?;
+    }
+    fs::rename(&tmp, dst)
 }
 
 /// Write a file under the out dir's texture cache atomically.

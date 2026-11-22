@@ -7,7 +7,7 @@ use super::geom::{aabb, push_geoms, V3};
 mod interiors;
 #[path = "texopt.rs"]
 mod texopt;
-use super::{safe_name, sha, write_atomic, Ctx, TOOL};
+use super::{safe_name, sha, write_atomic, Ctx, TEX_V, YDR_V};
 use crate::gta5::{
     meta::{self, Archetype, Entity, MapData, MapTypes},
     ydr::{self, Mesh},
@@ -743,7 +743,7 @@ fn sixng_mesh(ctx: &Ctx, pools: &Pools, an: &str, e: &Entry) -> Result<Built, St
 fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entry>) -> Result<Option<Arch>, String> {
     let an = safe_name(name);
     let file = format!("{an}.ydr");
-    let fp = format!("{TOOL}|bld|{off:x}|{name}");
+    let fp = format!("{YDR_V}|bld|{off:x}|{name}");
     let from_info = |i: &Value| Arch {
         an: an.clone(),
         lo: f3(&i["lo"]),
@@ -930,7 +930,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
             let file = format!("{stem}.ytd");
             let mut sorted = list.clone();
             sorted.sort();
-            let fp = sha(&format!("{TOOL}|{}|{:?}|{}", texopt::TAG, ctx.o.max_tex, sorted.iter().map(|t| format!("{t}:{}:{}:{}", tsize(t), cap_of(t), alpha_tex.contains(t))).collect::<Vec<_>>().join(",")));
+            let fp = sha(&format!("{TEX_V}|{}|{:?}|{}", texopt::TAG, ctx.o.max_tex, sorted.iter().map(|t| format!("{t}:{}:{}:{}", tsize(t), cap_of(t), alpha_tex.contains(t))).collect::<Vec<_>>().join(",")));
             if ctx.up_to_date(&file, &fp).is_some() {
                 return ctx.emit(&file, &fp, json!({"textures": sorted.len()}), None);
             }

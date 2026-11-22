@@ -143,9 +143,9 @@ pub fn split(ctx: &Ctx, metres: f32, max_mb: u64) -> Result<(), Box<dyn Error>> 
         }
         // write
         let root = ctx.o.out.join(format!("[{base}]"));
-        if root.exists() {
-            fs::remove_dir_all(&root)?;
-        }
+        // synced in place: unchanged files keep their link (and mtime), so
+        // FXServer only rehashes resources whose files changed
+        fs::create_dir_all(&root)?;
         let mut names = Vec::new();
         let mut summary = Vec::new();
         let ytyps: Vec<&str> = files.iter().map(|f| f.0.as_str()).filter(|n| n.ends_with(".ytyp")).collect();
@@ -157,10 +157,17 @@ pub fn split(ctx: &Ctx, metres: f32, max_mb: u64) -> Result<(), Box<dyn Error>> 
             let dir = root.join(&name);
             let st = dir.join("stream");
             fs::create_dir_all(&st)?;
+            let want: BTreeSet<&str> = v.iter().map(|f| f.0.as_str()).collect();
+            for e in fs::read_dir(&st)?.flatten() {
+                if !want.contains(e.file_name().to_string_lossy().as_ref()) {
+                    fs::remove_file(e.path())?;
+                }
+            }
             for (f, _) in v {
                 let (src, dst) = (ctx.stream.join(f), st.join(f));
-                if fs::hard_link(&src, &dst).is_err() {
-                    fs::copy(&src, &dst)?;
+                let stamp = |p: &Path| fs::metadata(p).ok().map(|m| (m.len(), m.modified().ok()));
+                if stamp(&dst).is_none() || stamp(&dst) != stamp(&src) {
+                    super::link_into(&src, &dst)?;
                 }
             }
             let mut t = String::from("fx_version 'cerulean'\ngame 'gta5'\nthis_is_a_map 'yes'\n");
@@ -172,7 +179,7 @@ pub fn split(ctx: &Ctx, metres: f32, max_mb: u64) -> Result<(), Box<dyn Error>> 
                 }
                 let extra: Vec<&str> = ["water.xml", "gtxd.meta"].into_iter().filter(|f| ctx.o.out.join(f).exists()).collect();
                 for f in &extra {
-                    fs::copy(ctx.o.out.join(f), dir.join(f))?;
+                    write_if_changed(&dir.join(f), &fs::read(ctx.o.out.join(f))?)?;
                 }
                 if !extra.is_empty() {
                     t += &format!("files {{ {} }}\n", extra.iter().map(|f| format!("'{f}'")).collect::<Vec<_>>().join(", "));
@@ -186,7 +193,7 @@ pub fn split(ctx: &Ctx, metres: f32, max_mb: u64) -> Result<(), Box<dyn Error>> 
             } else {
                 t += &format!("dependency '{common}'\n");
             }
-            fs::write(dir.join("fxmanifest.lua"), t)?;
+            write_if_changed(&dir.join("fxmanifest.lua"), t.as_bytes())?;
             let bytes = size(v);
             let mb = bytes as f64 / 1048576.0;
             if bytes > cap {
@@ -204,11 +211,24 @@ pub fn split(ctx: &Ctx, metres: f32, max_mb: u64) -> Result<(), Box<dyn Error>> 
         }
         names.sort_by_key(|n| *n != common);
         let cfg: String = names.iter().map(|n| format!("ensure {n}\n")).collect();
-        fs::write(root.join("ensure.cfg"), cfg)?;
+        write_if_changed(&root.join("ensure.cfg"), cfg.as_bytes())?;
+        // resources from an earlier split layout
+        for e in fs::read_dir(&root)?.flatten() {
+            if e.path().is_dir() && !names.iter().any(|n| e.file_name().to_string_lossy() == n.as_str()) {
+                fs::remove_dir_all(e.path())?;
+            }
+        }
         // <out> itself must not be a resource any more, or FiveM loads both
         let _ = fs::remove_file(ctx.o.out.join("fxmanifest.lua"));
         eprintln!("split: {} resources in {} ({} m regions, cap {max_mb} MB)", names.len(), root.display(), top);
         ctx.report.lock().unwrap().outputs.push(json!({"file": format!("[{base}]"), "status": "split", "resources": summary}));
         return Ok(());
     }
+}
+
+fn write_if_changed(p: &Path, b: &[u8]) -> std::io::Result<()> {
+    if fs::read(p).is_ok_and(|x| x == b) {
+        return Ok(());
+    }
+    fs::write(p, b)
 }

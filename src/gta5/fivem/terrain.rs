@@ -6,7 +6,7 @@
 //! names match the Python output whatever --bbox selects.
 
 use super::geom::{aabb, push_geoms, V3};
-use super::{Ctx, TOOL};
+use super::{Ctx, TERRAIN_V};
 use crate::gta5::{
     meta::{self, Archetype, Entity, MapData, MapTypes},
     ybn,
@@ -193,7 +193,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
             let name = format!("t6m_terrain_{i:03}");
             let (verts, n_sunk) = &sunk[&i];
             let t = &Tile { off: t.off, child: t.child, verts: verts.clone(), tris: t.tris.clone() };
-            let fp = format!("{TOOL}|terrain|{:x}|{:x}|{}|{}|{:x}", t.off, t.child, t.verts.len(), n_sunk, t.verts.iter().fold(0u64, |h, v| h.rotate_left(5) ^ (v[2].to_bits() as u64)));
+            let fp = format!("{TERRAIN_V}|terrain|{:x}|{:x}|{}|{}|{:x}", t.off, t.child, t.verts.len(), n_sunk, t.verts.iter().fold(0u64, |h, v| h.rotate_left(5) ^ (v[2].to_bits() as u64)));
             let (ydr_f, ybn_f) = (format!("{name}.ydr"), format!("{name}.ybn"));
             let (lo, hi) = aabb(t.verts.iter());
             let c: V3 = std::array::from_fn(|k| (lo[k] + hi[k]) / 2.0);
