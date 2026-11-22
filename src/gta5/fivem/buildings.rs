@@ -1345,7 +1345,7 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
     }
     let (lo, hi) = aabb(mesh.geoms.iter().flat_map(|g| g.positions.iter()));
     let bytes = match entry.filter(|_| frag) {
-        Some(e) => super::frags::build_prop_yft(&mesh, super::frags::collider_mass(&ctx.o.game.join("levels.rpf"), e), 9998.0),
+        Some(e) => super::frags::build_prop_yft(&mesh, &super::frags::colliders(&ctx.o.game.join("levels.rpf"), e), 9998.0),
         None => ydr::build_ydr(&mesh, 9998.0, None),
     }
     .map_err(|e| format!("{file}: {e}"))?;

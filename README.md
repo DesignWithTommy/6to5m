@@ -71,13 +71,13 @@ What works today:
 - [x] Collision in 128 m cells, welded 5 cm and simplified per material (fa3e66f)
 - [x] Per-placement tint rows: placements with `tintValue` > 0 use an archetype variant `<name>__tint<row>`, shared by every placement with that row
 - [ ] Prop batch per-instance tint (`ba049770` +0x34 RGBA)
-- [x] Fragments with physics: fragment props become dynamic `.yft` (one rigid piece, box bound, 6m collider mass; breakable multi-part props stay one piece)
+- [x] Fragments with physics: fragment props become dynamic `.yft` (one rigid piece, one physics box per 6m collider placed by its group bone, 6m masses; non-box collider types use their bound box; breakable multi-part props stay one piece)
 - [x] Peds to GTA V: `6ixpack fivem ped <name>` (skinned ydd components, yft skeleton retargeted to the GTA V ped skeleton, ytd, ymt, peds.meta; loads in CodeWalker, in-game test pending)
 - [x] Vehicles to GTA V: `6ixpack fivem vehicle <name>` (yft + vehicles/handling/carvariations/carcols metas; in-game test pending)
 - [x] Weapons to GTA V formats: `6ixpack fivem weapon <name|all>` (ydr/ytd + weapons.meta; in-game test pending)
 - [ ] Verify the gtxd.meta parent chain in game
-- [ ] Road paths to .ynd (AI traffic), from `sixng paths`
-- [ ] Navmesh to .ynv (ped/AI pathing)
+- [x] Road paths to .ynd (AI traffic): `fivem build` part `paths`, whole 512 m node areas over the bbox, links only into written areas
+- [x] Navmesh to .ynv (ped/AI pathing): `fivem build` part `navmesh`, 6m tiles clipped into 150 m cells, decimated and merged under the 16k-polygon cap, edge adjacency across written cells
 - [ ] Lights to ymap LODLights / DistantLODLights (night lighting)
 - [ ] Instanced batches (grass, vegetation) to ymap grass instance lists
 - [ ] Minimap texture and zone names
