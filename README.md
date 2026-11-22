@@ -60,6 +60,8 @@ What works today:
 - [x] MLO portals decoded from 6m (`995072ca`) and entities attached to their rooms (`T6M_MLO_LIMBO=1` puts them all in limbo); entity sets start off
 - [x] Room ids in interior collision (so the game knows the player is inside a room)
 - [x] Tint palettes: the embedded palette entry (vertex colour blue, row = the placement's `tintValue`) is baked into tinted copies of the colour texture (32-step colours, max 512 px); the palette is no longer picked as a colour map
+- [x] Quality audit: UVs no longer V-flipped (6m is DirectX top-left), COLOR0 mapped to GTA V ambient (r,r,255,255) so buildings are not black under artificial light
+- [ ] Normal/spec maps for buildings (`normal_spec.sps` + normal textures in ytds); grayscale AO/roughness slot fallback guard
 - [x] Per-placement tint rows: placements with `tintValue` > 0 use an archetype variant `<name>__tint<row>`, shared by every placement with that row
 - [ ] Prop batch per-instance tint (`ba049770` +0x34 RGBA)
 - [ ] Fragments with physics (currently static)
