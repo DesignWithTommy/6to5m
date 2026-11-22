@@ -76,8 +76,8 @@ What works today:
 - [x] Vehicles to GTA V: `6ixpack fivem vehicle <name>` (yft + vehicles/handling/carvariations/carcols metas; in-game test pending)
 - [x] Weapons to GTA V formats: `6ixpack fivem weapon <name|all>` (ydr/ytd + weapons.meta; in-game test pending)
 - [ ] Verify the gtxd.meta parent chain in game
-- [ ] Road paths to .ynd (AI traffic), from `sixng paths`
-- [ ] Navmesh to .ynv (ped/AI pathing)
+- [x] Road paths to .ynd (AI traffic): `fivem build` part `paths`, whole 512 m node areas over the bbox, links only into written areas
+- [x] Navmesh to .ynv (ped/AI pathing): `fivem build` part `navmesh`, 6m tiles clipped into 150 m cells, decimated and merged under the 16k-polygon cap, edge adjacency across written cells
 - [ ] Lights to ymap LODLights / DistantLODLights (night lighting)
 - [ ] Instanced batches (grass, vegetation) to ymap grass instance lists
 - [ ] Minimap texture and zone names
