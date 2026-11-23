@@ -30,6 +30,8 @@ pub struct Geom {
     /// layout PNCCTX); `colours1` holds the blend weights (G picks layers
     /// 2/3 over 0/1, B picks 1/3 over 0/2).
     pub layers: Option<[String; 4]>,
+    /// Layer normal maps (BumpSampler_layerN), same order as `layers`.
+    pub layer_bumps: [String; 4],
     pub colours1: Vec<u32>,
 }
 
@@ -142,17 +144,24 @@ fn add_texture_ref(b: &mut Builder, name: &str) -> BlockId {
     b.add(Seg::Sys, w)
 }
 
-/// terrain_cb_w_4lyr.sps with the four layer diffuses (no bump maps yet).
-fn add_terrain_shader(b: &mut Builder, layers: &[String; 4]) -> BlockId {
-    const NAMES: [&str; 4] = ["TextureSampler_layer0", "TextureSampler_layer1", "TextureSampler_layer2", "TextureSampler_layer3"];
-    let vectors = [
-        ("specularFalloffMult", [32.0, 0.0, 0.0, 0.0]),
-        ("specularIntensityMult", [0.1, 0.0, 0.0, 0.0]),
-        ("bumpiness", [1.0, 0.0, 0.0, 0.0]),
-        ("bumpSelfShadowAmount", [0.3, 0.0, 0.0, 0.0]),
-        ("materialWetnessMultiplier", [1.0, 0.0, 0.0, 0.0]),
+/// terrain_cb_w_4lyr.sps with the four layer diffuses and normal maps.
+fn add_terrain_shader(b: &mut Builder, layers: &[String; 4], bumps: &[String; 4]) -> BlockId {
+    // Parameter order and values as in GTA V's own terrain_cb_w_4lyr
+    // drawables (dt1_16_ground.ydr): diffuse/bump pairs per layer, then
+    // the vectors in reverse.
+    const NAMES: [&str; 8] = [
+        "TextureSampler_layer0", "BumpSampler_layer0", "TextureSampler_layer1", "BumpSampler_layer1",
+        "TextureSampler_layer2", "BumpSampler_layer2", "TextureSampler_layer3", "BumpSampler_layer3",
     ];
-    let texs: Vec<BlockId> = layers.iter().map(|t| add_texture_ref(b, t)).collect();
+    let vectors = [
+        ("materialWetnessMultiplier", [0.5, 0.7, 0.8, 0.6]),
+        ("bumpSelfShadowAmount", [0.3, 0.0, 0.0, 0.0]),
+        ("bumpiness", [1.0, 0.0, 0.0, 0.0]),
+        ("specularIntensityMult", [0.007, 0.0, 0.0, 0.0]),
+        ("specularFalloffMult", [5.0, 0.0, 0.0, 0.0]),
+    ];
+    let names: Vec<&String> = (0..4).flat_map(|i| [&layers[i], &bumps[i]]).collect();
+    let texs: Vec<BlockId> = names.iter().map(|t| add_texture_ref(b, t)).collect();
     let nt = texs.len();
     let n = nt + vectors.len();
     let base_size = 32 + 16 * n + 16 * vectors.len() + 4 * n;
@@ -446,7 +455,7 @@ pub fn fill_drawable_lods(b: &mut Builder, id: BlockId, levels: &[Mesh], dists: 
     let name = b.string(&mesh.name);
 
     // shader group
-    let shaders: Vec<BlockId> = levels.iter().take(4).flat_map(|l| l.geoms.iter()).map(|g| match &g.layers { Some(l) => add_terrain_shader(b, l), None => add_shader(b, &g.texture, g.kind, &g.normal) }).collect();
+    let shaders: Vec<BlockId> = levels.iter().take(4).flat_map(|l| l.geoms.iter()).map(|g| match &g.layers { Some(l) => add_terrain_shader(b, l, &g.layer_bumps), None => add_shader(b, &g.texture, g.kind, &g.normal) }).collect();
     let mut pa = W::new();
     for &s in &shaders {
         pa.ptr(Some(s));
