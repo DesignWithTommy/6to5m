@@ -461,6 +461,12 @@ fn split_tint(n: &str) -> (&str, usize) {
 
 /// Shader slot of the per-model tint palette (one-row embedded texture).
 const TINT_PALETTE: u32 = 0x2c8d_7182;
+/// Colour of unused tint-palette entries: every 6m palette row ends in a
+/// run of (255, 187, 255) after its last real colour (ap_04_hub_glass
+/// 92..127, ss_rail_metror 80..127, ap_road_upper_a_decal 255 and rows 1-3,
+/// prop_am_loader_baggage 4..7). Vertex blue pointing there means untinted;
+/// baking it made glass, walls and decals magenta/navy.
+const PALETTE_FILL: [u8; 3] = [255, 187, 255];
 
 /// Cached copy of colour texture `tex` multiplied by `c` (sRGB), or a
 /// solid `c` when the model has no usable colour texture (the palette then
@@ -1212,7 +1218,7 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: us
             let (len, rows) = sixng_core::texture::tint_layout(pal.len() as u32);
             let base = row.min(rows.max(1) as usize - 1) * len as usize;
             for t in sm.indices.chunks_exact(3) {
-                let c = cols.get(t[0] as usize).and_then(|c| pal.get(base + (c >> 16 & 255) as usize)).map_or([255; 3], |p| [p[0], p[1], p[2]].map(|v| ((v as u32 + 16) / 32 * 32).min(255) as u8));
+                let c = cols.get(t[0] as usize).and_then(|c| pal.get(base + (c >> 16 & 255) as usize)).filter(|p| [p[0], p[1], p[2]] != PALETTE_FILL).map_or([255; 3], |p| [p[0], p[1], p[2]].map(|v| ((v as u32 + 16) / 32 * 32).min(255) as u8));
                 match groups.iter_mut().find(|g| g.0 == c) {
                     Some(g) => g.1.extend_from_slice(t),
                     None => groups.push((c, t.to_vec())),
