@@ -1405,7 +1405,11 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
         texs: i["texs"].as_array().map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect()).unwrap_or_default(),
         alpha: i["alpha"].as_array().map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect()).unwrap_or_default(),
     };
-    if let Some(info) = ctx.up_to_date(&file, &fp).filter(|i| i.get("alpha").is_some()) {
+    // Writer version stored in every entry; an entry without it (or, for a
+    // fragment, without its verify record) predates the check: rebuild it.
+    let writer = if frag { format!("{FRAG_V}|{YDR_V}") } else { YDR_V.to_string() };
+    let trusted = |i: &Value| i.get("alpha").is_some() && i["writer"].as_str() == Some(writer.as_str()) && (!frag || i.get("t6m_vehicles").is_some());
+    if let Some(info) = ctx.up_to_date(&file, &fp).filter(trusted) {
         let a = from_info(&info);
         if a.texs.iter().all(|t| pools.dir.join(format!("{}.dds", &t[4..])).exists()) {
             // per-file stats stored with the cache entry (older entries: unknown)
@@ -1495,8 +1499,8 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
     let n_lod = 1 + lower.iter().filter(|l| !l.geoms.is_empty()).count();
     super::regionlog::bump_n("ydr_lod_levels", &format!("{n_lod} (fresh)"), &an, bytes.len() as u64);
     let alpha: std::collections::BTreeSet<&String> = mesh.geoms.iter().filter(|g| g.kind != 0).map(|g| &g.texture).collect();
-    let mut info = json!({"lo": lo, "hi": hi, "texs": texs, "alpha": alpha, "tpx": texel_px(&mesh), "lods": n_lod, "bytes": bytes.len()});
-    if entry.is_some() && frag {
+    let mut info = json!({"lo": lo, "hi": hi, "texs": texs, "alpha": alpha, "tpx": texel_px(&mesh), "writer": writer, "lods": n_lod, "bytes": bytes.len()});
+    if frag {
         // [t6m:vehicles] record, kept in the cache info for cached builds
         info["t6m_vehicles"] = super::vlog::fresh(&file, &bytes, cols.len().max(1), frag_out.then_some(delta));
     }
