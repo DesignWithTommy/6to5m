@@ -51,7 +51,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "required": ["args"]
                 }
             })).collect::<Vec<_>>()})),
-            "tools/call" => call(&msg["params"]),
+            "tools/call" => call(&msg["params"], &mut out),
             _ => Err((-32601, format!("unknown method {method}"))),
         };
         let resp = match reply {
@@ -68,7 +68,11 @@ fn send(out: &mut impl Write, v: Value) -> std::io::Result<()> {
     out.flush()
 }
 
-fn call(params: &Value) -> Result<Value, (i64, String)> {
+/// Runs a tool. With `_meta.progressToken`, the child's progress lines
+/// (`{"event":"progress","stage","done","total","pct"}` on stderr, as from
+/// `fivem build` and `sixng index`) are forwarded as
+/// `notifications/progress` while it runs and left out of the output.
+fn call(params: &Value, out: &mut impl Write) -> Result<Value, (i64, String)> {
     let name = params["name"].as_str().unwrap_or("");
     let (_, sub, _) = TOOLS.iter().find(|t| t.0 == name).ok_or((-32602, format!("unknown tool {name}")))?;
     let args: Vec<String> = params["arguments"]["args"]
@@ -85,9 +89,37 @@ fn call(params: &Value) -> Result<Value, (i64, String)> {
     if !sub.is_empty() {
         cmd.arg(sub);
     }
-    let o = cmd.args(&args).stdin(std::process::Stdio::null()).output().map_err(|e| (-32603, e.to_string()))?;
-    let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
-    let err = String::from_utf8_lossy(&o.stderr);
+    use std::process::Stdio;
+    let token = params["_meta"]["progressToken"].clone();
+    let mut child = cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| (-32603, e.to_string()))?;
+    let mut so = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = std::io::Read::read_to_end(&mut so, &mut b);
+        b
+    });
+    let mut err = String::new();
+    // progress must increase per notification while stages restart at 0:
+    // a running count, with the stage's own numbers in the message
+    let mut n = 0u64;
+    for line in std::io::BufReader::new(child.stderr.take().unwrap()).lines().map_while(Result::ok) {
+        let ev = serde_json::from_str::<Value>(&line).ok().filter(|v| v["event"] == "progress");
+        match ev {
+            Some(v) if !token.is_null() => {
+                n += 1;
+                let msg = format!("{} {}/{} ({}%)", v["stage"].as_str().unwrap_or(""), v["done"], v["total"], v["pct"]);
+                let _ = send(out, json!({"jsonrpc": "2.0", "method": "notifications/progress", "params": {"progressToken": token, "progress": n, "message": msg}}));
+            }
+            Some(_) => {}
+            None => {
+                err.push_str(&line);
+                err.push('\n');
+            }
+        }
+    }
+    let status = child.wait().map_err(|e| (-32603, e.to_string()))?;
+    let stdout = reader.join().unwrap_or_default();
+    let mut text = String::from_utf8_lossy(&stdout).into_owned();
     if !err.trim().is_empty() {
         text.push_str("\n[stderr]\n");
         text.push_str(&err);
@@ -97,5 +129,5 @@ fn call(params: &Value) -> Result<Value, (i64, String)> {
         text.truncate(cut);
         text.push_str("\n[output truncated]");
     }
-    Ok(json!({"content": [{"type": "text", "text": text}], "isError": !o.status.success()}))
+    Ok(json!({"content": [{"type": "text", "text": text}], "isError": !status.success()}))
 }
