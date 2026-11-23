@@ -9,7 +9,11 @@
 //!   --offset into GTA V space); a ymap's box is its streaming extents, so
 //!   distant LOD ymaps visible from the region are included. Without --bbox
 //!   all of them.
-//! - Ymap stubs keep name, flags, content flags and extents, with no entities.
+//! - Ymap stubs keep name, parent, flags, content flags and extents, with no
+//!   entities. The selection is closed over the vanilla parent links: every
+//!   ymap whose parent (transitively) is stubbed is stubbed too, or a vanilla
+//!   child left in place would index its parent's entities (parentIndex) in
+//!   an emptied ymap.
 //! - Ybn stubs are one tiny triangle at z -900, byte-identical: all ~11k share
 //!   one output-cache file (hardlinks in stream/), so they cost one file on
 //!   disk and one download in FiveM's hash-addressed client cache.
@@ -26,8 +30,8 @@ use std::{
     sync::Mutex,
 };
 
-const INDEX_V: &str = "lsidx2";
-const STUB_V: &str = "lsstub1";
+const INDEX_V: &str = "lsidx3";
+const STUB_V: &str = "lsstub2";
 const DIRS: [&str; 3] = ["_citye", "_cityw", "_hills"];
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -41,6 +45,9 @@ struct Item {
     flags: u32,
     #[serde(default)]
     cflags: u32,
+    /// ymap: parent ymap name hash (CMapData +0x0C), 0 = none
+    #[serde(default)]
+    parent: u32,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -112,13 +119,13 @@ fn ymap_info(d: &[u8]) -> Option<Item> {
     if d.len() < p + 0x60 {
         return None;
     }
-    Some(Item { bx: [f3(d, p + 0x20)?, f3(d, p + 0x30)?], ee: Some([f3(d, p + 0x40)?, f3(d, p + 0x50)?]), flags: u32_at(d, p + 0x10)?, cflags: u32_at(d, p + 0x14)? })
+    Some(Item { bx: [f3(d, p + 0x20)?, f3(d, p + 0x30)?], ee: Some([f3(d, p + 0x40)?, f3(d, p + 0x50)?]), flags: u32_at(d, p + 0x10)?, cflags: u32_at(d, p + 0x14)?, parent: u32_at(d, p + 0x0C)? })
 }
 
 /// phBound box of an inflated ybn.
 fn ybn_info(d: &[u8]) -> Option<Item> {
     let (mx, mn) = (f3(d, 0x20)?, f3(d, 0x30)?);
-    (mn.iter().zip(&mx).all(|(a, b)| a.is_finite() && b.is_finite() && a <= b)).then_some(Item { bx: [mn, mx], ee: None, flags: 0, cflags: 0 })
+    (mn.iter().zip(&mx).all(|(a, b)| a.is_finite() && b.is_finite() && a <= b)).then_some(Item { bx: [mn, mx], ee: None, flags: 0, cflags: 0, parent: 0 })
 }
 
 fn load_index(ctx: &Ctx, g: &Path) -> Result<Index, String> {
@@ -194,7 +201,22 @@ pub fn build(ctx: &Ctx) -> Result<(), String> {
     // a ymap's streaming extents cover everywhere it can be seen from, so
     // distant LOD/SLOD ymaps visible from the region are caught too
     let hit = |_: &str, it: &Item| region.is_none_or(|r| it.bx[1][0] >= r[0] && it.bx[0][0] <= r[2] && it.bx[1][1] >= r[1] && it.bx[0][1] <= r[3]);
-    let sel: Vec<(&String, &Item)> = ix.files.iter().filter(|(n, it)| hit(n, it)).collect();
+    let mut chosen: std::collections::HashSet<&String> = ix.files.iter().filter(|(n, it)| hit(n, it)).map(|(n, _)| n).collect();
+    // close over parent links: a vanilla child of a stubbed ymap is stubbed too
+    let hash_of: BTreeMap<&String, u32> = ix.files.keys().filter(|n| n.ends_with(".ymap")).map(|n| (n, crate::gta5::rsc::joaat(n.trim_end_matches(".ymap")))).collect();
+    let n_hit = chosen.len();
+    loop {
+        let stubbed: std::collections::HashSet<u32> = chosen.iter().filter_map(|n| hash_of.get(n).copied()).collect();
+        let add: Vec<&String> = ix.files.iter().filter(|(n, it)| it.parent != 0 && !chosen.contains(n) && stubbed.contains(&it.parent)).map(|(n, _)| n).collect();
+        if add.is_empty() {
+            break;
+        }
+        chosen.extend(add);
+    }
+    if chosen.len() > n_hit {
+        eprintln!("lsremove: {} more ymaps stubbed whose vanilla parent is stubbed", chosen.len() - n_hit);
+    }
+    let sel: Vec<(&String, &Item)> = ix.files.iter().filter(|(n, _)| chosen.contains(n)).collect();
     let ybn_stub = ybn::build_ybn(&[[0.0, 0.0, -900.0], [1.0, 0.0, -900.0], [0.0, 1.0, -900.0]], &[[0, 1, 2]], 0)?;
     let ybn_fp = format!("{STUB_V}|ybn");
     let off = ctx.o.offset;
@@ -219,14 +241,14 @@ pub fn build(ctx: &Ctx) -> Result<(), String> {
                 }
                 return ctx.emit(n, &ybn_fp, json!({"stub": true}), None).map(|_| ());
             }
-            let fp = format!("{STUB_V}|ymap|{n}|{}|{}|{:?}|{:?}", it.flags, it.cflags, it.bx, it.ee);
+            let fp = format!("{STUB_V}|ymap|{n}|{}|{}|{:?}|{:?}|{:08x}", it.flags, it.cflags, it.bx, it.ee, it.parent);
             if let Some(info) = ctx.up_to_date(n, &fp) {
                 return ctx.emit(n, &fp, info, None).map(|_| ());
             }
             // meta::build_ymap adds --offset to extents; these are GTA V space already
             let un = |b: [[f32; 3]; 2]| b.map(|v| std::array::from_fn(|k| v[k] - off[k]));
             let stem = n.trim_end_matches(".ymap");
-            let map: meta::MapData = serde_json::from_value(json!({"name": stem, "flags": it.flags, "content_flags": it.cflags, "exported_by": "6ixpack lsremove"})).map_err(|e| e.to_string())?;
+            let map: meta::MapData = serde_json::from_value(json!({"name": stem, "parent": if it.parent == 0 { String::new() } else { format!("hash:{:08x}", it.parent) }, "flags": it.flags, "content_flags": it.cflags, "exported_by": "6ixpack lsremove"})).map_err(|e| e.to_string())?;
             let map = meta::MapData { streaming_extents: Some(un(it.bx)), entities_extents: Some(un(it.ee.unwrap_or(it.bx))), ..map };
             ctx.emit(n, &fp, json!({"stub": true}), Some(meta::build_ymap(&map)?)).map(|_| ())
         })
