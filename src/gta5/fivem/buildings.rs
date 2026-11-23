@@ -601,9 +601,7 @@ fn placements_dir(ctx: &Ctx, index: &ArchiveIndex) -> Result<PathBuf, Box<dyn Er
     let ie = ix.join("interior_entities.jsonl");
     if stale(&ie, &[]) || !ix.join(sixng_core::interiorents::LIGHT_INDEX).exists() {
         let _p = super::Phase::new(ctx, "  prep interior-ents");
-        let t0 = std::time::Instant::now();
-        let st = sixng_core::interiorents::build(&ws, &a, &metas, sixng_core::export::no_progress())?;
-        eprintln!("[t6m:interiors] prep interior-ents: {} metas read in {:.0}s, {} interior members ({} in rooms, {} in sets), {} lit archetypes indexed", metas.len(), t0.elapsed().as_secs_f32(), st["interior_members"], st["in_room"], st["in_entity_set"], st["lit_archetypes"]);
+        sixng_core::interiorents::build(&ws, &a, &metas, sixng_core::export::no_progress())?;
     }
     let lp = ix.join("lod_parents.jsonl");
     if stale(&lp, &[mtime(&ie)]) || stale(&ix.join("archetype_lod.jsonl"), &[]) {
@@ -1084,7 +1082,7 @@ type Built = (Mesh, Vec<String>, Vec<String>, bool);
 const FOUR_LAYER: [u32; 4] = [0x61e0_9df7, 0xb21f_1ba5, 0x360e_396b, 0x27e5_c49d];
 const DETAIL_TILE: f32 = 64.0;
 /// Writer version of four-layer ground ydrs (in their cache key only).
-const LYR4_V: &str = "lyr4_1";
+const LYR4_V: &str = "lyr4_2";
 
 /// Four-layer ground submesh as terrain_cb_w_4lyr geometries: the layer
 /// diffuses become the shader's four samplers, the section `lookuptexture`
@@ -1092,7 +1090,7 @@ const LYR4_V: &str = "lyr4_1";
 /// sampled per vertex and folded into GTA V's bilinear Colour1 blend
 /// (G: layers 2/3 over 0/1, B: 1/3 over 0/2). None (single-diffuse
 /// fallback) when fewer than two layers or the lookup do not resolve.
-fn four_layer_geoms(pools: &Pools, mat: &crate::model::Material, key_of: &dyn Fn(&crate::model::TexRef) -> u64, sm: &crate::model::Mesh) -> Option<(Vec<ydr::Geom>, Vec<String>)> {
+fn four_layer_geoms(an: &str, pools: &Pools, mat: &crate::model::Material, key_of: &dyn Fn(&crate::model::TexRef) -> u64, sm: &crate::model::Mesh) -> Option<(Vec<ydr::Geom>, Vec<String>)> {
     let uvs = sm.uvs.as_deref()?;
     let slot = |name: &str| mat.textures.iter().find(|t| t.param == crate::gta5::rsc::joaat(name));
     let names: Vec<Option<String>> = (0..4)
@@ -1106,15 +1104,26 @@ fn four_layer_geoms(pools: &Pools, mat: &crate::model::Material, key_of: &dyn Fn
         return None;
     }
     let layers: [String; 4] = std::array::from_fn(|i| names[i].clone().unwrap_or_else(|| first.clone()));
+    // 6m layer normal maps (bumptexture_layerN); the flat normal where one
+    // does not decode.
+    let flat = flat_bump(pools).ok()?;
+    let bumps: [String; 4] = std::array::from_fn(|i| {
+        slot(&format!("bumptexture_layer{i}")).and_then(|t| pools.get_normal(t.hash, key_of(t), t.h64).ok()).unwrap_or_else(|| flat.clone())
+    });
+    let no_bump: Vec<usize> = (0..4).filter(|&i| bumps[i] == flat).collect();
+    eprintln!(
+        "[t6m:terrain] {an}: samplers {} (expect 8), layers without 6m bumptexture {no_bump:?}, vertex PNCCTX/56 Colour0=(ao,0,0,255) Colour1=(0,g,b,0)",
+        layers.iter().chain(&bumps).filter(|t| !t.is_empty()).count()
+    );
     let lt = slot("lookuptexture")?;
     let (lw, lh, px) = pools.rgba(lt.hash, key_of(lt), lt.h64).ok()?;
     if lw == 0 || lh == 0 || px.len() < (lw * lh * 4) as usize {
         return None;
     }
     let sample = |uv: [f32; 2]| -> [f32; 3] {
-        // bilinear, clamped to the section
-        let x = (uv[0].clamp(0.0, 1.0) * lw as f32 - 0.5).clamp(0.0, (lw - 1) as f32);
-        let y = (uv[1].clamp(0.0, 1.0) * lh as f32 - 0.5).clamp(0.0, (lh - 1) as f32);
+        // bilinear; wraps like the game's sampler (set pieces run past 0..1)
+        let x = (uv[0].rem_euclid(1.0) * lw as f32 - 0.5).clamp(0.0, (lw - 1) as f32);
+        let y = (uv[1].rem_euclid(1.0) * lh as f32 - 0.5).clamp(0.0, (lh - 1) as f32);
         let (x0, y0) = (x.floor() as u32, y.floor() as u32);
         let (x1, y1) = ((x0 + 1).min(lw - 1), (y0 + 1).min(lh - 1));
         let (fx, fy) = (x - x0 as f32, y - y0 as f32);
@@ -1136,16 +1145,25 @@ fn four_layer_geoms(pools: &Pools, mat: &crate::model::Material, key_of: &dyn Fn
                 let s = (r + gg + b).max(1.0);
                 let (w1, w2, w3) = (gg / s, b / s, (1.0 - (r + gg + b) / s).max(0.0));
                 let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
-                (q(w2 + w3) << 8) | (q(w1 + w3) << 16) | 0xFF00_0000
+                (q(w2 + w3) << 8) | (q(w1 + w3) << 16)
             })
             .collect();
+        // Detail layers tile at TEXCOORD_0 x 64 (SixNG 6046d19: one repeat
+        // per 8 m on map section tiles). Per-layer tiling (c35e27af) is not
+        // decoded yet (SixNG a225c66).
         for uv in &mut g.uvs {
             *uv = [uv[0] * DETAIL_TILE, uv[1] * DETAIL_TILE];
         }
+        // Vertex colours as in GTA V's own terrain drawables: Colour0 =
+        // (ambient, 0, 0, 255), Colour1 = (0, G, B, 0).
+        for c in &mut g.colours {
+            *c = (*c & 0xFF) | 0xFF00_0000;
+        }
         g.layers = Some(layers.clone());
+        g.layer_bumps = bumps.clone();
     }
     let mut texs: Vec<String> = Vec::new();
-    for l in &layers {
+    for l in layers.iter().chain(&bumps).chain([&ydr::FLAT_SPEC.to_string()]) {
         if !texs.contains(l) {
             texs.push(l.clone());
         }
@@ -1181,7 +1199,7 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: us
     for (mesh, sms) in levels.iter_mut().zip(srcs) {
     for sm in sms.iter() {
         if let Some(mat) = sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).filter(|mt| FOUR_LAYER.contains(&mt.shader_hash)) {
-            if let Some((geoms, lt)) = four_layer_geoms(pools, mat, &key_of, sm) {
+            if let Some((geoms, lt)) = four_layer_geoms(&an, pools, mat, &key_of, sm) {
                 mesh.geoms.extend(geoms);
                 for t in lt {
                     if !texs.contains(&t) {
