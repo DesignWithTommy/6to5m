@@ -21,6 +21,7 @@ const FAMILIES: &[(&str, &str, &str)] = &[
     ("389206d1", "glass", "vehicle lamp lenses and clear covers (standard_vehicle_alpha; opacity in the colour alpha)"),
     ("29648098", "emissive", "vehicle lamps (standard_vehicle_emissive_animated_bones)"),
     ("5a693bbe", "emissive", "vehicle lamps and lit panels (standard_vehicle_emissive_layer)"),
+    ("59c1d684", "emissive", "vehicle lamps (standard_emissive_animated_bones; rpf9-explorer 3603c24)"),
     ("99ad6fc9", "opaque", "vehicle tyre (standard_vehicle_2lyr_tyre_inst)"),
     ("fa9cc069", "window", "vehicle windows"),
     ("4dc0ac6a", "window", "vehicle windows (helicopters, boats)"),

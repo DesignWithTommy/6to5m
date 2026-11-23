@@ -19,7 +19,7 @@ usage: 6ixpack [-n] [-v] <file> [outdir]
        6ixpack convert <kind> ...   GTA V output: ytd, ydr, ybn, ymap, ytyp (--help)
        6ixpack fivem build ...      6m world -> FiveM map resource (terrain, buildings, water)
        6ixpack mcp                 stdio MCP server exposing all of the above as tools
-       6ixpack bcpack-calibrate --game <dir> [--out <file>]
+       6ixpack bcpack-calibrate --game <dir> [--out <file>] [--rounds N]
                                    fit the BCPack BC7/BC6H preset tables to the
                                    install (long run); the decoders use the file
                                    when present, else the shipped v1 tables
@@ -121,17 +121,38 @@ fn main() -> ExitCode {
 /// game's TTPF stores and writes them where the decoders look
 /// (`sixng_core::bcpack_presets::path()`, or `--out`).
 fn bcpack_calibrate(args: &[std::ffi::OsString]) -> Result<(), Box<dyn std::error::Error>> {
-    let (mut game, mut out) = (None, None);
+    let (mut game, mut out, mut rounds) = (None, None, 5usize);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.to_str() {
             Some("--game") => game = it.next().map(std::path::PathBuf::from),
             Some("--out") => out = it.next().map(std::path::PathBuf::from),
+            Some("--rounds") => rounds = it.next().and_then(|v| v.to_str()?.parse().ok()).ok_or("--rounds needs a number")?,
             _ => return Err(format!("bcpack-calibrate: unknown argument {}", a.to_string_lossy()).into()),
         }
     }
     let game = game.ok_or("bcpack-calibrate needs --game <6m dir>")?;
     let out = out.unwrap_or_else(sixng_core::bcpack_presets::path);
+    if rounds > 1 {
+        // Decode-and-fit rounds (GTA6-Asset-Info 0fe110e: the BC6H refit
+        // converges in about four): each round is a fresh process so the
+        // decoded neighbour mips are decoded with the previous round's
+        // tables; stop once a round changes nothing.
+        let exe = std::env::current_exe()?;
+        for r in 1..=rounds {
+            println!("[bcpack-calibrate] round {r}/{rounds}");
+            let before = std::fs::read(&out).ok();
+            let st = std::process::Command::new(&exe).arg("bcpack-calibrate").arg("--game").arg(&game).arg("--out").arg(&out).arg("--rounds").arg("1").env("SIXNG_BCPACK_PRESETS", &out).status()?;
+            if !st.success() {
+                return Err(format!("bcpack-calibrate round {r} failed").into());
+            }
+            if std::fs::read(&out).ok() == before {
+                println!("[bcpack-calibrate] converged after round {r}");
+                break;
+            }
+        }
+        return Ok(());
+    }
     let set = sixng_core::ttpf::global(&game);
     if set.stores.is_empty() {
         return Err(format!("no TTPF stores under {}", game.display()).into());
