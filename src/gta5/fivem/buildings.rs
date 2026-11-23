@@ -1028,52 +1028,10 @@ fn archetype_lods(ctx: &Ctx, names: &[&String]) -> HashMap<String, f32> {
     out
 }
 
-/// Target texel density for building textures (px per metre; GTA V
-/// buildings are ~128-256).
-const TEXEL_DENSITY: f32 = 192.0;
-
-/// Texture size each texture of `mesh` needs: metres per UV unit (90th
-/// percentile over its triangles, sqrt(world area / UV area)) times
-/// TEXEL_DENSITY, rounded up to a power of two. Trim sheets map a strip of
-/// a few % of the texture onto a whole wall, so a radius-based cap blurred
-/// them; this follows the UVs instead.
-fn texel_px(mesh: &Mesh) -> BTreeMap<String, u16> {
-    let mut per: HashMap<&str, Vec<f32>> = HashMap::new();
-    for g in &mesh.geoms {
-        let v = per.entry(g.texture.as_str()).or_default();
-        for t in g.indices.chunks_exact(3) {
-            let [a, b, c] = [t[0], t[1], t[2]].map(|i| i as usize);
-            let (p, u) = (&g.positions, &g.uvs);
-            let e1 = [p[b][0] - p[a][0], p[b][1] - p[a][1], p[b][2] - p[a][2]];
-            let e2 = [p[c][0] - p[a][0], p[c][1] - p[a][1], p[c][2] - p[a][2]];
-            let cr = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
-            let wa = (cr[0] * cr[0] + cr[1] * cr[1] + cr[2] * cr[2]).sqrt();
-            let ua = ((u[b][0] - u[a][0]) * (u[c][1] - u[a][1]) - (u[c][0] - u[a][0]) * (u[b][1] - u[a][1])).abs();
-            if wa > 1e-6 && ua > 1e-9 {
-                v.push((wa / ua).sqrt());
-            }
-        }
-    }
-    let mut out = BTreeMap::new();
-    for g in &mesh.geoms {
-        let Some(v) = per.get_mut(g.texture.as_str()).filter(|v| !v.is_empty()) else { continue };
-        v.sort_by(|a, b| a.total_cmp(b));
-        let mpu = v[(v.len() * 9 / 10).min(v.len() - 1)];
-        let px = ((mpu * TEXEL_DENSITY).clamp(64.0, 4096.0) as u32).next_power_of_two().min(4096) as u16;
-        for t in [&g.texture, &g.normal].into_iter().filter(|t| !t.is_empty()) {
-            let e = out.entry(t.clone()).or_insert(0u16);
-            *e = (*e).max(px);
-        }
-    }
-    out
-}
-
 struct Arch {
     an: String,
     lo: V3,
     hi: V3,
-    /// texture -> size its UVs need at TEXEL_DENSITY (`texel_px`)
-    tpx: HashMap<String, u16>,
     texs: Vec<String>,
     /// textures on non-opaque geometry (their alpha is read)
     alpha: Vec<String>,
@@ -1403,7 +1361,6 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
         an: an.clone(),
         lo: f3(&i["lo"]),
         hi: f3(&i["hi"]),
-        tpx: i["tpx"].as_object().map(|o| o.iter().filter_map(|(k, v)| Some((k.clone(), v.as_u64()? as u16))).collect()).unwrap_or_default(),
         texs: i["texs"].as_array().map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect()).unwrap_or_default(),
         alpha: i["alpha"].as_array().map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect()).unwrap_or_default(),
     };
@@ -1501,7 +1458,7 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
     let n_lod = 1 + lower.iter().filter(|l| !l.geoms.is_empty()).count();
     super::regionlog::bump_n("ydr_lod_levels", &format!("{n_lod} (fresh)"), &an, bytes.len() as u64);
     let alpha: std::collections::BTreeSet<&String> = mesh.geoms.iter().filter(|g| g.kind != 0).map(|g| &g.texture).collect();
-    let mut info = json!({"lo": lo, "hi": hi, "texs": texs, "alpha": alpha, "tpx": texel_px(&mesh), "writer": writer, "lods": n_lod, "bytes": bytes.len()});
+    let mut info = json!({"lo": lo, "hi": hi, "texs": texs, "alpha": alpha, "writer": writer, "lods": n_lod, "bytes": bytes.len()});
     if frag {
         // [t6m:vehicles] record, kept in the cache info for cached builds
         info["t6m_vehicles"] = super::vlog::fresh(&file, &bytes, cols.len().max(1), frag_out.then_some(delta));
@@ -1560,22 +1517,9 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     // used by several families goes once into the shared chain
     // t6m_shr0000 <- t6m_shr0001 <- ... (gtxd.meta parents), and every family
     // txd's parent is the last shared txd, so nothing is stored twice.
-    // Texture size cap by the largest model using it (bounding radius):
-    // small props never show a texture at 1-2k on screen.
-    let mut tcap: HashMap<String, u16> = HashMap::new();
-    for a in done.values() {
-        let rad = (0..3).map(|k| (a.hi[k] - a.lo[k]).powi(2)).sum::<f32>().sqrt() / 2.0;
-        // models cached before texel_px fall back to the radius rule
-        let cap: u16 = if rad < 1.5 { 128 } else if rad < 4.0 { 256 } else if rad < 12.0 { 512 } else { 1024 };
-        for t in &a.texs {
-            let e = tcap.entry(t.clone()).or_insert(0);
-            *e = (*e).max(a.tpx.get(t).copied().unwrap_or(cap));
-        }
-    }
-    let cap_of = |t: &str| -> u16 {
-        let c = tcap.get(t).copied().unwrap_or(4096);
-        ctx.o.max_tex.map_or(c, |m| c.min(m))
-    };
+    // Every texture ships at its full 6m size, mips and format; only an
+    // explicit --max-tex drops top mips (the txd split handles size limits).
+    let cap_of = |_: &str| -> u16 { ctx.o.max_tex.unwrap_or(u16::MAX) };
     let tsize = |t: &str| fs::metadata(cache.join(format!("{}.dds", &t[4..]))).map(|m| m.len()).unwrap_or(0);
     let mut fam: BTreeMap<String, Vec<&Arch>> = BTreeMap::new();
     for a in done.values() {
