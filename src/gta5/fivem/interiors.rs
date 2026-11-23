@@ -744,7 +744,7 @@ type LightMaps = (HashMap<u32, Vec<Value>>, HashMap<(String, usize), Vec<Value>>
 /// extensions of the archetypes defined beside them; archetypes defined in
 /// other files keep no lights): by archetype hash, and by (meta file
 /// offset, entity index). Each light gets its set's offset added to its position.
-fn light_sets(ctx: &Ctx, index: &ArchiveIndex, ints: &[Interior], levels: &Path) -> LightMaps {
+fn light_sets(_ctx: &Ctx, index: &ArchiveIndex, ints: &[Interior], levels: &Path) -> LightMaps {
     let (mut by_arch, mut by_ent): LightMaps = Default::default();
     if ints.is_empty() || std::env::var_os("T6M_NO_LIGHTS").is_some() {
         return (by_arch, by_ent);

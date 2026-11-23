@@ -156,13 +156,6 @@ struct MEntry {
     summary: String,
 }
 
-/// Output cache sidecar (<key>.<ext>.json): info and verify summary.
-#[derive(Serialize, Deserialize)]
-struct CEntry {
-    info: Value,
-    summary: String,
-}
-
 #[derive(Default, Serialize)]
 pub struct Report {
     pub converted: Vec<Value>,
@@ -205,8 +198,9 @@ pub struct Ctx {
     pub layout: Mutex<split::Layout>,
     /// stream files emitted this run (for pruning stale outputs)
     emitted: Mutex<std::collections::HashSet<String>>,
-    /// <work>/fivem_out_cache
-    cache: PathBuf,
+    /// fingerprint manifest (<work>/index/fivem_manifest.json): the
+    /// deployed stream files are the only copy of the converted bytes
+    manifest_path: PathBuf,
     /// levels.rpf size and mtime, part of every cache key
     pub input_stamp: String,
 }
@@ -248,14 +242,9 @@ impl Ctx {
         sha(&format!("{fp}|{}", self.input_stamp))
     }
 
-    fn cache_path(&self, file: &str, key: &str) -> PathBuf {
-        let ext = file.rsplit_once('.').map_or("bin", |x| x.1);
-        self.cache.join(format!("{key}.{ext}"))
-    }
-
     /// Manifest info for `file` when stream/ already holds it from the same
-    /// fingerprint and inputs; else, when the output cache has it, link it
-    /// into stream/ and return the cached info. None = convert it.
+    /// fingerprint and inputs. None = convert it (there is no second copy of
+    /// converted bytes: the deployed stream file is the cache).
     pub fn up_to_date(&self, file: &str, fp: &str) -> Option<Value> {
         if self.o.force {
             return None;
@@ -267,15 +256,7 @@ impl Ctx {
                 return Some(e.info);
             }
         }
-        let c = self.cache_path(file, &key);
-        let ce: CEntry = serde_json::from_slice(&fs::read(side(&c)).ok()?).ok()?;
-        if !c.is_file() {
-            return None;
-        }
-        link_into(&c, &self.stream.join(file)).ok()?;
-        self.count(file, 1);
-        self.manifest.lock().unwrap().files.insert(file.to_string(), MEntry { fp: key, info: ce.info.clone(), summary: ce.summary });
-        Some(ce.info)
+        None
     }
 
     fn count(&self, file: &str, k: usize) {
@@ -283,9 +264,9 @@ impl Ctx {
         self.report.lock().unwrap().cache.entry(ext).or_default()[k] += 1;
     }
 
-    /// Write (or keep) a stream file. New bytes are verified, stored in the
-    /// output cache and linked into stream/ unless stream/ already holds the
-    /// same bytes (left untouched: mtime and FXServer's hash stay valid).
+    /// Write (or keep) a stream file. New bytes are verified and written to
+    /// stream/ unless it already holds the same bytes (left untouched: mtime
+    /// and FXServer's hash stay valid).
     /// `info` goes to the manifest for later runs. Returns the verify summary.
     pub fn emit(&self, file: &str, fp: &str, info: Value, bytes: Option<Vec<u8>>) -> Result<String, String> {
         let path = self.stream.join(file);
@@ -298,19 +279,11 @@ impl Ctx {
                 }
                 let summary = if self.o.verify { verify::verify(file, &b)? } else { format!("{} bytes", b.len()) };
                 let same = fs::metadata(&path).is_ok_and(|m| m.len() == b.len() as u64) && fs::read(&path).is_ok_and(|x| x == b);
-                if meta {
-                    if !same {
-                        write_atomic(&path, &b).map_err(|e| format!("{}: {e}", path.display()))?;
-                    }
-                } else {
+                if !meta {
                     self.count(file, 2);
-                    let c = self.cache_path(file, &key);
-                    write_atomic(&c, &b).map_err(|e| format!("{}: {e}", c.display()))?;
-                    let j = serde_json::to_vec(&CEntry { info: info.clone(), summary: summary.clone() }).unwrap();
-                    write_atomic(&side(&c), &j).map_err(|e| format!("{}: {e}", c.display()))?;
-                    if !same {
-                        link_into(&c, &path).map_err(|e| format!("{}: {e}", path.display()))?;
-                    }
+                }
+                if !same {
+                    write_atomic(&path, &b).map_err(|e| format!("{}: {e}", path.display()))?;
                 }
                 (if same { "unchanged" } else { "written" }, summary, b.len() as u64)
             }
@@ -343,8 +316,8 @@ impl Ctx {
 
     fn save_manifest(&self) -> Result<(), String> {
         let m = self.manifest.lock().unwrap();
-        let p = self.o.out.join(".fivem-manifest.json");
-        fs::write(&p, serde_json::to_vec(&*m).unwrap()).map_err(|e| format!("{}: {e}", p.display()))
+        let p = &self.manifest_path;
+        fs::write(p, serde_json::to_vec(&*m).unwrap()).map_err(|e| format!("{}: {e}", p.display()))
     }
 }
 
@@ -486,14 +459,16 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
     let input_time = lf.metadata()?.modified()?;
     // SAFETY: read-only map; nothing writes the archive while we run.
     let levels = unsafe { Mmap::map(&lf) }?;
-    let mut manifest: Manifest = fs::read(o.out.join(".fivem-manifest.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    // fingerprint manifest lives with the index; the old <out> copy is read
+    // once so existing stream files stay up to date
+    let manifest_path = o.work.join("index").join("fivem_manifest.json");
+    let mut manifest: Manifest = [manifest_path.clone(), o.out.join(".fivem-manifest.json")].iter().find_map(|p| fs::read(p).ok().and_then(|b| serde_json::from_slice(&b).ok())).unwrap_or_default();
     if manifest.tool != MANIFEST_V {
         // older manifest layout; outputs come back from the cache
         manifest = Manifest { tool: MANIFEST_V.into(), ..Default::default() };
     }
     let layout = split::load(&o.out);
-    let cache = o.work.join("fivem_out_cache");
-    fs::create_dir_all(&cache)?;
+    fs::create_dir_all(o.work.join("index"))?;
     let input_stamp = format!("{}:{}", lf.metadata()?.len(), input_time.duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
     // story / minigame packs: placed only when indexed (`sixng index <id>`)
     let packs: Vec<Pack> = if o.only.iter().any(|x| x == "buildings") {
@@ -517,7 +492,7 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
     } else {
         Vec::new()
     };
-    let ctx = Ctx { o, stream, levels, packs, input_time, manifest: Mutex::new(manifest), report: Mutex::new(Report::default()), layout: Mutex::new(layout), emitted: Default::default(), cache, input_stamp };
+    let ctx = Ctx { o, stream, levels, packs, input_time, manifest: Mutex::new(manifest), report: Mutex::new(Report::default()), layout: Mutex::new(layout), emitted: Default::default(), manifest_path, input_stamp };
     let part = |p: &str| ctx.o.only.iter().any(|x| x == p);
 
     let result = (|| -> Result<(), Box<dyn Error>> {
@@ -906,13 +881,6 @@ impl Drop for Phase<'_> {
         eprintln!("time {:<22} {wall:7.1}s wall {cpu:8.1}s cpu {cores:5.1} cores", self.name);
         self.ctx.report.lock().unwrap().timings.push(json!({"phase": self.name, "wall": (wall * 10.0).round() / 10.0, "cpu": (cpu * 10.0).round() / 10.0, "cores": (cores * 10.0).round() / 10.0}));
     }
-}
-
-/// Sidecar json of a cache file.
-fn side(c: &Path) -> PathBuf {
-    let mut n = c.as_os_str().to_owned();
-    n.push(".json");
-    PathBuf::from(n)
 }
 
 /// Put `src` at `dst` as a hard link (copy when linking fails, e.g. across
