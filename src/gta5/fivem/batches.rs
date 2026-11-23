@@ -41,7 +41,7 @@ fn map_index(ctx: &Ctx, a: &sixng_core::game::ArchiveInfo, index: &sixng_core::s
     if let Some(v) = fs::read(&p).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
         return Ok(v);
     }
-    eprintln!("batches: indexing map files with instanced batches (once per input; system pages from one archive map)");
+    eprintln!("[t6m:batches] indexing map files with instanced batches (once per input; system pages from one archive map)");
     let t = std::time::Instant::now();
     let file = fs::File::open(&a.path).map_err(|e| e.to_string())?;
     // SAFETY: read-only map of the game archive.
@@ -63,7 +63,7 @@ fn map_index(ctx: &Ctx, a: &sixng_core::game::ArchiveInfo, index: &sixng_core::s
             (!bbs.is_empty()).then(|| (e.id.clone(), [lo, hi]))
         })
         .collect();
-    eprintln!("batches: indexed {} map files with batches in {:.1}s", v.len(), t.elapsed().as_secs_f32());
+    eprintln!("[t6m:batches] indexed {} map files with batches in {:.1}s", v.len(), t.elapsed().as_secs_f32());
     let _ = fs::create_dir_all(p.parent().unwrap());
     fs::write(&p, serde_json::to_vec(&v).unwrap_or_default()).map_err(|e| e.to_string())?;
     Ok(v)
@@ -141,7 +141,7 @@ fn tables(ctx: &Ctx, index: &sixng_core::scan::ArchiveIndex) -> Result<Vec<PathB
             fs::write(dir.join("done"), b"").map_err(|e| e.to_string())?;
         }
         let _ = fs::remove_dir_all(&tmp);
-        eprintln!("batches: exported {} cells ({} map files) in {:.1}s", todo.len(), sel.len(), t.elapsed().as_secs_f32());
+        eprintln!("[t6m:batches] exported {} cells ({} map files) in {:.1}s", todo.len(), sel.len(), t.elapsed().as_secs_f32());
     }
     Ok(out)
 }
@@ -219,7 +219,15 @@ pub fn props(ctx: &Ctx, index: &sixng_core::scan::ArchiveIndex) -> Vec<(Value, [
             out.push((e, c, [0.0, 0.0, 0.0, 1.0]));
         }
     }
-    eprintln!("batches: {} prop batches in region (one entity each)", out.len());
+    eprintln!("[t6m:batches] {} prop batches in region (one entity each)", out.len());
+    if let Some(d) = DEFS.get() {
+        let d = d.lock().unwrap();
+        let mut per: Vec<(&String, usize, &str)> = out.iter().filter_map(|(e, _, _)| e["name"].as_str()).filter_map(|n| d.get_key_value(n)).map(|(n, b)| (n, b.inst.len(), b.model.as_str())).collect();
+        let total: usize = per.iter().map(|x| x.1).sum();
+        per.sort_by(|a, b| b.1.cmp(&a.1));
+        let ex: Vec<String> = per.iter().take(5).map(|(n, c, m)| format!("{n} ({m}) x{c}")).collect();
+        eprintln!("[t6m:batches] {total} instances placed in {} batches (avg {:.1}); largest: {}", per.len(), total as f32 / per.len().max(1) as f32, ex.join(", "));
+    }
     out
 }
 
@@ -348,6 +356,6 @@ pub fn grass(ctx: &Ctx, index: &sixng_core::scan::ArchiveIndex, converted: &Hash
         let b = crate::gta5::meta::build_grass_ymap(&name, &lists)?;
         files.push(super::buildings::emit_meta(ctx, &format!("{name}.ymap"), b)?);
     }
-    eprintln!("batches: {} grass ymaps", files.len());
+    eprintln!("[t6m:batches] {} grass ymaps", files.len());
     Ok(files)
 }
