@@ -614,7 +614,13 @@ fn decode_part(game: &Path, e: &Entry, six: &sixng_core::pedskel::PedSkeleton, m
                 if let Some(sh) = sh {
                     let ph = |t: &drawable::TexRef| u32::from_str_radix(t.param_hash.trim_start_matches("0x"), 16).ok();
                     let mut cands: Vec<&drawable::TexRef> = COLOR_SLOTS.iter().filter_map(|slot| sh.textures.iter().find(|t| ph(t) == Some(*slot))).collect();
-                    cands.extend(sh.textures.iter().filter(|t| !ph(t).is_some_and(|h| COLOR_SLOTS.contains(&h))));
+                    // other slots only when not a known non-colour role (normals,
+                    // packed data, masks, tint palettes): binding those as
+                    // diffuse gave the teal / blue bodies
+                    cands.extend(sh.textures.iter().filter(|t| {
+                        let h = ph(t);
+                        !h.is_some_and(|h| COLOR_SLOTS.contains(&h)) && h.and_then(|h| sixng_core::material::slot_role(&format!("{h:08x}"))).is_none_or(|r| r.contains("colour") || r.contains("base_color"))
+                    }));
                     for t in cands {
                         let h64 = u64::from_str_radix(t.hash64.trim_start_matches("0x"), 16).unwrap_or(0);
                         match texs.rgba(h64, key_of(sh, t.param)) {
@@ -639,6 +645,24 @@ fn decode_part(game: &Path, e: &Entry, six: &sixng_core::pedskel::PedSkeleton, m
     }
     if part.geoms.is_empty() {
         return Err("no geometry".into());
+    }
+    // Head drawables bind no textures: the face is a packs.rpf material
+    // preset listing the head (joaat of its name), else a linked face of the
+    // same head code (sixng_core::headskin; GTA6-Asset-Info 07-models
+    // "Ped heads: face textures")
+    if part.diffuse.is_none() && sixng_core::headskin::is_head(&name) {
+        let set = sixng_core::ttpf::global(game);
+        match sixng_core::headskin::get(game).map(|hs| hs.choose(&name, 0, |h| set.get(h).is_some())) {
+            Ok(Some(c)) => match texs.rgba(c.skin.albedo, 0) {
+                Ok(x) => {
+                    part.warnings.push(format!("face: {} preset {:016x} ({} {}/{})", c.source, c.skin.albedo, c.group, c.index + 1, c.count));
+                    part.diffuse = Some(x);
+                }
+                Err(err) => part.warnings.push(format!("texture face {:016x}: {err}", c.skin.albedo)),
+            },
+            Ok(None) => part.warnings.push("texture face: no preset".into()),
+            Err(err) => part.warnings.push(format!("texture face: {err}")),
+        }
     }
     Ok(part)
 }
