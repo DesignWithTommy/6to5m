@@ -15,6 +15,7 @@ const TOOLS: &[(&str, &str, &str)] = &[
     ("model", "model", "RAGE drawables to OBJ. Pass [\"--help\"] for options."),
     ("convert", "convert", "Convert to GTA V formats: ytd (DDS dir), ydr/ybn (OBJ), ymap/ytyp (JSON). Pass [] for usage."),
     ("sixng", "sixng", "SixNG commands: placements, vehicles, GLB export, ttpf, names, interiors, movies, ... Pass [\"--help\"] (or [\"<command>\", \"--help\"]) for the list."),
+    ("bcpack_calibrate", "bcpack-calibrate", "Fit the BCPack BC7/BC6H preset tables to the install's TTPF stores and write the calibrated table file the decoders load (else they use the shipped v1 tables): args [\"--game\", \"<6m dir>\"], optional [\"--out\", \"<file>\"]. Long run."),
     ("fivem", "fivem", "Build a ready FiveM resource from GTA VI: args like [\"build\", \"--game\", \"<dir>\", \"--out\", \"<res>\", \"--bbox\", \"x0,y0,x1,y1\"]. Pass [\"--help\"] for options."),
 ];
 

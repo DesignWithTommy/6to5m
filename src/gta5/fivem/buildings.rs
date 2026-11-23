@@ -1564,7 +1564,12 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: us
                             super::quality::hit("colour_pick", 1, || format!("{name} mat {:08x} slot {:08x} -> {:08x}", mat.shader_hash, t.param, t.hash));
                             return tex_name(&p);
                         }
-                        Err(e) => errs.push(format!("{:08x}: {e}", t.hash)),
+                        Err(e) => {
+                            if errs.is_empty() {
+                                super::quality::missing(t.h64, key, t.hash, name, &e);
+                            }
+                            errs.push(format!("{:08x} h64 {:016x}: {e}", t.hash, t.h64))
+                        }
                     }
                 }
                 missing.extend(errs.into_iter().take(1));
@@ -1697,7 +1702,12 @@ fn sixng_mesh(ctx: &Ctx, pools: &Pools, an: &str, e: &Entry) -> Result<Built, St
                                 super::quality::hit("colour_pick", 1, || format!("{an} shader {:?} slot {} -> {hash:08x}", sh.name_hash, t.param_hash));
                                 return tex_name(&p);
                             }
-                            Err(e) => errs.push(format!("{hash:08x}: {e}")),
+                            Err(e) => {
+                                if errs.is_empty() {
+                                    super::quality::missing(own_key, key, hash, an, &e);
+                                }
+                                errs.push(format!("{hash:08x} h64 {own_key:016x}: {e}"))
+                            }
                         }
                     }
                     missing.extend(errs.into_iter().take(1));
@@ -1885,7 +1895,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     }
     // source textures: decoded in memory (4 GB held), records in the index
     let cache = PathBuf::from("texmem");
-    let store = super::texmem::Store::open(ctx.o.work.join("index").join(format!("fivem_textures_v{}s2.json", sixng_core::bcpack::BCPACK_DECODER_VERSION)), 4 << 30);
+    let store = super::texmem::Store::open(ctx.o.work.join("index").join(format!("fivem_textures_v{}s2{}.json", sixng_core::bcpack::BCPACK_DECODER_VERSION, sixng_core::bcpack_presets::tag())), 4 << 30);
     let ttdb = ctx.o.game.join("data").join("ttdb");
     let pools = Pools { game: ctx.o.game.clone(), catalog: crate::texture::Catalog::build(&ttdb).map_err(|e| eprintln!("{}: {e}", ttdb.display())).ok(), maps: Mutex::new(HashMap::new()), dir: cache.clone(), store };
     let mut by_off: HashMap<usize, &Entry> = index.entries.iter().map(|e| (e.off as usize, e)).collect();
@@ -2132,7 +2142,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
             let file = format!("{stem}.ytd");
             let mut sorted = list.clone();
             sorted.sort();
-            let fp = sha(&format!("{TEX_V}|{}|{:?}|{}", texopt::TAG, ctx.o.max_tex, sorted.iter().map(|t| format!("{t}:{}:{}:{}", tsize(t), cap_of(t), alpha_tex.contains(t))).collect::<Vec<_>>().join(",")));
+            let fp = sha(&format!("{TEX_V}{}|{}|{:?}|{}", sixng_core::bcpack_presets::tag(), texopt::TAG, ctx.o.max_tex, sorted.iter().map(|t| format!("{t}:{}:{}:{}", tsize(t), cap_of(t), alpha_tex.contains(t))).collect::<Vec<_>>().join(",")));
             if ctx.up_to_date(&file, &fp).is_some() {
                 return ctx.emit(&file, &fp, json!({"textures": sorted.len()}), None);
             }

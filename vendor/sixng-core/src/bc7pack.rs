@@ -155,11 +155,23 @@ pub struct Tables {
     pub hist_idx: [Option<IdxState>; 256],
 }
 
-/// Built-in tables.
+/// Built-in header table with the preset slots: calibrated file when present
+/// (`bcpack_presets`), else the shipped v1 fit.
 pub fn tables() -> Tables {
     let mut headers = [[None; 32]; 32];
     for &(a, b, mode, rot, isel, part) in HEADERS.iter() { headers[a as usize][b as usize] = Some((mode, rot, isel, part)); }
-    Tables { headers, hist_ep: HIST_EP, hist_idx: HIST_IDX }
+    match crate::bcpack_presets::get() {
+        Some(p) => Tables { headers, hist_ep: p.bc7_ep, hist_idx: p.bc7_ix },
+        None => Tables { headers, hist_ep: HIST_EP, hist_idx: HIST_IDX },
+    }
+}
+
+/// The shipped v1 tables, ignoring any calibrated file.
+pub fn shipped_tables() -> Tables {
+    let mut t = tables();
+    t.hist_ep = HIST_EP;
+    t.hist_idx = HIST_IDX;
+    t
 }
 
 /// Result of a BC7 chunk decode.
@@ -212,6 +224,27 @@ pub fn decode_with(chunk: &[u8], blocks: usize, t: &Tables) -> Option<Bc7Output>
 pub fn decode_states(chunk: &[u8], blocks: usize, t: &Tables) -> Option<(Bc7Output, Vec<EpState>, Vec<IdxState>)> {
     let lanes = bcpack::rans::decode_slice(chunk, &BC7_ALPHABET_BITS, 2 * blocks).ok()?;
     let lane: Vec<&[u16]> = (0..16).map(|k| lanes.lane(k)).collect();
+    Some(decode_lanes_states(&lane, blocks, t))
+}
+
+/// Preset slot each block's endpoint / index chain starts at (`u16::MAX` =
+/// chain rooted inside the chunk), from the reference lanes 0 and 1.
+pub fn preset_roots(lane: &[&[u16]], blocks: usize) -> Vec<(u16, u16)> {
+    let sym = |l: usize, i: usize, h: usize| lane[l][2 * i + h];
+    let mut r = vec![(u16::MAX, u16::MAX); blocks];
+    for i in 0..blocks {
+        let di = il(sym(1, i, 0), sym(1, i, 1));
+        let de = ((di as i32 + uz(il(sym(0, i, 0), sym(0, i, 1)) as u16)) & 255) as usize;
+        let e = if de == 0 { u16::MAX } else if de <= i { r[i - de].0 } else { (256 + i - de) as u16 };
+        let x = if di == 0 { u16::MAX } else if di <= i { r[i - di].1 } else { (256 + i - di) as u16 };
+        r[i] = (e, x);
+    }
+    r
+}
+
+/// As [`decode_states`] on already rANS-decoded lanes (`lane[l][2 * i + h]`);
+/// `blocks` may be a prefix of the chunk.
+pub fn decode_lanes_states(lane: &[&[u16]], blocks: usize, t: &Tables) -> (Bc7Output, Vec<EpState>, Vec<IdxState>) {
     let sym = |l: usize, i: usize, h: usize| lane[l][2 * i + h];
     let mut ep: Vec<EpState> = vec![[[[0; 4]; 2]; 3]; blocks];
     let mut ix: Vec<IdxState> = vec![[[0; 16]; 2]; blocks];
@@ -305,7 +338,7 @@ pub fn decode_states(chunk: &[u8], blocks: usize, t: &Tables) -> Option<(Bc7Outp
         };
         out[i * 16..i * 16 + 16].copy_from_slice(&block);
     }
-    Some((Bc7Output { blocks: out, unfitted_blocks: unfitted, invalid_blocks: invalid, invalid_by_mode, normalized_blocks: normalized_count }, ep, ix))
+    (Bc7Output { blocks: out, unfitted_blocks: unfitted, invalid_blocks: invalid, invalid_by_mode, normalized_blocks: normalized_count }, ep, ix)
 }
 
 #[cfg(test)]

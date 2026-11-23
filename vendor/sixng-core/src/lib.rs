@@ -23,6 +23,8 @@ pub mod ttpf;
 pub mod bcpack;
 pub mod bc7pack;
 pub mod bc6pack;
+pub mod bcpack_presets;
+pub mod bcpack_fit;
 mod bcpack_tables;
 pub mod bcpack_calib;
 mod bcpack_calib6;

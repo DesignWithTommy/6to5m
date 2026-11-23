@@ -19,6 +19,10 @@ usage: 6ixpack [-n] [-v] <file> [outdir]
        6ixpack convert <kind> ...   GTA V output: ytd, ydr, ybn, ymap, ytyp (--help)
        6ixpack fivem build ...      6m world -> FiveM map resource (terrain, buildings, water)
        6ixpack mcp                 stdio MCP server exposing all of the above as tools
+       6ixpack bcpack-calibrate --game <dir> [--out <file>]
+                                   fit the BCPack BC7/BC6H preset tables to the
+                                   install (long run); the decoders use the file
+                                   when present, else the shipped v1 tables
        6ixpack sixng   <args...>   SixNG: placements, vehicles, GLB export, names, ... (--help)
 
   -n, --list     report only, extract nothing
@@ -42,6 +46,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some("mcp") => return mcp::run(),
         Some("convert") => return rpf9::gta5::run(&args[1..]),
         Some("fivem") => return rpf9::gta5::fivem::run(&args[1..]),
+        Some("bcpack-calibrate") => return bcpack_calibrate(&args[1..]),
         Some("sixng") => {
             sixng_cli::main(&args[1..]);
             return Ok(());
@@ -110,4 +115,32 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `6ixpack bcpack-calibrate`: fits the BC7 and BC6H preset tables to the
+/// game's TTPF stores and writes them where the decoders look
+/// (`sixng_core::bcpack_presets::path()`, or `--out`).
+fn bcpack_calibrate(args: &[std::ffi::OsString]) -> Result<(), Box<dyn std::error::Error>> {
+    let (mut game, mut out) = (None, None);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.to_str() {
+            Some("--game") => game = it.next().map(std::path::PathBuf::from),
+            Some("--out") => out = it.next().map(std::path::PathBuf::from),
+            _ => return Err(format!("bcpack-calibrate: unknown argument {}", a.to_string_lossy()).into()),
+        }
+    }
+    let game = game.ok_or("bcpack-calibrate needs --game <6m dir>")?;
+    let out = out.unwrap_or_else(sixng_core::bcpack_presets::path);
+    let set = sixng_core::ttpf::global(&game);
+    if set.stores.is_empty() {
+        return Err(format!("no TTPF stores under {}", game.display()).into());
+    }
+    let p = sixng_core::bcpack_fit::calibrate(set, &|m| println!("[bcpack-calibrate] {m}"));
+    if let Some(d) = out.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    std::fs::write(&out, p.to_bytes())?;
+    println!("[bcpack-calibrate] wrote {}", out.display());
+    Ok(())
 }

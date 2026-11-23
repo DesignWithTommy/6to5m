@@ -301,6 +301,21 @@ fn one_region_y(m: &ModeInfo, w: &[u16; 3]) -> [u16; 3] {
     })
 }
 
+/// Preset slot each block's endpoint / index chain starts at (`u16::MAX` =
+/// chain rooted inside the chunk), from the reference lanes 0 and 1.
+pub fn preset_roots(lane: &[&[u16]], blocks: usize) -> Vec<(u16, u16)> {
+    let sym = |l: usize, i: usize, h: usize| lane[l][2 * i + h] as u32;
+    let mut r = vec![(u16::MAX, u16::MAX); blocks];
+    for i in 0..blocks {
+        let di = il(sym(1, i, 0), sym(1, i, 1)) as usize;
+        let de = ((di as i32 + uz(il(sym(0, i, 0), sym(0, i, 1)))) & 255) as usize;
+        let e = if de == 0 { u16::MAX } else if de <= i { r[i - de].0 } else { (256 + i - de) as u16 };
+        let x = if di == 0 { u16::MAX } else if di <= i { r[i - di].1 } else { (256 + i - di) as u16 };
+        r[i] = (e, x);
+    }
+    r
+}
+
 /// BCPack BC6H chunk bytes + block count -> BC6H blocks, with given tables.
 pub fn decode_with(chunk: &[u8], blocks: usize, t: &Tables) -> Option<Bc6Output> {
     let lanes = bcpack::rans::decode_slice(chunk, &BC6_ALPHABET_BITS, 2 * blocks).ok()?;
@@ -309,7 +324,16 @@ pub fn decode_with(chunk: &[u8], blocks: usize, t: &Tables) -> Option<Bc6Output>
 }
 
 /// The fitted preset tables.
-pub fn tables() -> Tables { Tables { hist_ep: HIST_EP, hist_idx: HIST_IDX } }
+/// Calibrated file when present (`bcpack_presets`), else the shipped v1 fit.
+pub fn tables() -> Tables {
+    match crate::bcpack_presets::get() {
+        Some(p) => Tables { hist_ep: p.bc6_ep, hist_idx: p.bc6_ix },
+        None => shipped_tables(),
+    }
+}
+
+/// The shipped v1 tables, ignoring any calibrated file.
+pub fn shipped_tables() -> Tables { Tables { hist_ep: HIST_EP, hist_idx: HIST_IDX } }
 
 /// BCPack BC6H chunk bytes + block count (16-byte blocks) -> BC6H blocks.
 /// `None` if the stream does not decode.
