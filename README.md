@@ -54,7 +54,7 @@ What works today:
 ## Roadmap
 
 - [x] BCPack BC4
-- [ ] BCPack BC6H (modes m10/m14) and the remaining inconsistent BC7 blocks (in progress: BC6H preset refit by per-quadrant error, mip-check bad blocks 12.7% to 7.3%; m14 history chains 12%)
+- [ ] BCPack BC6H: preset endpoints refitted per GTA6-Asset-Info (7f3e1d3), mip-check bad blocks 12.7% -> 7.3%; remaining BC6H and BC7 blocks still open
 - [x] Road and asphalt surfaces
 - [x] Four-layer roads and ground: terrain_cb_w_4lyr.sps with the four 6m layer diffuses, lookup weights baked into Colour1 (no layer bump maps yet)
 - [x] LOD/SLOD drawables with no linked model (unresolved archetypes 84,216 to 37; `#member` model ids resolved, so every airport placement converts)
