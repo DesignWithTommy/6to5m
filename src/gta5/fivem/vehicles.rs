@@ -320,9 +320,9 @@ fn check_dds(store: &super::texmem::Store, p: &Path) -> Result<(), String> {
 /// Flat decodes, normal maps and packed masks are not colour maps.
 fn bad_colour(rgba: &[u8]) -> Option<&'static str> {
     let n = (rgba.len() / 4).max(1) as f64;
-    let (mut s, mut q) = ([0f64; 3], [0f64; 3]);
+    let (mut s, mut q) = ([0f64; 4], [0f64; 4]);
     for px in rgba.chunks_exact(4) {
-        for k in 0..3 {
+        for k in 0..4 {
             let v = px[k] as f64;
             s[k] += v;
             q[k] += v * v;
@@ -330,7 +330,12 @@ fn bad_colour(rgba: &[u8]) -> Option<&'static str> {
     }
     let m = s.map(|x| x / n);
     let var: f64 = (0..3).map(|k| q[k] / n - m[k] * m[k]).sum();
-    if var < 12.0 {
+    // Undecoded data is one solid colour, alpha included. A near-white
+    // texture whose shape is all in alpha is real (6m d960fe1b35c3c4c2, a
+    // fluorescent diffuser: RGB variance 0.3, alpha sigma 120); it was
+    // rejected as flat, 284 times in one build.
+    let alpha_var = q[3] / n - m[3] * m[3];
+    if var < 12.0 && alpha_var < 0.5 {
         return Some("flat decode (undecoded BCPack data)");
     }
     if m[2] > 200.0 && (100.0..160.0).contains(&m[0]) && (100.0..160.0).contains(&m[1]) {

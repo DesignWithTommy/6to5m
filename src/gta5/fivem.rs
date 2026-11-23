@@ -95,8 +95,8 @@ also: 6ixpack fivem vehicle <name> --game <dir> --out <dir>   (one 6m vehicle ->
 
 /// Per-stage output versions: bump only the one whose writer changed, so
 /// other outputs stay cached (each goes into its own outputs' fingerprints).
-pub const TEX_V: &str = "tex6";
-pub const YDR_V: &str = "ydr21";
+pub const TEX_V: &str = "tex7";
+pub const YDR_V: &str = "ydr22";
 /// Fragment props as dynamic .yft (fivem/frags.rs).
 pub const FRAG_V: &str = "frag5";
 pub const YBN_V: &str = "ybn5";
