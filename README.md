@@ -76,16 +76,16 @@ What works today:
 - [x] Peds to GTA V: `6ixpack fivem ped <name>` (skinned ydd components, yft skeleton retargeted to the GTA V ped skeleton, ytd, ymt, peds.meta; loads in CodeWalker, in-game test pending)
 - [x] Vehicles to GTA V: `6ixpack fivem vehicle <name>` (yft + vehicles/handling/carvariations/carcols metas; in-game test pending)
 - [x] Weapons to GTA V formats: `6ixpack fivem weapon <name|all>` (ydr/ytd + weapons.meta; in-game test pending)
-- [ ] Verify the gtxd.meta parent chain in game
+- [x] gtxd.meta parent chain checked by every `fivem build` (one parent each, no cycles, every txd in stream/, each drawable's textures found in its txd chain, no texture stored twice); in-game check pending
 - [x] Road paths to .ynd (AI traffic): `fivem build` part `paths`, whole 512 m node areas over the bbox, links only into written areas
 - [x] Navmesh to .ynv (ped/AI pathing): `fivem build` part `navmesh`, 6m tiles clipped into 150 m cells, decimated and merged under the 16k-polygon cap, edge adjacency across written cells
 - [ ] Lights to ymap LODLights / DistantLODLights (night lighting)
 - [ ] Instanced batches (grass, vegetation) to ymap grass instance lists
-- [ ] Minimap texture and zone names
+- [x] Minimap and zone names: the region's terrain as shaded relief in the six radar tiles `minimap_sea_<row>_<col>.ytd` (4500 m tiles from (-4140, 8400), fitted against vanilla); 512 m zones named after the dominant 6m archetype prefix (`<work>/zone_names.json` renames them), shown by `t6m_zones.lua`. Not yet tested in game
 - [x] Split output into several resources by region: `--split <metres>` writes `<out>/[<name>]/` with one resource per region plus `<name>_common` (ytyps, LOD/SLOD ymaps, shared txds, terrain, water) and an `ensure.cfg`; regions over `--split-max <MB>` (default 1024) are quartered. Not yet tested in game
 - [x] Collision surface materials: 6m surface ids map to GTA V materials (concrete, tarmac, gravel, dirt, sand, marsh, soil, grass, rock) through `sixng surfaces` categories; needs `<work>/collision/levels/surface_categories.json`, else DEFAULT. Not yet tested in game
-- [ ] Coordinate offset option: GTA VI's map reaches y 9474, past GTA V's ~±8000 limit
-- [ ] Los Santos removal in Rust: stub ymaps/ybns for vanilla _citye/_cityw/_hills, packing the ~11k ybn stubs into fewer files
+- [x] Coordinate offset: `--offset dx,dy[,dz]` moves every output (ymaps, terrain/collision ybns, interiors, water, minimap, zones); `--bbox` stays in 6m coordinates. GTA VI reaches y 9474, past GTA V's ~±8000
+- [x] Los Santos removal in Rust (part `lsremove`): reads GTA V's RPF7 archives (pure-Rust NG/AES decrypt; keys from GTA5.exe + CodeWalker's magic.dat, cached in `<work>/gta5_keys.bin`), indexes the 8,666 ymaps and 10,837 ybns of _citye/_cityw/_hills incl. DLCs once, and writes empty stand-ins for those seen from the region. The ybn stand-ins are byte-identical, so they share one file in the output cache. Not yet tested in game
 
 ## Contributing
 
