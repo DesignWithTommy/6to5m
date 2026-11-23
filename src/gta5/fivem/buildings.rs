@@ -1411,6 +1411,9 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
             // per-file stats stored with the cache entry (older entries: unknown)
             let lods = info["lods"].as_u64().map_or("unknown (cached before stats)".to_string(), |n| n.to_string());
             super::regionlog::bump_n("ydr_lod_levels", &format!("{lods} (cached)"), &an, info["bytes"].as_u64().unwrap_or(0));
+            if frag {
+                super::vlog::cached(&file, info.get("t6m_vehicles"));
+            }
             let s = ctx.emit(&file, &fp, info, None)?;
             ctx.report.lock().unwrap().converted.push(json!({"kind": "building", "name": an, "source": format!("levels.rpf@{off:x}"), "ydr": s}));
             return Ok(Some(a));
@@ -1477,10 +1480,9 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
     };
     if frag_out {
         ctx.skip(name, "fragment geometry outside its collision (converted anyway, check placement)", json!({"source": src}));
-        super::vlog::outside(name, delta);
     }
     let bytes = match entry.filter(|_| frag) {
-        Some(_) => super::frags::build_prop_yft(&mesh, &cols, 9998.0).inspect(|b| super::vlog::yft(&format!("{an}.yft"), b, cols.len().max(1))),
+        Some(_) => super::frags::build_prop_yft(&mesh, &cols, 9998.0),
         // the source model's own LOD levels and distances (LodGroup +0x50..+0x7C)
         None if lower.iter().any(|l| !l.geoms.is_empty()) => {
             let mut lv = vec![mesh.clone()];
@@ -1493,7 +1495,11 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
     let n_lod = 1 + lower.iter().filter(|l| !l.geoms.is_empty()).count();
     super::regionlog::bump_n("ydr_lod_levels", &format!("{n_lod} (fresh)"), &an, bytes.len() as u64);
     let alpha: std::collections::BTreeSet<&String> = mesh.geoms.iter().filter(|g| g.kind != 0).map(|g| &g.texture).collect();
-    let info = json!({"lo": lo, "hi": hi, "texs": texs, "alpha": alpha, "tpx": texel_px(&mesh), "lods": n_lod, "bytes": bytes.len()});
+    let mut info = json!({"lo": lo, "hi": hi, "texs": texs, "alpha": alpha, "tpx": texel_px(&mesh), "lods": n_lod, "bytes": bytes.len()});
+    if entry.is_some() && frag {
+        // [t6m:vehicles] record, kept in the cache info for cached builds
+        info["t6m_vehicles"] = super::vlog::fresh(&file, &bytes, cols.len().max(1), frag_out.then_some(delta));
+    }
     let s = ctx.emit(&file, &fp, info.clone(), Some(bytes))?;
     ctx.report.lock().unwrap().converted.push(json!({"kind": "building", "name": an, "source": format!("levels.rpf@{off:x}"), "ydr": s, "textures": texs.len(), "fragment": is_frag}));
     Ok(Some(from_info(&info)))
