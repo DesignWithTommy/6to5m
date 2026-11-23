@@ -71,7 +71,7 @@ What works today:
 - [x] Decals keep 6m vertex alpha (edge fades, 9c4c3cd)
 - [x] Collision in 128 m cells, welded 5 cm and simplified per material (fa3e66f)
 - [x] Per-placement tint rows: placements with `tintValue` > 0 use an archetype variant `<name>__tint<row>`, shared by every placement with that row
-- [ ] Prop batch per-instance tint (`ba049770` +0x34 RGBA)
+- [x] Prop batch per-instance tint (`ba049770` +0x34 RGBA): multiplies the base colour via tinted texture copies (fivem/batches.rs bake)
 - [x] Fragments with physics: fragment props become dynamic `.yft` (one rigid piece, one physics box per 6m collider placed by its group bone, 6m masses; non-box collider types use their bound box; breakable multi-part props stay one piece)
 - [x] Peds to GTA V: `6ixpack fivem ped <name>` (skinned ydd components, yft skeleton retargeted to the GTA V ped skeleton, ytd, ymt, peds.meta; loads in CodeWalker, in-game test pending)
 - [x] Vehicles to GTA V: `6ixpack fivem vehicle <name>` (yft + vehicles/handling/carvariations/carcols metas; in-game test pending)
