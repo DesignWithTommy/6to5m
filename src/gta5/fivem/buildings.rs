@@ -1904,7 +1904,8 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         let name = lvl_name(lvl);
         ctx.layout.lock().unwrap().lod_ymaps.insert(name.clone(), ids.iter().map(|&i| done[&kept[i].name].an.clone()).collect());
         let pname = if has_parent { lvl_name(lvl + 1) } else { String::new() };
-        let map = MapData { entities, ..serde_json::from_value(json!({"name": name, "parent": pname, "flags": 2, "content_flags": 2, "exported_by": "6ixpack fivem"})).unwrap() };
+        let map = MapData { entities, ..serde_json::from_value(json!({"name": name, "parent": pname, "exported_by": "6ixpack fivem"})).unwrap() };
+        let map = with_content_flags(map);
         if let Ok((st, _)) = meta::compute_extents(&map.entities, &archetypes) {
             loads.push((name.clone(), map.entities.len(), st));
         }
@@ -1966,6 +1967,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         let entities: Vec<Entity> = ids.iter().enumerate().map(|(j, &i)| ent(i, j + 1, parent[i].map_or(-1, |q| slot[q] as i32))).collect();
         let pname = if has_parent { lvl_name(1) } else { String::new() };
         let map = MapData { entities, ..serde_json::from_value(json!({"name": name, "parent": pname, "exported_by": "6ixpack fivem"})).unwrap() };
+        let map = with_content_flags(map);
         if let Ok((st, _)) = meta::compute_extents(&map.entities, &archetypes) {
             loads.push((name.clone(), map.entities.len(), st));
         }
@@ -1982,6 +1984,26 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         }
     }
     Ok(())
+}
+
+/// CMapData flags / contentFlags from the entities' lod levels, as in the
+/// base game's ymaps (CodeWalker CalcFlags): HD/ORPHANHD -> content bit 1,
+/// LOD -> 2, SLOD1 -> 16, SLOD2-4 -> 4; any LOD level sets flags bit 2.
+/// Vanilla: HD maps 0/1(+64), LOD+SLOD1 maps 2/18, SLOD maps 2/20. Ours were
+/// 0/0 for HD cells and 2/2 for every LOD/SLOD level.
+fn with_content_flags(mut map: MapData) -> MapData {
+    let (mut f, mut c) = (0u32, 0u32);
+    for e in &map.entities {
+        match meta::enum_val(&e.lod_level, meta::LOD_TYPES).unwrap_or(0) {
+            0 | 5 => c |= 1,
+            1 => (c, f) = (c | 2, f | 2),
+            2 => (c, f) = (c | 16, f | 2),
+            _ => (c, f) = (c | 4, f | 2),
+        }
+    }
+    map.flags = f;
+    map.content_flags = c;
+    map
 }
 
 /// HD near-cell size (metres); split.rs maps these names back to 512 m cells.
