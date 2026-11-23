@@ -40,6 +40,70 @@ const MISSING: &str = "r6m_missing";
 /// 6m render bucket bits -> GTA V shader kind (ydr::Geom::kind).
 /// DXT1 (opaque) or DXT5 (with alpha) DDS with a box-filtered mip chain,
 /// compressed in pure Rust (texpresso).
+/// A TTPF texture's own data as a DX10 DDS (native format, all mips,
+/// slice 0), for formats the ytd writer takes. None for arrays, split
+/// 2-byte layouts or other formats (callers fall back to RGBA8).
+fn native_dds(t: &sixng_core::ttpf::TtpfTex, data: &[u8]) -> Option<Vec<u8>> {
+    use sixng_core::texture::Fmt;
+    if t.split_2b || t.slices() != 1 || !matches!(t.dxgi_format, 70..=78 | 79 | 80 | 82 | 83 | 97..=99 | 27..=29 | 87 | 90 | 91) {
+        return None;
+    }
+    let fmt = Fmt::from_dxgi(t.dxgi_format);
+    if fmt == Fmt::Unknown {
+        return None;
+    }
+    let l = t.layout()?;
+    let (bd, bpe) = (fmt.block_dim().max(1), fmt.bytes_per_elem() as usize);
+    let bc = bd > 1;
+    let mips = l.mips.len() as u32;
+    let blocks = |m: u32| (((t.width >> m).max(1)).div_ceil(bd) as usize, ((t.height >> m).max(1)).div_ceil(bd) as usize);
+    let (bx0, by0) = blocks(0);
+    let mut out = Vec::new();
+    let mut w = |v: u32| out.extend_from_slice(&v.to_le_bytes());
+    w(u32::from_le_bytes(*b"DDS "));
+    w(124);
+    w(if bc { 0xA1007 } else { 0x2100F });
+    w(t.height);
+    w(t.width);
+    w(if bc { (bx0 * by0 * bpe) as u32 } else { (bx0 * bpe) as u32 });
+    w(0);
+    w(mips);
+    for _ in 0..11 {
+        w(0);
+    }
+    w(32);
+    w(4);
+    w(u32::from_le_bytes(*b"DX10"));
+    for _ in 0..5 {
+        w(0);
+    }
+    w(if mips > 1 { 0x401008 } else { 0x1000 });
+    for _ in 0..4 {
+        w(0);
+    }
+    w(t.dxgi_format);
+    w(3);
+    w(0);
+    w(1);
+    w(0);
+    for m in 0..mips {
+        let (bx, by) = blocks(m);
+        let p = &l.mips[m as usize];
+        let lin = l.untile_slice(data, m as usize, 0);
+        let (pw, ph) = (p.w as usize, p.h as usize);
+        for y in 0..by {
+            if y < ph {
+                let n = bx.min(pw);
+                out.extend_from_slice(&lin[y * pw * bpe..(y * pw + n) * bpe]);
+                out.resize(out.len() + (bx - n) * bpe, 0);
+            } else {
+                out.resize(out.len() + bx * bpe, 0);
+            }
+        }
+    }
+    Some(out)
+}
+
 fn rgba_dds(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
     let mut levels = vec![(rgba.to_vec(), w, h)];
     while levels.len() < 12 {
@@ -448,7 +512,11 @@ impl Pools {
             super::quality::hit("flat_decode", 1, || format!("ttpf {h64:016x} {w}x{h}: {why}"));
             return Err(why.into());
         }
-        let dds = rgba_dds(&rgba, w, h);
+        // Ship the store's own blocks (BCn / RGBA8, every mip) when the whole
+        // chain decoded; RGBA8 re-encoding made TTPF textures 4-8x their
+        // size (300+ ytds over FiveM's 16 MB limit: evicted, blurry).
+        let native = if skipped == 0 { native_dds(t, &data) } else { None };
+        let dds = native.unwrap_or_else(|| rgba_dds(&rgba, w, h));
         ytd::from_dds("check", &dds)?;
         let p = self.path(hash);
         write_atomic(&p, &dds).or_else(|e| if p.exists() { Ok(()) } else { Err(e.to_string()) })?;
@@ -1739,6 +1807,44 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         }
         dicts.push((name, std::mem::take(&mut cur), top_shared.clone()));
         size = 0;
+    }
+    // Over-cap dictionaries (one archetype alone can exceed TXD_CAP; the
+    // packing above only splits between archetypes, leaving 300+ ytds over
+    // FiveM's 16 MB streaming limit, evicted: blur / fallbacks). Keep the
+    // first TXD_CAP in the archetype's own txd and chain the rest as parents
+    // (gtxd.meta): <stem> <- <stem>_p1 <- <stem>_p2 ... <- original parent.
+    // A single texture over the cap still ships whole (no mip drop).
+    {
+        let mut extra: Vec<(String, Vec<String>, Option<String>)> = Vec::new();
+        for d in dicts.iter_mut() {
+            if d.1.iter().map(|t| tsize(t)).sum::<u64>() <= TXD_CAP {
+                continue;
+            }
+            let mut list = std::mem::take(&mut d.1);
+            list.sort_by(|a, b| tsize(b).cmp(&tsize(a)).then(a.cmp(b)));
+            let mut parts: Vec<Vec<String>> = vec![Vec::new()];
+            let mut size = 0u64;
+            for t in list {
+                let s = tsize(&t);
+                if !parts.last().unwrap().is_empty() && size + s > TXD_CAP {
+                    parts.push(Vec::new());
+                    size = 0;
+                }
+                size += s;
+                parts.last_mut().unwrap().push(t);
+            }
+            let top = d.2.take();
+            let n = parts.len();
+            let mut it = parts.into_iter();
+            d.1 = it.next().unwrap_or_default();
+            d.2 = (n > 1).then(|| format!("{}_p1", d.0)).or(top.clone());
+            for (k, part) in it.enumerate() {
+                let k = k + 1;
+                let par = if k + 1 < n { Some(format!("{}_p{}", d.0, k + 1)) } else { top.clone() };
+                extra.push((format!("{}_p{k}", d.0), part, par));
+            }
+        }
+        dicts.extend(extra);
     }
     let total: usize = dicts.iter().map(|d| d.1.len()).sum();
     eprintln!("buildings: {} textures ({} shared) in {} dictionaries", total, shared.len(), dicts.len());
