@@ -1611,13 +1611,62 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     }
     let top_shared = dicts.last().map(|d| d.0.clone());
     let mut txd_of: HashMap<String, String> = HashMap::new();
+    // Size of a texture once written: the cached dds scaled down to its
+    // size cap (limit_size drops the top mips), read from the dds header.
+    let esize = |t: &str| -> u64 {
+        let raw = tsize(t);
+        let mut h = [0u8; 20];
+        let dim = fs::File::open(cache.join(format!("{}.dds", &t[4..]))).and_then(|mut f| std::io::Read::read_exact(&mut f, &mut h)).map_or(0, |_| u32::from_le_bytes([h[12], h[13], h[14], h[15]]).max(u32::from_le_bytes([h[16], h[17], h[18], h[19]])));
+        let cap = cap_of(t) as u32;
+        if dim > cap && cap > 0 {
+            (raw as f64 * (cap as f64 / dim as f64).powi(2)) as u64
+        } else {
+            raw
+        }
+    };
+    // A model that references more than TXD_CAP of textures on its own (big
+    // shells: 240-270 textures across its submeshes) cannot share a family
+    // txd and must not get one oversized ytd: its textures are split over
+    // its own txd plus gtxd.meta parents, each <= TXD_CAP. Every texture is
+    // one the model's submeshes use; nothing is downscaled for this.
+    let mut big_n = 0usize;
+    let mut big: HashSet<String> = HashSet::new();
+    for a in fam.values().flatten() {
+        let own: Vec<&String> = a.texs.iter().filter(|t| !is_shared.contains(t)).collect();
+        if own.iter().map(|t| esize(t)).sum::<u64>() <= TXD_CAP {
+            continue;
+        }
+        let mut sorted = own.clone();
+        sorted.sort_by(|x, y| esize(y).cmp(&esize(x)).then(x.cmp(y)));
+        // first-fit decreasing into as few txds as the cap allows
+        let mut bins: Vec<(Vec<String>, u64)> = Vec::new();
+        for t in sorted {
+            let s = esize(t);
+            match bins.iter_mut().find(|b| b.1 + s <= TXD_CAP) {
+                Some(b) => {
+                    b.0.push(t.clone());
+                    b.1 += s;
+                }
+                None => bins.push((vec![t.clone()], s)),
+            }
+        }
+        let names: Vec<String> = (0..bins.len()).map(|k| format!("t6m_big{big_n:03}_{k}")).collect();
+        big_n += 1;
+        super::regionlog::bump("txd_split", &format!("{} txds", bins.len()), &a.an);
+        for (k, (list, _)) in bins.into_iter().enumerate() {
+            // child -> parent -> ... -> last one, whose parent is the shared top
+            dicts.push((names[k].clone(), list, names.get(k + 1).cloned().or_else(|| top_shared.clone())));
+        }
+        txd_of.insert(a.an.clone(), names[0].clone());
+        big.insert(a.an.clone());
+    }
     let mut fam_n = 0usize;
     let (mut cur, mut size): (Vec<String>, u64) = (Vec::new(), 0);
     let mut members: Vec<String> = Vec::new();
     let n_fam = fam.len();
     for (fi, (_, mut v)) in fam.into_iter().enumerate() {
         v.sort_by(|a, b| a.an.cmp(&b.an));
-        for a in v {
+        for a in v.into_iter().filter(|a| !big.contains(&a.an)) {
             let mut new: Vec<&String> = a.texs.iter().filter(|t| !is_shared.contains(t) && !cur.contains(t)).collect();
             let add: u64 = new.iter().map(|t| tsize(t)).sum();
             if !cur.is_empty() && size + add > TXD_CAP {
