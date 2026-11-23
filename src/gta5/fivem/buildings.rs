@@ -244,9 +244,6 @@ const COLOR_SLOTS: [u32; 16] = [
     234123336, 3831897388, 3489704073, 1380592926,
 ];
 
-/// diffusetex2 (GTA6-Asset-Info 12-materials.md): secondary/dirt colour layer.
-const DIFFUSE2: u32 = 0x0df4_7048;
-
 struct Place {
     name: String,
     off: usize,
@@ -1169,25 +1166,6 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: us
             for t in [n.clone(), ydr::FLAT_SPEC.to_string()] {
                 if !texs.contains(&t) {
                     texs.push(t);
-                }
-            }
-        }
-        // 6m standard_dirt: diffusetex2 (0df47048) is a dirty copy of the same
-        // sheet on the base UV (same layout), weighted per vertex by COLOR0.a
-        // (layer-2 weight). GTA V: decal.sps pass, alpha = tex.a * Colour0.a,
-        // emitted only on triangles where that weight is > 0.
-        if (kind == 0 || kind == 4) && tex != MISSING {
-            if let (Some(mat), Some(cols)) = (sm.shader.and_then(|s| m.materials.as_ref()?.get(s)), sm.colors.as_deref()) {
-                if let Some(t2) = mat.textures.iter().find(|t| t.param == DIFFUSE2) {
-                    let idx: Vec<u32> = sm.indices.chunks_exact(3).filter(|t| t.iter().any(|&i| cols.get(i as usize).is_some_and(|c| c >> 24 != 0))).flatten().copied().collect();
-                    let key = m.embedded.as_ref().and_then(|e| e.by_hash(t2.hash)).and_then(|x| x.asset_key).unwrap_or(t2.key);
-                    if !idx.is_empty() && pools.get(t2.hash, key, t2.h64).is_ok() {
-                        let d = format!("r6m_{:08x}", t2.hash);
-                        if !texs.contains(&d) {
-                            texs.push(d.clone());
-                        }
-                        push_geoms_n(&mut mesh.geoms, &sm.positions, &idx, sm.normals.as_deref(), sm.uvs.as_deref(), Some(cols), &d, 2);
-                    }
                 }
             }
         }
