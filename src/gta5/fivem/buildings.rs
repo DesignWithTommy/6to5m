@@ -891,6 +891,7 @@ fn load_places(ctx: &Ctx, dir: &Path, index: &ArchiveIndex) -> Result<Vec<Place>
         let k = (name.clone(), (pos[0] * 10.0).round() as i64, (pos[1] * 10.0).round() as i64, (pos[2] * 10.0).round() as i64);
         let rots: &mut Vec<[f32; 4]> = seen.entry(k).or_default();
         if rots.iter().any(|r| (0..4).map(|i| r[i] * stored[i]).sum::<f32>().abs() > 0.9995) {
+            super::regionlog::bump("dedup_drops", "same model, spot and rotation", &name);
             return;
         }
         rots.push(stored);
@@ -1472,6 +1473,8 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
         None => ydr::build_ydr(&mesh, 9998.0, None),
     }
     .map_err(|e| format!("{file}: {e}"))?;
+    let n_lod = 1 + lower.iter().filter(|l| !l.geoms.is_empty()).count();
+    super::regionlog::bump("ydr_lod_levels", &n_lod.to_string(), &an);
     let alpha: std::collections::BTreeSet<&String> = mesh.geoms.iter().filter(|g| g.kind != 0).map(|g| &g.texture).collect();
     let info = json!({"lo": lo, "hi": hi, "texs": texs, "alpha": alpha, "tpx": texel_px(&mesh)});
     let s = ctx.emit(&file, &fp, info.clone(), Some(bytes))?;
@@ -1629,6 +1632,17 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     }
     let total: usize = dicts.iter().map(|d| d.1.len()).sum();
     eprintln!("buildings: {} textures ({} shared) in {} dictionaries", total, shared.len(), dicts.len());
+    {
+        let mut by: Vec<(&String, usize, u64)> = dicts.iter().map(|d| (&d.0, d.1.len(), d.1.iter().map(|t| tsize(t)).sum())).collect();
+        by.sort_by(|a, b| b.2.cmp(&a.2));
+        let mb = |b: u64| (b as f64 / 1048576.0 * 10.0).round() / 10.0;
+        let mut fams: HashMap<&String, usize> = HashMap::new();
+        for v in txd_of.values() {
+            *fams.entry(v).or_default() += 1;
+        }
+        super::regionlog::set("txd_per_family", json!({"dictionaries": dicts.len(), "textures": total, "shared": shared.len(), "models_per_txd_max": fams.values().max().copied().unwrap_or(0),
+            "largest": by.iter().take(5).map(|d| json!({"txd": d.0, "textures": d.1, "mb": mb(d.2), "models": fams.get(d.0).copied().unwrap_or(0)})).collect::<Vec<_>>()}));
+    }
     let alpha_tex: HashSet<&String> = done.values().flat_map(|a| &a.alpha).collect();
     drop(p);
     let p = super::Phase::new(ctx, "  textures (ytd)");
@@ -1717,6 +1731,8 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         .iter()
         .map(|(n, a)| {
             let r = ((0..3).map(|k| (a.hi[k] - a.lo[k]).powi(2)).sum::<f32>().sqrt() / 2.0).max(1.0);
+            let src = if alod.get(n).is_some_and(|d| *d > 0.0) { "6m" } else if small(a) { "fallback (clutter 30x radius)" } else { "fallback (10x radius floor)" };
+            super::regionlog::bump("lod_dist_source", src, &a.an);
             serde_json::from_value(json!({"name": a.an, "lod_dist": lod(n, a), "bb_min": a.lo, "bb_max": a.hi, "bs_radius": r, "hd_texture_dist": 100.0,
                 "texture_dictionary": txd_of[&a.an]}))
             .unwrap()
@@ -1901,6 +1917,9 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         eprintln!("buildings: {} flat ground tiles recorded for terrain", ground.len());
     }
     let links_n = (0..kept.len()).filter(|&i| alive[i] && parent[i].is_some()).count();
+    for i in (0..kept.len()).filter(|&i| alive[i] && kept[i].level == 0 && parent[i].is_none()) {
+        super::regionlog::bump("orphan_hd", "ORPHANHD entities", &done[&kept[i].name].an);
+    }
     eprintln!("buildings: {} entities, {links_n} LOD links, {top} LOD levels", alive.iter().filter(|x| **x).count());
     for ((near, cx, cy), ids) in cells {
         let name = if near { format!("t6m_bn_{:03}_{:03}", cx + 200, cy + 200) } else { format!("t6m_bld_{:02}_{:02}", cx + 50, cy + 50) };

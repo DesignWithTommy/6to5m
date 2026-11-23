@@ -27,6 +27,7 @@ mod geom;
 mod lsremove;
 mod minimap;
 mod nav;
+mod regionlog;
 pub mod split;
 mod terrain;
 mod vehicles;
@@ -517,6 +518,7 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
     })();
     ctx.save_manifest()?;
     diagnostics(&ctx, t0.elapsed().as_secs_f64());
+    regionlog::finish(&ctx.o.out, &ctx.stream);
     let r = ctx.report.lock().unwrap();
     let written = r.outputs.iter().filter(|v| v["status"] == "written").count();
     println!(
