@@ -74,6 +74,14 @@ pub fn decode(codec: u8, comp: &[u8], out_len: usize) -> Result<Decoded> {
         bail!("BCPack: {out_len} bytes is not a whole number of blocks");
     }
     let _ = widths;
+    if codec == CODEC_BC6H {
+        // Upstream SixNG BC6H rebuilder with its fitted preset history.
+        let o = crate::bc6pack::decode_bc6h(comp, out_len / bb).ok_or_else(|| anyhow!("BCPack BC6H chunk does not decode"))?;
+        if o.blocks.len() != out_len {
+            bail!("BCPack BC6H: {} bytes decoded, {out_len} expected", o.blocks.len());
+        }
+        return Ok(Decoded { data: o.blocks, unknown: o.unfitted_blocks, lost: Vec::new(), inconsistent: 0, info: Vec::new() });
+    }
     if codec == CODEC_BC7 {
         // Upstream SixNG BC7 rebuilder: fitted header table and all 256
         // endpoint/index preset slots (d724355), so preset-chained blocks
@@ -109,11 +117,11 @@ pub(crate) fn decode_lanes(codec: u8, comp: &[u8], out_len: usize) -> Result<Vec
 /// Fitted preset ("built-in") history; see `bcpack_calib`.
 /// Bump on every change to decoded BCPack output: keys derived texture
 /// caches (fivem_tex_cache_v{N}) so stale ones invalidate themselves.
-pub const BCPACK_DECODER_VERSION: u32 = 4;
+pub const BCPACK_DECODER_VERSION: u32 = 5;
 /// Per-codec decoder versions (bump the codec whose decoded output changed):
 /// BC1, BC3, BC4, BC5, BC6H, BC7. `cache_tag` builds a texture-cache key
 /// from them so a change re-decodes only that codec's textures.
-pub const BCPACK_CODEC_VERSION: [(u8, u32); 6] = [(CODEC_BC1, 1), (CODEC_BC3, 2), (CODEC_BC4, 1), (CODEC_BC5, 2), (CODEC_BC6H, 3), (CODEC_BC7, 2)];
+pub const BCPACK_CODEC_VERSION: [(u8, u32); 6] = [(CODEC_BC1, 1), (CODEC_BC3, 2), (CODEC_BC4, 1), (CODEC_BC5, 2), (CODEC_BC6H, 4), (CODEC_BC7, 2)];
 
 /// Decoder version for a DXGI format's BCPack codec (0 = not BCPack-coded).
 pub fn codec_version_for_dxgi(dxgi: u32) -> u32 {

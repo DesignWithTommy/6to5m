@@ -22,6 +22,7 @@ pub mod texture;
 pub mod ttpf;
 pub mod bcpack;
 pub mod bc7pack;
+pub mod bc6pack;
 mod bcpack_tables;
 pub mod bcpack_calib;
 mod bcpack_calib6;
