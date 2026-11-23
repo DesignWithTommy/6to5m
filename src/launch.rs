@@ -244,8 +244,9 @@ fn build_providers(tuxbox: &Path, out: &Path) -> Result<Vec<PathBuf>, Box<dyn Er
                 .args(&objs)
                 // extra libs (CRT first) before the Rust archive, so DllMain binds to the
                 // CRT stub, not to an import library that also exports it (xinput.lib)
-                .args(*libs)
+                .args(libs.iter().take_while(|l| **l == "libcmt.lib"))
                 .arg(lib_dir.join(format!("{}.lib", pkg.replace('-', "_"))))
+                .args(libs.iter().skip_while(|l| **l == "libcmt.lib"))
                 .args(RUST_STD_LIBS),
             &format!("link {dll}"),
         )?;
