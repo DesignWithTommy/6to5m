@@ -871,13 +871,15 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
 
 /// peds.meta with one CPedModelInfo entry (ambient civilian defaults).
 fn peds_meta(ped: &str, female: bool) -> String {
+    // values all vanilla (DLC peds.meta, 435 items): personality
+    // Streamed_*, voice SILENT_PVG, expression dict null.
     // pose matcher: every vanilla ped (female too) uses Male / Male_prone
     // (update.rpf peds.ymt); any other name takes a new PoseMatcherStore
     // slot and the full pool (28) crashes the data file mounter
     let (ptype, clip, expr, gest, face, visem, pose, capsule, perso) = if female {
-        ("CIVFEMALE", "move_f@generic", "expr_set_ambient_female", "ANIM_GROUP_GESTURE_F_GENERIC", "facial_clipset_group_gen_female", "ANIM_GROUP_VISEMES_F_LO", "Male", "STANDARD_FEMALE", "YoungFemale")
+        ("CIVFEMALE", "move_f@generic", "expr_set_ambient_female", "ANIM_GROUP_GESTURE_F_GENERIC", "facial_clipset_group_gen_female", "ANIM_GROUP_VISEMES_F_LO", "Male", "STANDARD_FEMALE", "Streamed_Female")
     } else {
-        ("CIVMALE", "move_m@generic", "expr_set_ambient_male", "ANIM_GROUP_GESTURE_M_GENERIC", "facial_clipset_group_gen_male", "ANIM_GROUP_VISEMES_M_LO", "Male", "STANDARD_MALE", "YoungMale")
+        ("CIVMALE", "move_m@generic", "expr_set_ambient_male", "ANIM_GROUP_GESTURE_M_GENERIC", "facial_clipset_group_gen_male", "ANIM_GROUP_VISEMES_M_LO", "Male", "STANDARD_MALE", "Streamed_Male")
     };
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -889,7 +891,7 @@ fn peds_meta(ped: &str, female: bool) -> String {
       <ClipDictionaryName>{clip}</ClipDictionaryName>
       <BlendShapeFileName>null</BlendShapeFileName>
       <ExpressionSetName>{expr}</ExpressionSetName>
-      <ExpressionDictionaryName>default</ExpressionDictionaryName>
+      <ExpressionDictionaryName>null</ExpressionDictionaryName>
       <ExpressionName>null</ExpressionName>
       <Pedtype>{ptype}</Pedtype>
       <MovementClipSet>{clip}</MovementClipSet>
@@ -916,7 +918,7 @@ fn peds_meta(ped: &str, female: bool) -> String {
       <PedIKSettingsName />
       <TaskDataName />
       <IsStreamedGfx value="false" />
-      <AmbulanceShouldRespond value="true" />
+      <AmbulanceShouldRespondTo value="true" />
       <CanRideBikeWithNoHelmet value="false" />
       <CanSpawnInCar value="true" />
       <IsHeadBlendPed value="false" />
@@ -945,7 +947,7 @@ fn peds_meta(ped: &str, female: bool) -> String {
       <Age value="0" />
       <MaxPassengersInCar value="0" />
       <ExternallyDrivenDOFs />
-      <PedVoiceGroup />
+      <PedVoiceGroup>SILENT_PVG</PedVoiceGroup>
       <AnimalAudioObject />
       <AbilityType>SAT_NONE</AbilityType>
       <ThermalBehaviour>TB_WARM</ThermalBehaviour>
