@@ -24,10 +24,7 @@ const FAMILIES: &[(&str, &str, &str)] = &[
     ("99ad6fc9", "opaque", "vehicle tyre (standard_vehicle_2lyr_tyre_inst)"),
     ("fa9cc069", "window", "vehicle windows"),
     ("4dc0ac6a", "window", "vehicle windows (helicopters, boats)"),
-    // Not visible surfaces (GTA6-Asset-Info c4ca3e9): the wiper sweep mask
-    // (no textures, windscreen bones only) and the boat hull-opening stencil lid.
-    ("bd71bdbf", "hidden", "windshield_wipermask: wiper sweep mask, not a visible surface"),
-    ("fc34f08b", "hidden", "vehicle_water_stencil: stencil lid over a hull opening, not a visible surface"),
+    ("bd71bdbf", "window", "vehicle windows, untextured (mid LOD)"),
     ("921b19e5", "decal", "vehicle livery / sign decal"),
     // glass
     ("298c4c0f", "glass", "exterior window panes"),

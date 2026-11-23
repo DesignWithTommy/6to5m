@@ -86,9 +86,6 @@ pub struct MipPlace {
     /// Size in elements.
     pub w: u32,
     pub h: u32,
-    /// Row width the level is padded to, in elements (addrlib: mip 0's
-    /// elements halved rounding up): the block pitch of its addresses.
-    pub pw: u32,
     /// Byte offset of the mip's first block (non-tail) or of the tail block.
     pub offset: u64,
     /// Origin inside the tail block, in elements (tail mips only).
@@ -135,7 +132,7 @@ impl Layout {
         // later mip's offset.
         let padded: Vec<(u32, u32)> = (0..nm).map(|i| (w.div_ceil(1 << i).max(1), h.div_ceil(1 << i).max(1))).collect();
         let first = padded.iter().enumerate().position(|(i, &(mw, mh))| mw <= tw && mh <= th && nm - i as u32 <= max_tail).unwrap_or(nm as usize);
-        let mut place: Vec<MipPlace> = dims.iter().zip(&padded).map(|(&(mw, mh), &(pw, _))| MipPlace { w: mw, h: mh, pw, offset: 0, tail: None }).collect();
+        let mut place: Vec<MipPlace> = dims.iter().map(|&(mw, mh)| MipPlace { w: mw, h: mh, offset: 0, tail: None }).collect();
         let mut off = if first < nm as usize { bs } else { 0 };
         for i in (0..first).rev() {
             let (mw, mh) = padded[i];
@@ -257,7 +254,7 @@ impl Layout {
         match p.tail {
             Some((cx, cy)) => base + self.inblock(x + cx, y + cy) * self.bpe as u64,
             None => {
-                let pitch = p.pw.div_ceil(self.block_w) as u64;
+                let pitch = p.w.div_ceil(self.block_w) as u64;
                 let blk = (y / self.block_h) as u64 * pitch + (x / self.block_w) as u64;
                 base + blk * self.block_bytes + self.inblock(x % self.block_w, y % self.block_h) * self.bpe as u64
             }

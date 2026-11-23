@@ -840,10 +840,7 @@ pub fn build_yft(f: &Frag) -> Result<Vec<u8>, String> {
     for d in [0.02f32, 0.02, 0.01, 0.02, 0.02, 0.01] {
         w.v3([d; 3]).u32(NAN_BITS);
     }
-    // Archetype2 (damaged state) stays null: vanilla never shares Archetype1, and its
-    // composite never carries a BVH (CodeWalker BoundComposite.BuildBVH); sharing it
-    // placed the BVH composite twice (FiveM "Invalid fixup" on >5-child props).
-    w.ptr(Some(names_b)).ptr(Some(groups_b)).ptr(Some(children_b)).ptr(Some(arch)).u64(0).ptr(Some(comp));
+    w.ptr(Some(names_b)).ptr(Some(groups_b)).ptr(Some(children_b)).ptr(Some(arch)).ptr(Some(arch)).ptr(Some(comp));
     w.ptr(Some(inert_b)).ptr(Some(vecs_b)).ptr(Some(trans_b)).u64(0).u64(0);
     w.u8(0).u8(0).u8(f.groups.len() as u8).u8(roots as u8).u8(1).u8(n as u8).u8(n as u8).u8(0);
     w.u64(0).u64(0);

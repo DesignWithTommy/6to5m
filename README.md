@@ -37,18 +37,17 @@ What works today:
   - `6ixpack fivem weapon <name|all>`: 6m modular guns (data.rpf base `w_<class>_<name>_<nn>` plus its parts, assembled at the `WAP_`/`AAP_` sockets with the first variant per slot) to `<model>.ydr` (GTA V weapon skeleton: Gun_Root, Gun_Muzzle/Nuzzle, Gun_GripR/L, Gun_VFX_Eject, WAPClip/Supp/Scop/FlshLasr/Grip) and `<model>.ytd`, plus weaponarchetypes/weapons/weaponanimations meta and fxmanifest. Stats, anims and audio are GTA V defaults per class; melee and thrown items are skipped. Weapon shaders have no colour map (normal + packed material only), so the colour map is generated from the packed material-id map (gunmetal / polymer finishes per id).
   - `6ixpack fivem ped <name>`: every packs.rpf drawable named `<name>_*` becomes a component (`head_000_u`, `uppr_000_u`, `jbib_000_u`, ...) of `<ped>.ydd`, skinned onto `<ped>.yft`, the standard GTA V ped skeleton (SKEL_ROOT, GTA V bone names and tags) with the 6m joint positions; plus `<ped>.ytd`, `<ped>.ymt`, peds.meta and fxmanifest. Diffuse only (flat normal/spec maps), one texture per drawable. Parts follow SixNG's default look (`--all` for every part). GM_ helper bones (girth, cull) skin to the body bone their name gives instead of being dropped. `--hair` / `--beard <groom>` add strand-hair grooms as cards; `--grooms` lists the grooms that fit the head.
   - Terrain tiles, water and buildings/props as ydr, with ytd textures re-encoded to DXT1/DXT5.
-  - Textures picked from every material slot until one is a real colour map (normal, mask and flat maps rejected); texture size capped by prop size (128 px for small clutter).
+  - Textures picked by 6m slot hash (normal, mask and flat maps rejected), at their native 6m size.
   - Road and apron tiles: one opaque base layer plus alpha-blended decal layers, with the terrain sunk underneath.
   - Draw distances: big buildings never vanish before the props on them; small clutter streams only within 40-100 m.
-  - Fast rebuilds: every converted ydr/ytd/ybn is kept in `<work>/fivem_out_cache` by fingerprint (per-stage versions, so a collision fix doesn't redo textures) and hardlinked into `stream/`; unchanged files are never rewritten, so FXServer keeps its hashes. `--bake` fills the cache from the whole map once; after that a new region, out dir or `--split` is mostly linking.
-  - Textures capped by prop size(128 to 1024 px; `--max-tex 512` cuts building ytds by about 70%).
-  - BC7 textures used only by opaque geometry are re-encoded to DXT1 (half size, cached in the texture cache).
+  - One pass, no extraction: assets are read from the 6m .rpf at their offsets, converted in memory and written straight into `--out`; the output itself is the cache (fingerprint manifest, per-stage versions), so unchanged files are skipped and FXServer keeps its hashes.
+  - Textures ship in their native block format; oversized dictionaries chain into parent ytds.
   - Texture dictionaries share common textures through a gtxd.meta parent chain.
   - Correct render buckets (opaque, alpha, decal, cutout).
   - LOD/SLOD chains (or `--no-lod`).
   - Static collision as ybn (welded, deduplicated, weapon-only shapes dropped unless `--weapon-collision`).
   - Water only over low or empty ground (no ocean ambience under the land); stale outputs pruned on a full build.
-  - Texture cache versioned per BC codec, so a decoder fix re-decodes only that format.
+  - Texture records versioned per BC codec, so a decoder fix re-decodes only that format.
   - Every output is checked against a CodeWalker loader.
 
 ## Roadmap
