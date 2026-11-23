@@ -1,7 +1,6 @@
 mod mcp;
 mod sixng_cli;
 mod texdump;
-mod launch;
 use memmap2::Mmap;
 use rpf9::{audio, extract, model, report, texture};
 use report::Report;
@@ -28,9 +27,6 @@ usage: 6ixpack [-n] [-v] <file> [outdir]
        6ixpack colour-textures --game <dir> [--out <dir>]
                                    every colour texture (albedo / emissive,
                                    no normal or data maps) as a top-mip PNG
-       6ixpack launch --game <dir> [--build-only|--stage-only|--restore]
-                                   run a dumped Xbox Series exe on Windows through
-                                   the vendored TuxBox console-library providers
        6ixpack sixng   <args...>   SixNG: placements, vehicles, GLB export, names, ... (--help)
 
   -n, --list     report only, extract nothing
@@ -56,7 +52,6 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some("fivem") => return rpf9::gta5::fivem::run(&args[1..]),
         Some("bcpack-calibrate") => return bcpack_calibrate(&args[1..]),
         Some("colour-textures") => return texdump::run(&args[1..]),
-        Some("launch") => return launch::run(&args[1..]),
         Some("sixng") => {
             sixng_cli::main(&args[1..]);
             return Ok(());
