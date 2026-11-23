@@ -117,7 +117,7 @@ pub(crate) fn decode_lanes(codec: u8, comp: &[u8], out_len: usize) -> Result<Vec
 /// Fitted preset ("built-in") history; see `bcpack_calib`.
 /// Bump on every change to decoded BCPack output: keys derived texture
 /// caches (fivem_tex_cache_v{N}) so stale ones invalidate themselves.
-pub const BCPACK_DECODER_VERSION: u32 = 5;
+pub const BCPACK_DECODER_VERSION: u32 = 6;
 /// Per-codec decoder versions (bump the codec whose decoded output changed):
 /// BC1, BC3, BC4, BC5, BC6H, BC7. `cache_tag` builds a texture-cache key
 /// from them so a change re-decodes only that codec's textures.
