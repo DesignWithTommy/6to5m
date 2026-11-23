@@ -1,7 +1,8 @@
 //! Static collision: 6m physics bounds (sixng bounds decoder, already in
 //! world space) merged into one t6m_cc_XXX_YYY.ybn per 128 m cell
-//! (XXX = cell + 200), welded on a 5 cm grid and simplified per material:
-//! collision only needs the walkable shape, not render detail.
+//! (XXX = cell + 200). Triangles are welded on a 5 cm grid; boxes, spheres,
+//! capsules and cylinders stay native ybn primitives (6m bounds use the GTA V
+//! polygon types; tessellating them was two thirds of all triangles).
 //!
 //! The bounds' world bboxes are cached in <work>/fivem_collision_index.jsonl
 //! (one decode pass over every unnamed rageobj resource of levels.rpf).
@@ -24,10 +25,6 @@ use sixng_core::{
 use std::{collections::BTreeMap, error::Error, fs, io::Write};
 
 const CELL: f32 = 128.0;
-/// meshopt error bound, relative to a cell's extent (~0.4 m at 128 m).
-const SIMPLIFY_ERR: f32 = 0.003;
-/// Triangles kept at most, as a fraction of the welded input.
-const SIMPLIFY_KEEP: f32 = 0.25;
 
 /// GTA V material index for an inferred 6m surface category.
 pub fn gta_material(category: &str) -> u8 {
@@ -79,8 +76,8 @@ fn material_map(ctx: &Ctx) -> BTreeMap<u16, u8> {
 
 fn decode(path: &std::path::Path, e: &Entry, full: bool) -> Option<sixng_core::bounds::Collision> {
     let r = Resource::load_sys(path, e).ok()?;
-    let c = if full { sixng_core::bounds::decode(&r)? } else { sixng_core::bounds::decode_movement(&r)? };
-    (!c.by_mat.values().all(|x| x.1.is_empty())).then_some(c)
+    let c = sixng_core::bounds::decode_native(&r, !full)?;
+    (!c.by_mat.values().all(|x| x.1.is_empty()) || !c.native.is_empty()).then_some(c)
 }
 
 pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
@@ -130,6 +127,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
                 return Ok(());
             }
             let (mut verts, mut tris, mut tm): (Vec<[f32; 3]>, Vec<[u32; 3]>, Vec<u8>) = (Vec::new(), Vec::new(), Vec::new());
+            let mut prims: Vec<sixng_core::bounds::NativePrim> = Vec::new();
             for e in es {
                 let Some(c) = decode(&rpf, e, ctx.o.weapon_collision) else { continue };
                 for (id, (v, idx)) in &c.by_mat {
@@ -138,18 +136,36 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
                     tris.extend(idx.chunks_exact(3).map(|t| [base + t[0], base + t[1], base + t[2]]));
                     tm.resize(tris.len(), mats.get(id).copied().unwrap_or(0));
                 }
+                prims.extend(c.native);
             }
-            if tris.is_empty() {
+            if tris.is_empty() && prims.is_empty() {
                 return Ok(());
             }
             let raw = tris.len();
-            let (verts, tris, tm) = weld(&verts, &tris, &tm);
-            let (verts, tris, tm) = simplify(verts, &tris, &tm);
+            let (mut verts, tris, tm) = weld(&verts, &tris, &tm);
+            let mut polys: Vec<ybn::Poly> = tris.iter().map(|&t| ybn::Poly::Tri(t)).collect();
+            let mut words: Vec<u32> = tm.iter().map(|&m| m as u32).collect();
+            let n_tris = polys.len();
+            for p in &prims {
+                use sixng_core::bounds::NativePrim as P;
+                let mut at = |v: [f32; 3]| {
+                    verts.push(v);
+                    (verts.len() - 1) as u32
+                };
+                let (poly, mat) = match *p {
+                    P::Box { mat, corners } => (ybn::Poly::Box(corners.map(&mut at)), mat),
+                    P::Sphere { mat, centre, radius } => (ybn::Poly::Sphere(at(centre), radius), mat),
+                    P::Capsule { mat, a, b, radius } => (ybn::Poly::Capsule(at(a), at(b), radius), mat),
+                    P::Cylinder { mat, a, b, radius } => (ybn::Poly::Cylinder(at(a), at(b), radius), mat),
+                };
+                polys.push(poly);
+                words.push(mats.get(&mat).copied().unwrap_or(0) as u32);
+            }
             let verts: Vec<[f32; 3]> = verts.iter().map(|v| ctx.o.shift(*v)).collect();
-            let bytes = ybn::build_ybn_mats(&verts, &tris, &tm).map_err(|e| format!("{file}: {e}"))?;
-            let info = json!({"bounds": es.len(), "triangles": tris.len(), "raw_triangles": raw});
+            let bytes = ybn::build_ybn_polys(&verts, &polys, &words).map_err(|e| format!("{file}: {e}"))?;
+            let info = json!({"bounds": es.len(), "triangles": n_tris, "primitives": prims.len(), "raw_triangles": raw});
             let s = ctx.emit(&file, &fp, info, Some(bytes))?;
-            ctx.report.lock().unwrap().converted.push(json!({"kind": "collision", "ybn": s, "bounds": es.len(), "triangles": tris.len()}));
+            ctx.report.lock().unwrap().converted.push(json!({"kind": "collision", "ybn": s, "bounds": es.len(), "triangles": n_tris, "primitives": prims.len()}));
             Ok(())
         })
         .collect();
@@ -157,36 +173,6 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         r?;
     }
     Ok(())
-}
-
-/// Per-material meshopt simplification (materials stay separate so their
-/// borders are kept), then unused vertices are dropped.
-fn simplify(verts: Vec<[f32; 3]>, tris: &[[u32; 3]], mats: &[u8]) -> (Vec<[f32; 3]>, Vec<[u32; 3]>, Vec<u8>) {
-    let mut by: BTreeMap<u8, Vec<u32>> = BTreeMap::new();
-    for (t, m) in tris.iter().zip(mats) {
-        by.entry(*m).or_default().extend_from_slice(t);
-    }
-    let (mut out_t, mut out_m) = (Vec::new(), Vec::new());
-    for (m, idx) in by {
-        let mut dst = vec![0u32; idx.len()];
-        let target = ((idx.len() / 3) as f32 * SIMPLIFY_KEEP) as usize * 3;
-        let k = if idx.len() >= 300 { meshopt_rs::simplify::simplify(&mut dst, &idx, &verts, target, SIMPLIFY_ERR) } else { 0 };
-        let kept = if k >= 3 { &dst[..k] } else { &idx[..] };
-        out_t.extend(kept.chunks_exact(3).map(|t| [t[0], t[1], t[2]]));
-        out_m.resize(out_t.len(), m);
-    }
-    let mut remap = vec![u32::MAX; verts.len()];
-    let mut out_v = Vec::new();
-    for t in out_t.iter_mut() {
-        for i in t.iter_mut() {
-            if remap[*i as usize] == u32::MAX {
-                remap[*i as usize] = out_v.len() as u32;
-                out_v.push(verts[*i as usize]);
-            }
-            *i = remap[*i as usize];
-        }
-    }
-    (out_v, out_t, out_m)
 }
 
 /// Weld vertices on a 5 cm grid and drop degenerate and duplicate triangles

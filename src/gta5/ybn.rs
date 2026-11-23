@@ -47,6 +47,63 @@ fn q16(v: f32) -> i16 {
     }
 }
 
+// ---------------------------------------------------------------- polygons
+
+/// One bound polygon (CodeWalker BoundPolygon*): vertex indices into the
+/// geometry's vertex list. Primitives are stored natively, not tessellated.
+#[derive(Clone, Copy, Debug)]
+pub enum Poly {
+    Tri([u32; 3]),
+    /// Four alternate corners of a box (the other four are 2*centre - v).
+    Box([u32; 4]),
+    Sphere(u32, f32),
+    Capsule(u32, u32, f32),
+    Cylinder(u32, u32, f32),
+}
+
+impl Poly {
+    fn verts(&self) -> Vec<u32> {
+        match *self {
+            Poly::Tri(t) => t.to_vec(),
+            Poly::Box(b) => b.to_vec(),
+            Poly::Sphere(a, _) => vec![a],
+            Poly::Capsule(a, b, _) | Poly::Cylinder(a, b, _) => vec![a, b],
+        }
+    }
+    fn map(&self, mut f: impl FnMut(u32) -> u32) -> Poly {
+        match *self {
+            Poly::Tri(t) => Poly::Tri(t.map(&mut f)),
+            Poly::Box(b) => Poly::Box(b.map(&mut f)),
+            Poly::Sphere(a, r) => Poly::Sphere(f(a), r),
+            Poly::Capsule(a, b, r) => {
+                let a = f(a);
+                Poly::Capsule(a, f(b), r)
+            }
+            Poly::Cylinder(a, b, r) => {
+                let a = f(a);
+                Poly::Cylinder(a, f(b), r)
+            }
+        }
+    }
+    /// World-space AABB from vertex positions.
+    fn aabb(&self, at: impl Fn(u32) -> V3) -> (V3, V3) {
+        let grow = |(mn, mx): (V3, V3), r: f32| (sub(mn, [r; 3]), add(mx, [r; 3]));
+        let span = |pts: &[V3]| pts.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(a, b), p| (vmin(a, *p), vmax(b, *p)));
+        match *self {
+            Poly::Tri(t) => span(&t.map(&at)),
+            Poly::Box(b) => {
+                let p = b.map(&at);
+                let c = scale(add(add(p[0], p[1]), add(p[2], p[3])), 0.5);
+                let mut all = p.to_vec();
+                all.extend(p.iter().map(|v| sub(c, *v)));
+                span(&all)
+            }
+            Poly::Sphere(a, r) => grow(span(&[at(a)]), r),
+            Poly::Capsule(a, b, r) | Poly::Cylinder(a, b, r) => grow(span(&[at(a), at(b)]), r),
+        }
+    }
+}
+
 // ---------------------------------------------------------------- BVH builder
 
 #[derive(Clone, Copy)]
@@ -290,7 +347,7 @@ fn write_bounds_hdr(w: &mut W, h: &BoundsHdr) {
 
 /// One BoundGeometryBVH from local verts/tris (all indices valid, < MAX_VERTS).
 /// Returns (block id, world box min, box max).
-fn write_geometry(b: &mut Builder, id: BlockId, verts: &[V3], tris: &[[u32; 3]], tri_mats: &[u32]) -> (V3, V3) {
+fn write_geometry(b: &mut Builder, id: BlockId, verts: &[V3], tris: &[Poly], tri_mats: &[u32]) -> (V3, V3) {
     // Centre of the vertex bounding box (GeometryCenter in the XML pipeline).
     let mut vmn = [f32::MAX; 3];
     let mut vmx = [f32::MIN; 3];
@@ -307,12 +364,12 @@ fn write_geometry(b: &mut Builder, id: BlockId, verts: &[V3], tris: &[[u32; 3]],
         .iter()
         .enumerate()
         .map(|(i, t)| {
-            let (a, bb, c) = (world(t[0]), world(t[1]), world(t[2]));
-            Item { min: vmin(vmin(a, bb), c), max: vmax(vmax(a, bb), c), index: i }
+            let (min, max) = t.aabb(world);
+            Item { min, max, index: i }
         })
         .collect();
     let (bvh, order) = build_bvh(&items, 4);
-    let polys: Vec<[u32; 3]> = order.iter().map(|&i| tris[i]).collect();
+    let polys: Vec<Poly> = order.iter().map(|&i| tris[i]).collect();
     // material list (first-use order) and per-polygon index into it
     let mut mat_list: Vec<u32> = Vec::new();
     let poly_mi: Vec<u8> = order
@@ -346,6 +403,7 @@ fn write_geometry(b: &mut Builder, id: BlockId, verts: &[V3], tris: &[[u32; 3]],
         let mut dict: HashMap<(u32, u32), (usize, usize, Option<(usize, usize)>)> = HashMap::with_capacity(polys.len() * 2);
         let pack = |i: usize| if i > 0xFFFF { 0xFFFF } else { i as u16 };
         for (pi, t) in polys.iter().enumerate() {
+            let Poly::Tri(t) = t else { continue };
             for e in 0..3 {
                 let (a, c) = (t[e], t[(e + 1) % 3]);
                 let key = (a.min(c), a.max(c));
@@ -374,9 +432,26 @@ fn write_geometry(b: &mut Builder, id: BlockId, verts: &[V3], tris: &[[u32; 3]],
         }
     }
 
-    // Polygons block (triangle type 0 lives in the low 3 bits of the area).
+    // Polygons block (16 bytes each; the type lives in the low 3 bits of the
+    // first word: 0 triangle, 1 sphere, 2 capsule, 3 box, 4 cylinder).
     let mut pw = W::new();
-    for (pi, t) in polys.iter().enumerate() {
+    let ix = |i: u32| (i & 0x7FFF) as u16;
+    for (pi, p) in polys.iter().enumerate() {
+        let t = match *p {
+            Poly::Tri(t) => t,
+            Poly::Sphere(a, r) => {
+                pw.u16(1).u16(ix(a)).f32(r).u32(0).u32(0);
+                continue;
+            }
+            Poly::Capsule(a, c, r) | Poly::Cylinder(a, c, r) => {
+                pw.u16(if matches!(p, Poly::Capsule(..)) { 2 } else { 4 }).u16(ix(a)).f32(r).u16(ix(c)).u16(0).u32(0);
+                continue;
+            }
+            Poly::Box(v) => {
+                pw.u32(3).u16(ix(v[0])).u16(ix(v[1])).u16(ix(v[2])).u16(ix(v[3])).u32(0);
+                continue;
+            }
+        };
         let (a, bb, c) = (world(t[0]), world(t[1]), world(t[2]));
         let u = sub(bb, a);
         let v = sub(c, a);
@@ -422,9 +497,9 @@ fn write_geometry(b: &mut Builder, id: BlockId, verts: &[V3], tris: &[[u32; 3]],
 
 /// Split triangle ids spatially (median on the longest axis of centroids)
 /// until each chunk fits one geometry.
-fn split(verts: &[V3], tris: &[[u32; 3]], ids: Vec<usize>, out: &mut Vec<Vec<usize>>) {
+fn split(verts: &[V3], tris: &[Poly], ids: Vec<usize>, out: &mut Vec<Vec<usize>>) {
     let nverts = {
-        let mut s: Vec<u32> = ids.iter().flat_map(|&i| tris[i]).collect();
+        let mut s: Vec<u32> = ids.iter().flat_map(|&i| tris[i].verts()).collect();
         s.sort_unstable();
         s.dedup();
         s.len()
@@ -434,8 +509,8 @@ fn split(verts: &[V3], tris: &[[u32; 3]], ids: Vec<usize>, out: &mut Vec<Vec<usi
         return;
     }
     let cen = |i: usize| {
-        let t = tris[i];
-        scale(add(add(verts[t[0] as usize], verts[t[1] as usize]), verts[t[2] as usize]), 1.0 / 3.0)
+        let (a, b) = tris[i].aabb(|k| verts[k as usize]);
+        scale(add(a, b), 0.5)
     };
     let mut mn = [f32::MAX; 3];
     let mut mx = [f32::MIN; 3];
@@ -474,21 +549,27 @@ pub fn material_word(material: u8, room: u8) -> u32 {
 /// As [`build_ybn_mats`] with full BoundMaterial words per triangle
 /// (see [`material_word`]).
 pub fn build_ybn_words(verts: &[[f32; 3]], tris: &[[u32; 3]], tri_mats: &[u32]) -> Result<Vec<u8>, String> {
+    build_ybn_polys(verts, &tris.iter().map(|&t| Poly::Tri(t)).collect::<Vec<_>>(), tri_mats)
+}
+
+/// As [`build_ybn_words`] with any bound polygons (native boxes, spheres,
+/// capsules and cylinders next to triangles), one material word each.
+pub fn build_ybn_polys(verts: &[[f32; 3]], tris: &[Poly], tri_mats: &[u32]) -> Result<Vec<u8>, String> {
     if tri_mats.len() != tris.len() {
-        return Err("material count != triangle count".into());
+        return Err("material count != polygon count".into());
     }
     let n = verts.len() as u32;
-    let (tris, mats): (Vec<[u32; 3]>, Vec<u32>) = tris
+    let (tris, mats): (Vec<Poly>, Vec<u32>) = tris
         .iter()
         .copied()
         .zip(tri_mats.iter().copied())
-        .filter(|(t, _)| t[0] != t[1] && t[1] != t[2] && t[0] != t[2])
+        .filter(|(t, _)| !matches!(t, Poly::Tri(t) if t[0] == t[1] || t[1] == t[2] || t[0] == t[2]))
         .unzip();
-    if let Some(t) = tris.iter().find(|t| t.iter().any(|&i| i >= n)) {
+    if let Some(t) = tris.iter().find(|t| t.verts().iter().any(|&i| i >= n)) {
         return Err(format!("triangle index out of range: {:?} (verts {})", t, n));
     }
     if tris.is_empty() {
-        return Err("no triangles".into());
+        return Err("no polygons".into());
     }
     if verts.iter().any(|v| v.iter().any(|c| !c.is_finite())) {
         return Err("non-finite vertex".into());
@@ -497,7 +578,7 @@ pub fn build_ybn_words(verts: &[[f32; 3]], tris: &[[u32; 3]], tri_mats: &[u32]) 
     split(verts, &tris, (0..tris.len()).collect(), &mut chunks);
 
     // Remap each chunk to local vertex arrays (first-use order).
-    let local: Vec<(Vec<V3>, Vec<[u32; 3]>, Vec<u32>)> = chunks
+    let local: Vec<(Vec<V3>, Vec<Poly>, Vec<u32>)> = chunks
         .iter()
         .map(|ids| {
             let mut map = std::collections::HashMap::new();
@@ -505,15 +586,12 @@ pub fn build_ybn_words(verts: &[[f32; 3]], tris: &[[u32; 3]], tri_mats: &[u32]) 
             let lt = ids
                 .iter()
                 .map(|&i| {
-                    let t = tris[i];
-                    let mut o = [0u32; 3];
-                    for k in 0..3 {
-                        o[k] = *map.entry(t[k]).or_insert_with(|| {
-                            lv.push(verts[t[k] as usize]);
+                    tris[i].map(|k| {
+                        *map.entry(k).or_insert_with(|| {
+                            lv.push(verts[k as usize]);
                             (lv.len() - 1) as u32
-                        });
-                    }
-                    o
+                        })
+                    })
                 })
                 .collect();
             (lv, lt, ids.iter().map(|&i| mats[i]).collect())

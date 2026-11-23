@@ -79,6 +79,21 @@ pub struct Collision {
     lookup: std::collections::HashMap<u16, std::collections::HashMap<[u32; 3], u32>>,
     /// Skip composite children flagged weapon-only (see `decode_movement`).
     skip_weapon_only: bool,
+    /// Keep boxes / spheres / capsules / cylinders in `native` instead of
+    /// meshing them into `by_mat` (see `decode_native`).
+    keep_native: bool,
+    /// Primitives as stored (world space), with `keep_native`.
+    pub native: Vec<NativePrim>,
+}
+
+/// A bound primitive in world space (GTA V polygon types 1-4).
+#[derive(Clone, Debug)]
+pub enum NativePrim {
+    /// Four alternate corners of the box.
+    Box { mat: u16, corners: [[f32; 3]; 4] },
+    Sphere { mat: u16, centre: [f32; 3], radius: f32 },
+    Capsule { mat: u16, a: [f32; 3], b: [f32; 3], radius: f32 },
+    Cylinder { mat: u16, a: [f32; 3], b: [f32; 3], radius: f32 },
 }
 
 fn f3(r: &Resource, o: usize) -> [f32; 3] {
@@ -122,11 +137,21 @@ pub fn decode_movement(r: &Resource) -> Option<Collision> {
     decode_opt(r, true)
 }
 
+/// Like `decode` / `decode_movement`, with primitives kept as stored in
+/// `native` (only triangles go to `by_mat`): for writers that support them.
+pub fn decode_native(r: &Resource, skip_weapon_only: bool) -> Option<Collision> {
+    decode_with(r, skip_weapon_only, true)
+}
+
 fn decode_opt(r: &Resource, skip_weapon_only: bool) -> Option<Collision> {
+    decode_with(r, skip_weapon_only, false)
+}
+
+fn decode_with(r: &Resource, skip_weapon_only: bool, keep_native: bool) -> Option<Collision> {
     if !is_bound(r) {
         return None;
     }
-    let mut c = Collision { bbox: [f3(r, 0x30), f3(r, 0x20)], skip_weapon_only, ..Default::default() };
+    let mut c = Collision { bbox: [f3(r, 0x30), f3(r, 0x20)], skip_weapon_only, keep_native, ..Default::default() };
     walk(r, 0, &ID, 0, &mut c);
     Some(c)
 }
@@ -210,7 +235,12 @@ fn geometry(r: &Resource, o: usize, m: &M4, c: &mut Collision) {
             }
             3 => {
                 c.stats.boxes += 1;
-                box_tris([vert(u(4)), vert(u(6)), vert(u(8)), vert(u(10))])
+                let corners = [vert(u(4)), vert(u(6)), vert(u(8)), vert(u(10))];
+                if c.keep_native {
+                    c.native.push(NativePrim::Box { mat: id, corners });
+                    continue;
+                }
+                box_tris(corners)
             }
             t @ (1 | 2 | 4) => {
                 let rad = f32::from_le_bytes(p[4..8].try_into().unwrap());
@@ -224,6 +254,14 @@ fn geometry(r: &Resource, o: usize, m: &M4, c: &mut Collision) {
                     1 => c.stats.spheres += 1,
                     2 => c.stats.capsules += 1,
                     _ => c.stats.cylinders += 1,
+                }
+                if c.keep_native {
+                    c.native.push(match t {
+                        1 => NativePrim::Sphere { mat: id, centre: a, radius: rad },
+                        2 => NativePrim::Capsule { mat: id, a, b: vert(u(8)), radius: rad },
+                        _ => NativePrim::Cylinder { mat: id, a, b: vert(u(8)), radius: rad },
+                    });
+                    continue;
                 }
                 if t == 1 {
                     c.primitives.push(json!({"type": kind, "centre": a, "radius": rad, "material": format!("{id:04x}")}));
