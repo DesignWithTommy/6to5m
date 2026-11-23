@@ -5,6 +5,7 @@ mod history;
 mod loader;
 mod options;
 mod partitions;
+mod paths;
 mod physical_pages;
 mod pools;
 mod shared_pages;

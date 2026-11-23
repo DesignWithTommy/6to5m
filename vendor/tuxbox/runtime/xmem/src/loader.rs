@@ -108,24 +108,47 @@ unsafe extern "system" fn hook_a(name: *const u8) -> Hmod {
     load(s, 0, || unsafe { LoadLibraryExW(w.as_ptr(), ptr::null_mut(), 0) })
 }
 
-/// Patch the exe's LoadLibrary* imports. Called from xmem's DllMain (process attach).
+/// The exe's directory with a trailing separator (set by `install`).
+pub(crate) fn exe_dir() -> Option<&'static [u16]> {
+    DIR.get().map(|v| v.as_slice())
+}
+
+/// Patch the exe's LoadLibrary* imports, then its file imports (`G:` drive).
+/// Called from xmem's DllMain (process attach).
 pub(crate) unsafe fn install() {
     unsafe {
-        let exe = GetModuleHandleW(ptr::null()) as *mut u8;
-        if exe.is_null() {
-            return;
-        }
         let mut buf = [0u16; 1024];
         let n = GetModuleFileNameW(ptr::null_mut(), buf.as_mut_ptr(), buf.len() as u32) as usize;
         let full = &buf[..n];
         let cut = full.iter().rposition(|&c| c == b'\\' as u16 || c == b'/' as u16).map(|i| i + 1).unwrap_or(0);
         let _ = DIR.set(full[..cut].to_vec());
+        let patched = patch_imports(
+            |d| d.contains("libraryloader") || d == "kernel32.dll" || d == "kernelbase.dll",
+            &[
+                ("LoadLibraryExW", hook_ex_w as *const () as usize),
+                ("LoadLibraryW", hook_w as *const () as usize),
+                ("LoadLibraryExA", hook_ex_a as *const () as usize),
+                ("LoadLibraryA", hook_a as *const () as usize),
+            ],
+        );
+        log(&format!("{patched} LoadLibrary import(s) redirected; console libraries load from {}", String::from_utf16_lossy(&full[..cut])));
+        crate::paths::install();
+    }
+}
 
+/// Point the exe's imports named in `hooks` at the replacements, for every
+/// imported DLL that `dll` accepts (lower-case name). Returns the slots patched.
+pub(crate) unsafe fn patch_imports(dll: impl Fn(&str) -> bool, hooks: &[(&str, usize)]) -> usize {
+    unsafe {
+        let exe = GetModuleHandleW(ptr::null()) as *mut u8;
+        if exe.is_null() {
+            return 0;
+        }
         let rd32 = |o: usize| ptr::read_unaligned(exe.add(o) as *const u32) as usize;
         let pe = rd32(0x3c);
         let imports = rd32(pe + 0x18 + 0x70 + 8); // PE32+ optional header, data directory 1 (import)
         if imports == 0 {
-            return;
+            return 0;
         }
         let mut patched = 0;
         let mut desc = imports;
@@ -134,8 +157,8 @@ pub(crate) unsafe fn install() {
             if name_rva == 0 {
                 break;
             }
-            let dll = ansi_to_string(exe.add(name_rva)).to_ascii_lowercase();
-            if dll.contains("libraryloader") || dll == "kernel32.dll" || dll == "kernelbase.dll" {
+            let name = ansi_to_string(exe.add(name_rva)).to_ascii_lowercase();
+            if dll(&name) {
                 let lookup = if int_rva != 0 { int_rva } else { iat_rva };
                 let mut i = 0;
                 loop {
@@ -145,21 +168,14 @@ pub(crate) unsafe fn install() {
                     }
                     if entry >> 63 == 0 {
                         let func = ansi_to_string(exe.add(entry as usize + 2));
-                        let hook: Option<usize> = match func.as_str() {
-                            "LoadLibraryExW" => Some(hook_ex_w as *const () as usize),
-                            "LoadLibraryW" => Some(hook_w as *const () as usize),
-                            "LoadLibraryExA" => Some(hook_ex_a as *const () as usize),
-                            "LoadLibraryA" => Some(hook_a as *const () as usize),
-                            _ => None,
-                        };
-                        if let Some(h) = hook {
+                        if let Some(&(_, h)) = hooks.iter().find(|(n, _)| *n == func) {
                             let slot = exe.add(iat_rva + i * 8) as *mut usize;
                             let mut old = 0u32;
                             if VirtualProtect(slot.cast(), 8, 0x04, &mut old) != 0 {
                                 ptr::write_volatile(slot, h);
                                 VirtualProtect(slot.cast(), 8, old, &mut old);
                                 patched += 1;
-                                log(&format!("hooked {dll}!{func}"));
+                                log(&format!("hooked {name}!{func}"));
                             }
                         }
                     }
@@ -168,6 +184,6 @@ pub(crate) unsafe fn install() {
             }
             desc += 20;
         }
-        log(&format!("{patched} LoadLibrary import(s) redirected; console libraries load from {}", String::from_utf16_lossy(&full[..cut])));
+        patched
     }
 }
