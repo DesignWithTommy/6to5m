@@ -668,9 +668,12 @@ fn safe_name(name: &str, keep_hash: bool) -> String {
 }
 
 /// Diffuse/colour parameter hashes in priority order (ModelTextureBindings).
-const COLOR_SLOTS: [u32; 16] = [
+const COLOR_SLOTS: [u32; 17] = [
     3370697346, 756347250, 0x346394EA, 0x7D4F12E2, 3464205966, 3632507550, 851042057, 1024521143,
     3853173992, 2464948076, 3389132183, 3547013225, 234123336, 3831897388, 3489704073, 1380592926,
+    // dirtdiffusetex, last: glazing and railings whose only 6m texture is the
+    // grime layer (opacity in alpha; GTA6-Asset-Info 12-materials.md)
+    0x7485DAFB,
 ];
 
 /// Name of a texture in the drawable's own dictionary (keyed entries carry no name).

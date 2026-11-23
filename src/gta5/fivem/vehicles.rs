@@ -61,6 +61,13 @@ usage: 6ixpack fivem vehicle <name> --game <dir> --out <resource dir> [options]
 
 pub(super) const MISSING: &str = "r6m_missing";
 const TYRE: &str = "r6m_tyre";
+/// Stand-in surfaces for parts whose colour is in no texture (sixng-core
+/// material.rs `stand_in`: tyre rubber, lamp-reflector chrome).
+const CHROME: &str = "r6m_chrome";
+/// Vehicle material palette (128x256 colour bands): never a base colour.
+const VEH_PALETTE_SLOT: u32 = 0x19df_25d7;
+/// lyr0/lyr1diffusetex: linear data maps on the vehicle two-layer shaders.
+const VEH_DATA_SLOTS: [u32; 2] = [0x3463_94ea, 0x7d4f_12e2];
 const PAINT: &str = "r6m_paint";
 /// `diffusetex` on 6m vehicle shaders: an engine-default white that the
 /// runtime paint colour tints (GTA VI format notes, vehicle paint).
@@ -510,8 +517,15 @@ pub(super) fn load_source(rpf: &Path, e: &Entry, pools: &mut Pools, texs: &mut V
                         || MISSING.to_string(),
                         |sh| {
                             let ph = |t: &&drawable::TexRef| u32::from_str_radix(&t.param_hash, 16).ok();
-                            let mut cands: Vec<_> = COLOR_SLOTS.iter().filter_map(|slot| sh.textures.iter().find(|t| ph(t) == Some(*slot))).collect();
-                            cands.extend(sh.textures.iter().filter(|t| !ph(t).is_some_and(|h| COLOR_SLOTS.contains(&h))));
+                            match sixng_core::material::classify(&sh.name_hash, &[])["stand_in"].as_str() {
+                                Some("rubber") => return TYRE.to_string(),
+                                Some("chrome") => return CHROME.to_string(),
+                                _ => {}
+                            }
+                            let veh = sixng_core::names::shader(&sh.name_hash).is_some_and(|n| n.starts_with("standard_vehicle"));
+                            let colour = |t: &&drawable::TexRef| !ph(t).is_some_and(|h| h == VEH_PALETTE_SLOT || (veh && VEH_DATA_SLOTS.contains(&h)));
+                            let mut cands: Vec<_> = COLOR_SLOTS.iter().filter_map(|slot| sh.textures.iter().find(|t| ph(t) == Some(*slot))).filter(colour).collect();
+                            cands.extend(sh.textures.iter().filter(|t| !ph(t).is_some_and(|h| COLOR_SLOTS.contains(&h))).filter(colour));
                             let mut errs = Vec::new();
                             for t in cands {
                                 let hash = u32::from_str_radix(&t.hash32, 16).unwrap_or(0);
@@ -786,7 +800,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     // texture dictionary
     let mut tx = Vec::new();
     for t in &texs {
-        if t == MISSING || t == PAINT {
+        if t == MISSING || t == PAINT || t == TYRE || t == CHROME {
             continue;
         }
         let p = cache.join(format!("{}.dds", &t[4..]));
@@ -797,8 +811,11 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
         }
         tx.push(x);
     }
-    if wf.0.is_empty() || wr.0.is_empty() {
+    if wf.0.is_empty() || wr.0.is_empty() || texs.iter().any(|t| t == TYRE) {
         tx.push(solid(TYRE, [0x20, 0x20, 0x20, 0xFF], 16));
+    }
+    if texs.iter().any(|t| t == CHROME) {
+        tx.push(solid(CHROME, [0xE6, 0xE6, 0xE6, 0xFF], 16));
     }
     if texs.iter().any(|t| t == PAINT) {
         let [r, g, b] = o.paint.or(vd.as_ref().map(|v| v.colour)).unwrap_or([0x80; 3]);

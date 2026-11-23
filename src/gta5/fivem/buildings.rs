@@ -248,9 +248,12 @@ fn kind_of(bucket: u8) -> u8 {
 }
 
 /// Diffuse/colour parameter hashes in priority order (model::COLOR_SLOTS).
-const COLOR_SLOTS: [u32; 16] = [
+const COLOR_SLOTS: [u32; 17] = [
     3370697346, 756347250, 0x346394EA, 0x7D4F12E2, 3464205966, 3632507550, 851042057, 1024521143, 3853173992, 2464948076, 3389132183, 3547013225,
     234123336, 3831897388, 3489704073, 1380592926,
+    // dirtdiffusetex, last: glazing and railings whose only 6m texture is the
+    // grime layer (opacity in alpha; GTA6-Asset-Info 12-materials.md)
+    0x7485DAFB,
 ];
 
 #[derive(Clone)]
@@ -1134,6 +1137,60 @@ fn four_layer_geoms(an: &str, pools: &Pools, mat: &crate::model::Material, key_o
     Some((out, texs))
 }
 
+/// 6m two-layer blend shaders (GTA6-Asset-Info 12-materials.md "Two-layer
+/// multilayer shaders"; SixNG b412ee7 / eeb3076 / e63f21d): standard_2lyr_pxm
+/// b217b263, _pxm_ground 1251cae5, _ground cd8ceb5e, standard_2lyr 77d8ab27
+/// (layer 2 weight = COLOR0.a) and prop_2lyr_batch 89c8fe07 (weight =
+/// 1 - COLOR0.a).
+const TWO_LAYER: [u32; 4] = [0xb217_b263, 0x1251_cae5, 0xcd8c_eb5e, 0x77d8_ab27];
+const TWO_LAYER_INV: u32 = 0x89c8_fe07;
+const LYR0_DIFFUSE: u32 = 0x3463_94ea;
+const LYR1_DIFFUSE: u32 = 0x7d4f_12e2;
+const LYR0_NORMAL: u32 = 0x84c6_9350;
+const LYR1_NORMAL: u32 = 0x58b6_e707;
+
+/// Two-layer submesh as terrain_cb_w_4lyr geometries, GTA V's vertex-blend
+/// shader: samplers 0/1 = base layer, 2/3 = layer 2, Colour1.g = the layer 2
+/// weight (B = 0, so the shader's bilinear blend reduces to base/layer 2).
+/// Was: base layer only, layer 2 dropped. Not carried: the grime overlay
+/// (dirtdiffusetex on TEXCOORD_2; the terrain shader has no overlay
+/// sampler) and layer 2's own UV set (TEXCOORD_1; one UV set here). None
+/// when either layer's colour does not resolve or the weight never leaves 0.
+fn two_layer_geoms(pools: &Pools, mat: &crate::model::Material, key_of: &dyn Fn(&crate::model::TexRef) -> u64, sm: &crate::model::Mesh) -> Option<(Vec<ydr::Geom>, Vec<String>)> {
+    let inv = mat.shader_hash == TWO_LAYER_INV;
+    let uvs = sm.uvs.as_deref()?;
+    let cols = sm.colors.as_deref()?;
+    let slot = |p: u32| mat.textures.iter().find(|t| t.param == p);
+    let colour = |p: u32| slot(p).and_then(|t| pools.get(t.hash, key_of(t), t.h64).ok()).map(|p| tex_name(&p));
+    let (base, top) = (colour(LYR0_DIFFUSE)?, colour(LYR1_DIFFUSE)?);
+    let weight = |c: u32| { let a = c >> 24; if inv { 255 - a } else { a } };
+    if base == top || !sm.indices.iter().any(|&i| cols.get(i as usize).is_some_and(|&c| weight(c) > 0)) {
+        return None;
+    }
+    let flat = flat_bump(pools).ok()?;
+    let bump = |p: u32| slot(p).and_then(|t| pools.get_normal(t.hash, key_of(t), t.h64).ok()).unwrap_or_else(|| flat.clone());
+    let (b0, b1) = (bump(LYR0_NORMAL), bump(LYR1_NORMAL));
+    let layers = [base.clone(), base, top.clone(), top];
+    let bumps = [b0.clone(), b0, b1.clone(), b1];
+    let mut out = Vec::new();
+    push_geoms_n(&mut out, &sm.positions, &sm.indices, sm.normals.as_deref(), Some(uvs), Some(cols), &layers[0], 0);
+    for g in &mut out {
+        g.colours1 = g.colours.iter().map(|&c| weight(c) << 8).collect();
+        for c in &mut g.colours {
+            *c = (*c & 0xFF) | 0xFF00_0000;
+        }
+        g.layers = Some(layers.clone());
+        g.layer_bumps = bumps.clone();
+    }
+    let mut texs: Vec<String> = Vec::new();
+    for l in layers.iter().chain(&bumps).chain([&ydr::FLAT_SPEC.to_string()]) {
+        if !texs.contains(l) {
+            texs.push(l.clone());
+        }
+    }
+    Some((out, texs))
+}
+
 /// Bone hash of each triangle of `sm` (its cluster's palette bone).
 fn tri_bone_hashes(sm: &crate::model::Mesh) -> Option<Vec<u32>> {
     let (tb, pal) = (sm.tri_bones.as_ref()?, sm.palette.as_ref()?);
@@ -1239,6 +1296,17 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: us
                 continue;
             }
         }
+        if let Some(mat) = sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).filter(|mt| TWO_LAYER.contains(&mt.shader_hash) || mt.shader_hash == TWO_LAYER_INV) {
+            if let Some((geoms, lt)) = two_layer_geoms(pools, mat, &key_of, sm) {
+                mesh.geoms.extend(geoms);
+                for t in lt {
+                    if !texs.contains(&t) {
+                        texs.push(t);
+                    }
+                }
+                continue;
+            }
+        }
         // Colour slots in priority order, then every other texture: the first
         // one that decodes to a usable colour map wins (a colour slot can hold
         // a normal map or a 4x4 default).
@@ -1301,9 +1369,13 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: us
         });
         if let (Some(pal), Some(cols)) = (palette.as_ref(), sm.colors.as_deref()) {
             let mut groups: Vec<([u8; 3], Vec<u32>)> = Vec::new();
-            // Row `row` of the palette (placement tintValue; past the last row clamps).
-            let (len, rows) = sixng_core::texture::tint_layout(pal.len() as u32);
-            let base = row.min(rows.max(1) as usize - 1) * len as usize;
+            // Row 0. Reading tintValue as the row renders wrong (rocks near
+            // black, later rows mostly ffbbff filler: GTA6-Asset-Info
+            // 12-materials.md "Render check"), so the row lookup is not
+            // understood; row 0 is the default scheme. Only shaders that bind
+            // the palette themselves get here: LOD drawables without one carry
+            // a COLOR0.b that is no palette index.
+            let base = 0usize;
             for t in sm.indices.chunks_exact(3) {
                 let c = cols.get(t[0] as usize).and_then(|c| pal.get(base + (c >> 16 & 255) as usize)).filter(|p| [p[0], p[1], p[2]] != PALETTE_FILL).map_or([255; 3], |p| [p[0], p[1], p[2]].map(|v| ((v as u32 + 16) / 32 * 32).min(255) as u8));
                 match groups.iter_mut().find(|g| g.0 == c) {
@@ -1313,7 +1385,7 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: us
             }
             let fill = sm.indices.chunks_exact(3).filter(|t| cols.get(t[0] as usize).and_then(|c| pal.get(base + (c >> 16 & 255) as usize)).is_some_and(|p| [p[0], p[1], p[2]] == PALETTE_FILL)).count();
             if fill > 0 {
-                super::quality::hit("palette_fill", fill as u64, || format!("{name}: {fill} of {} triangles (row {row})", sm.indices.len() / 3));
+                super::quality::hit("palette_fill", fill as u64, || format!("{name}: {fill} of {} triangles (row 0)", sm.indices.len() / 3));
             }
             for (c, idx) in groups {
                 let t = if c == [255; 3] { tex.clone() } else { tinted(pools, &tex, c).unwrap_or_else(|_| tex.clone()) };
