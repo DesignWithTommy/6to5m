@@ -286,7 +286,10 @@ pub fn decode_lanes_states(lane: &[&[u16]], blocks: usize, t: &Tables) -> (Bc7Ou
         let (b1, b2) = index_bits(mode);
         let mut q = pq;
         for (set, lanes_, b) in [(0usize, [11usize, 12, 13, 14], b1), (1, [6, 7, 8, 10], b2)] {
-            if b == 0 { continue; }
+            // A mode with no second set (all but 4 and 5) resets that state
+            // to zero rather than carrying it forward: anchors then never
+            // have their top bit set (GTA6-Asset-Info 06-bcpack, d01907e).
+            if b == 0 { q[set] = [0; 16]; continue; }
             for (k, &l) in lanes_.iter().enumerate() {
                 for h in 0..2 {
                     let s16 = sym(l, i, h) as u32;

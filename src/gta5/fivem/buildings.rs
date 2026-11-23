@@ -2145,7 +2145,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
             let file = format!("{stem}.ytd");
             let mut sorted = list.clone();
             sorted.sort();
-            let fp = sha(&format!("{TEX_V}{}|{}|{:?}|{}", sixng_core::bcpack_presets::tag(), texopt::TAG, ctx.o.max_tex, sorted.iter().map(|t| format!("{t}:{}:{}:{}", tsize(t), cap_of(t), alpha_tex.contains(t))).collect::<Vec<_>>().join(",")));
+            let fp = sha(&format!("{TEX_V}{}{}|{}|{:?}|{}", sixng_core::bcpack::BCPACK_DECODER_VERSION, sixng_core::bcpack_presets::tag(), texopt::TAG, ctx.o.max_tex, sorted.iter().map(|t| format!("{t}:{}:{}:{}", tsize(t), cap_of(t), alpha_tex.contains(t))).collect::<Vec<_>>().join(",")));
             if ctx.up_to_date(&file, &fp).is_some() {
                 return ctx.emit(&file, &fp, json!({"textures": sorted.len()}), None);
             }
