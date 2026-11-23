@@ -76,8 +76,10 @@ pub const SLOTS: &[(&str, &str)] = &[
     ("58b6e707", "normal (BC5, DirectX green)"),
     ("4d56d7fe", "normal atlas (vehicle, BC1)"),
     ("2bb2ede8", "normal atlas (vehicle, BC1)"),
-    ("739e3d0d", "packed material data, linear (likely roughness/metal/AO; channel order unverified)"),
-    ("c6f46e79", "packed material data, linear (G/B near 0.5: likely detail-normal or mask pair)"),
+    // Names by joaat of the parameter name (Leonida tools/character_textures.py).
+    ("739e3d0d", "speculartex2: packed ORM / mask data, linear (not albedo)"),
+    ("c6f46e79", "speculartex: specular / gloss pack, linear (not albedo)"),
+    ("8adb8480", "materialid: ID / palette map (not albedo)"),
     ("0df47048", "secondary colour / detail albedo (sRGB)"),
     ("7485dafb", "colour with opacity in alpha (sRGB)"),
     ("f151c063", "vehicle decal layer (RGBA)"),
@@ -90,6 +92,11 @@ pub const SLOTS: &[(&str, &str)] = &[
     ("8e0d63ee", "emissive map (emissivetex: the lit parts of a lamp or panel)"),
     ("2c8d7182", "tint palette (embedded in the model: rows of RGBA8 colours, picked per instance by the placement tint row)"),
 ];
+
+/// Garment shaders that declare no diffusetex (c8e8c282) slot: a material on
+/// one has no albedo binding and stays untextured; speculartex is not colour
+/// (Leonida tools/character_textures.py).
+pub const GARMENT_SHADERS: [&str; 3] = ["d5ed50f4", "ea8d09d0", "39ddb9ca"];
 
 pub fn slot_role(param_hash: &str) -> Option<&'static str> {
     SLOTS.iter().find(|s| s.0 == param_hash).map(|s| s.1)

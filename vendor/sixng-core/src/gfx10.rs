@@ -126,11 +126,16 @@ impl Layout {
         let (tw, th) = (bw / 2, bh);
         let nm = mips.max(1);
         let dims: Vec<(u32, u32)> = (0..nm).map(|i| ((w >> i).max(1), (h >> i).max(1))).collect();
-        let first = dims.iter().enumerate().position(|(i, &(mw, mh))| mw <= tw && mh <= th && nm - i as u32 <= max_tail).unwrap_or(nm as usize);
+        // What a level is padded from: mip 0's elements halved rounding up
+        // (addrlib ShiftCeil; xcl tiling.rs Chain::new_3d). Differs from the
+        // level's own size only for odd counts, where flooring shifted every
+        // later mip's offset.
+        let padded: Vec<(u32, u32)> = (0..nm).map(|i| (w.div_ceil(1 << i).max(1), h.div_ceil(1 << i).max(1))).collect();
+        let first = padded.iter().enumerate().position(|(i, &(mw, mh))| mw <= tw && mh <= th && nm - i as u32 <= max_tail).unwrap_or(nm as usize);
         let mut place: Vec<MipPlace> = dims.iter().map(|&(mw, mh)| MipPlace { w: mw, h: mh, offset: 0, tail: None }).collect();
         let mut off = if first < nm as usize { bs } else { 0 };
         for i in (0..first).rev() {
-            let (mw, mh) = dims[i];
+            let (mw, mh) = padded[i];
             place[i].offset = off;
             off += (mw.div_ceil(bw) * bw) as u64 * (mh.div_ceil(bh) * bh) as u64 * bpe as u64;
         }

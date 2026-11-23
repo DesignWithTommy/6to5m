@@ -502,10 +502,10 @@ impl TtpfTex {
     }
     /// Mip-chain layout (`None` for unsupported tile modes or element sizes:
     /// 1-, 2-, 4-, 8- and 16-byte elements are mapped).
-    /// Array size (d1 bits 10-19, plus 1). 1 for almost all textures; 6 on
+    /// Array size (d1 bits 10-20, plus 1; 11 bits as src/texture/ttpf.rs). 1 for almost all textures; 6 on
     /// cube maps; 2-64 on a few texture arrays.
     pub fn slices(&self) -> u32 {
-        ((self.d1 >> 10) & 0x3FF) + 1
+        ((self.d1 >> 10) & 0x7FF) + 1
     }
     pub fn layout(&self) -> Option<crate::gfx10::Layout> {
         let fmt = crate::texture::Fmt::from_dxgi(self.dxgi_format);
