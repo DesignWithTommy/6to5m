@@ -13,7 +13,8 @@
 //!   entities. The selection is closed over the vanilla parent links: every
 //!   ymap whose parent (transitively) is stubbed is stubbed too, or a vanilla
 //!   child left in place would index its parent's entities (parentIndex) in
-//!   an emptied ymap.
+//!   an emptied ymap. DLC packs' ymaps anywhere (vw_ch3_additions, ...) are
+//!   indexed for this too.
 //! - Ybn stubs are one tiny triangle at z -900, byte-identical: all ~11k share
 //!   one output-cache file (hardlinks in stream/), so they cost one file on
 //!   disk and one download in FiveM's hash-addressed client cache.
@@ -30,7 +31,7 @@ use std::{
     sync::Mutex,
 };
 
-const INDEX_V: &str = "lsidx3";
+const INDEX_V: &str = "lsidx4";
 const STUB_V: &str = "lsstub2";
 const DIRS: [&str; 3] = ["_citye", "_cityw", "_hills"];
 
@@ -48,6 +49,10 @@ struct Item {
     /// ymap: parent ymap name hash (CMapData +0x0C), 0 = none
     #[serde(default)]
     parent: u32,
+    /// DLC ymap outside _citye/_cityw/_hills: stubbed only when its parent
+    /// is (it would index an emptied vanilla parent), never by region
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    parent_only: bool,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -119,13 +124,13 @@ fn ymap_info(d: &[u8]) -> Option<Item> {
     if d.len() < p + 0x60 {
         return None;
     }
-    Some(Item { bx: [f3(d, p + 0x20)?, f3(d, p + 0x30)?], ee: Some([f3(d, p + 0x40)?, f3(d, p + 0x50)?]), flags: u32_at(d, p + 0x10)?, cflags: u32_at(d, p + 0x14)?, parent: u32_at(d, p + 0x0C)? })
+    Some(Item { bx: [f3(d, p + 0x20)?, f3(d, p + 0x30)?], ee: Some([f3(d, p + 0x40)?, f3(d, p + 0x50)?]), flags: u32_at(d, p + 0x10)?, cflags: u32_at(d, p + 0x14)?, parent: u32_at(d, p + 0x0C)?, parent_only: false })
 }
 
 /// phBound box of an inflated ybn.
 fn ybn_info(d: &[u8]) -> Option<Item> {
     let (mx, mn) = (f3(d, 0x20)?, f3(d, 0x30)?);
-    (mn.iter().zip(&mx).all(|(a, b)| a.is_finite() && b.is_finite() && a <= b)).then_some(Item { bx: [mn, mx], ee: None, flags: 0, cflags: 0, parent: 0 })
+    (mn.iter().zip(&mx).all(|(a, b)| a.is_finite() && b.is_finite() && a <= b)).then_some(Item { bx: [mn, mx], ee: None, flags: 0, cflags: 0, parent: 0, parent_only: false })
 }
 
 fn load_index(ctx: &Ctx, g: &Path) -> Result<Index, String> {
@@ -145,26 +150,29 @@ fn load_index(ctx: &Ctx, g: &Path) -> Result<Index, String> {
     arcs.par_iter().enumerate().try_for_each(|(ai, a)| -> Result<(), String> {
         let data = rpf7::map(a)?;
         let name = a.file_name().unwrap().to_string_lossy().to_lowercase();
+        let is_dlc = a.components().any(|c| c.as_os_str().eq_ignore_ascii_case("dlcpacks"));
         let mut ents = Vec::new();
-        rpf7::walk(&keys, &data, 0, data.len() as u64, &name, "", &descend, &mut |e| {
+        let walk_in = |p: &str| is_dlc || descend(p);
+        rpf7::walk(&keys, &data, 0, data.len() as u64, &name, "", &walk_in, &mut |e| {
             let ok = DIRS.iter().any(|d| e.path.trim_start_matches("x64/").starts_with(&format!("levels/gta5/{d}/")));
-            if ok && e.resource && (e.name.ends_with(".ymap") || e.name.ends_with(".ybn")) {
-                ents.push(rpf7::FileEntry { path: e.path.clone(), name: e.name.clone(), ..*e });
+            if e.resource && ((ok && (e.name.ends_with(".ymap") || e.name.ends_with(".ybn"))) || (is_dlc && e.name.ends_with(".ymap"))) {
+                ents.push((rpf7::FileEntry { path: e.path.clone(), name: e.name.clone(), ..*e }, !ok));
             }
         })?;
         let got: Vec<(String, Option<Item>)> = ents
             .par_iter()
-            .map(|e| {
+            .map(|(e, po)| {
                 let d = rpf7::resource_data(&data, e);
                 let it = d.and_then(|d| if e.name.ends_with(".ymap") { ymap_info(&d) } else { ybn_info(&d) });
-                (e.name.clone(), it)
+                (e.name.clone(), it.map(|it| Item { parent_only: *po, ..it }))
             })
             .collect();
         let mut f = files.lock().unwrap();
         for (n, it) in got {
             match it {
                 Some(it) => {
-                    if f.get(&n).is_none_or(|(k, _)| *k <= ai) {
+                    // a DLC-only copy never replaces an in-scope entry of the same name
+                    if f.get(&n).is_none_or(|(k, o)| *k <= ai && (o.parent_only || !it.parent_only)) {
                         f.insert(n, (ai, it));
                     }
                 }
@@ -201,7 +209,7 @@ pub fn build(ctx: &Ctx) -> Result<(), String> {
     // a ymap's streaming extents cover everywhere it can be seen from, so
     // distant LOD/SLOD ymaps visible from the region are caught too
     let hit = |_: &str, it: &Item| region.is_none_or(|r| it.bx[1][0] >= r[0] && it.bx[0][0] <= r[2] && it.bx[1][1] >= r[1] && it.bx[0][1] <= r[3]);
-    let mut chosen: std::collections::HashSet<&String> = ix.files.iter().filter(|(n, it)| hit(n, it)).map(|(n, _)| n).collect();
+    let mut chosen: std::collections::HashSet<&String> = ix.files.iter().filter(|(n, it)| !it.parent_only && hit(n, it)).map(|(n, _)| n).collect();
     // close over parent links: a vanilla child of a stubbed ymap is stubbed too
     let hash_of: BTreeMap<&String, u32> = ix.files.keys().filter(|n| n.ends_with(".ymap")).map(|n| (n, crate::gta5::rsc::joaat(n.trim_end_matches(".ymap")))).collect();
     let n_hit = chosen.len();
