@@ -534,7 +534,7 @@ fn gm_by_hash() -> &'static HashMap<u32, &'static str> {
 /// Decode one 6m drawable into skinned geometry on the GTA V skeleton.
 fn decode_part(game: &Path, e: &Entry, six: &sixng_core::pedskel::PedSkeleton, map6: &[u8], texs: &TexSource) -> Result<Part, String> {
     let name = e.name.clone().unwrap_or_default();
-    let r = Resource::load(&game.join("packs.rpf"), e).map_err(|x| x.to_string())?;
+    let r = Resource::load(&archive_of(game, e), e).map_err(|x| x.to_string())?;
     let info: DrawableInfo = drawable::describe(&r);
     let mut part = Part { src: name.clone(), slot: slot_of(&name).unwrap_or(8), geoms: Vec::new(), diffuse: None, normal: None, skin: false, warnings: Vec::new() };
     let slice = |i: usize| -> &[u8] {
@@ -735,6 +735,23 @@ fn decode_part(game: &Path, e: &Entry, six: &sixng_core::pedskel::PedSkeleton, m
 /// outfit slot (accessories, `_alt_`, holsters, `_cull` and first-person
 /// copies left out; a one-piece outfit replaces top and bottom). `--all`
 /// keeps every part, `--only` filters by name words.
+/// The archive an entry lives in, read in place: the id's part before `@`
+/// (`packs.rpf`, `pack/core_restofworld/core_restofworld.rpf`).
+fn archive_of(game: &Path, e: &Entry) -> PathBuf {
+    game.join(e.id.split('@').next().unwrap_or("packs.rpf"))
+}
+
+/// Archive holding the shared body skin pieces (female upper / lower body:
+/// `bodynipplesgen_*`, `bodygenitalsgen_*`; Leonida character_models.md
+/// "Hands and feet"). Not in packs.rpf.
+pub const SKIN_ARCHIVE: &str = "pack/core_restofworld/core_restofworld.rpf";
+
+/// Its index, if built (`6ixpack sixng index`); loaded in memory, nothing
+/// extracted.
+fn skin_index(work: &Path) -> Option<sixng_core::scan::ArchiveIndex> {
+    sixng_core::scan::load_index(&sixng_core::scan::index_path(&work.join("index"), SKIN_ARCHIVE)).ok()
+}
+
 fn candidates<'a>(ix: &'a sixng_core::scan::ArchiveIndex, o: &PedOpts) -> Vec<&'a Entry> {
     let mut by: BTreeMap<String, &Entry> = BTreeMap::new();
     for e in &ix.entries {
@@ -806,6 +823,11 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     sixng_core::names::set_work_dir(&o.work);
     let ip = sixng_core::scan::index_path(&o.work.join("index"), "packs.rpf");
     let ix = sixng_core::scan::load_index(&ip).map_err(|e| format!("{}: {e:#} (run `6ixpack sixng index packs.rpf` first)", ip.display()))?;
+    // shared body skin pieces live in core_restofworld.rpf
+    let skin_ix = skin_index(&o.work);
+    if skin_ix.is_none() {
+        eprintln!("[t6m:peds] {}: no index of {SKIN_ARCHIVE} (run `6ixpack sixng index`): body skin pieces unavailable", o.name);
+    }
     let mut cands = candidates(&ix, &o);
     if cands.is_empty() {
         return Err(format!("no packs.rpf drawable is named {}_*", o.name).into());
