@@ -2281,19 +2281,46 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         emit_meta(ctx, &format!("{name}.ymap"), meta::build_ymap_with(&map, &archetypes)?)?;
     }
     // HD cells: entities with lodDist <= NEAR_DIST (clutter, small props:
-    // ~90% of them) go in 128 m t6m_bn_XXX_YYY ymaps whose streaming extents
+    // ~90% of them) go in t6m_bn_XXXX_YYYY near ymaps whose streaming extents
     // reach only NEAR_DIST past the cell, so only the cells around the player
     // load; the rest in 512 m t6m_bld_XX_YY ymaps. One mixed ymap per 512 m
     // cell made every cell's extents span kilometres (a few 1500 m buildings),
     // so the whole airport (~68k entities) loaded at once: "Building Pool Full".
     const NEAR_DIST: f32 = 150.0;
+    // Near cells are sized by entity count: a 512 m cell splits into
+    // quadrants while it holds over NEAR_MAX entities, down to NEAR_CELL, so
+    // sparse areas get one ymap instead of many near-empty 128 m ones and hot
+    // spots get small ones. Keys are the cell origin in NEAR_CELL units.
+    const NEAR_MAX: usize = 600;
     let mut cells: BTreeMap<(bool, i64, i64), Vec<usize>> = BTreeMap::new();
+    let mut near_roots: BTreeMap<(i64, i64), Vec<usize>> = BTreeMap::new();
     for i in 0..kept.len() {
         if alive[i] && kept[i].level == 0 {
             let p = kept[i];
-            let near = ent(i, 0, -1).lod_dist <= NEAR_DIST;
-            let s = if near { NEAR_CELL } else { 512.0 };
-            cells.entry((near, (p.pos[0] / s).floor() as i64, (p.pos[1] / s).floor() as i64)).or_default().push(i);
+            let c = ((p.pos[0] / 512.0).floor() as i64, (p.pos[1] / 512.0).floor() as i64);
+            if ent(i, 0, -1).lod_dist <= NEAR_DIST {
+                near_roots.entry(c).or_default().push(i);
+            } else {
+                cells.entry((false, c.0, c.1)).or_default().push(i);
+            }
+        }
+    }
+    let unit = |v: f32| (v / NEAR_CELL).floor() as i64;
+    let per = (512.0 / NEAR_CELL) as i64;
+    let mut stack: Vec<(i64, i64, i64, Vec<usize>)> = near_roots.into_iter().map(|((x, y), v)| (x * per, y * per, per, v)).collect();
+    while let Some((x, y, s, v)) = stack.pop() {
+        if v.len() <= NEAR_MAX || s == 1 {
+            cells.insert((true, x, y), v);
+            continue;
+        }
+        let h = s / 2;
+        let mut q: [Vec<usize>; 4] = Default::default();
+        for i in v {
+            let p = kept[i];
+            q[((unit(p.pos[0]) - x >= h) as usize) | (((unit(p.pos[1]) - y >= h) as usize) << 1)].push(i);
+        }
+        for (k, v) in q.into_iter().enumerate().filter(|(_, v)| !v.is_empty()) {
+            stack.push((x + h * (k as i64 & 1), y + h * (k as i64 >> 1), h, v));
         }
     }
     // Wide ground-anchored models (asphalt tiles, aprons, pads, buildings):
@@ -2325,12 +2352,30 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         eprintln!("buildings: {} flat ground tiles recorded for terrain", ground.len());
     }
     let links_n = (0..kept.len()).filter(|&i| alive[i] && parent[i].is_some()).count();
+    let bkeys: HashSet<&str> = kept.iter().filter_map(|q| q.key.as_ref().map(|k| k.0.as_str())).filter(|m| m.starts_with("batch:")).collect();
     for i in (0..kept.len()).filter(|&i| alive[i] && kept[i].level == 0 && parent[i].is_none()) {
-        super::regionlog::bump("orphan_hd", "ORPHANHD entities", &done[&kept[i].name].an);
+        // why the 6m link did not survive (lod_parents.jsonl, per entity)
+        let k = kept[i].key.as_ref();
+        let why = if ctx.o.no_lod {
+            "--no-lod"
+        } else if let Some(b) = k.and_then(|k| blinks.get(k)) {
+            if bkeys.contains(b.as_str()) { "batch parent dropped" } else { "batch parent not converted" }
+        } else if let Some(t) = k.and_then(|k| links.get(k)) {
+            match by_key.get(t) {
+                None => "entity parent not converted",
+                Some(&q) if kept[q].level != 1 => "entity parent level not LOD",
+                Some(_) => "entity parent dropped",
+            }
+        } else if k.is_none() {
+            "no source key"
+        } else {
+            "no 6m link"
+        };
+        super::regionlog::bump("orphan_hd", why, &done[&kept[i].name].an);
     }
     eprintln!("buildings: {} entities, {links_n} LOD links, {top} LOD levels", alive.iter().filter(|x| **x).count());
     for ((near, cx, cy), ids) in cells {
-        let name = if near { format!("t6m_bn_{:03}_{:03}", cx + 200, cy + 200) } else { format!("t6m_bld_{:02}_{:02}", cx + 50, cy + 50) };
+        let name = if near { format!("t6m_bn_{:04}_{:04}", cx + NEAR_OFF, cy + NEAR_OFF) } else { format!("t6m_bld_{:02}_{:02}", cx + 50, cy + 50) };
         ctx.layout.lock().unwrap().ymaps.insert(name.clone(), ids.iter().map(|&i| done[&kept[i].name].an.clone()).collect());
         let has_parent = ids.iter().any(|&i| parent[i].is_some());
         let entities: Vec<Entity> = ids.iter().enumerate().map(|(j, &i)| ent(i, j + 1, parent[i].map_or(-1, |q| slot[q] as i32))).collect();
@@ -2375,8 +2420,11 @@ fn with_content_flags(mut map: MapData) -> MapData {
     map
 }
 
-/// HD near-cell size (metres); split.rs maps these names back to 512 m cells.
-pub const NEAR_CELL: f32 = 128.0;
+/// Smallest HD near cell (metres) and the unit of t6m_bn_XXXX_YYYY names
+/// (cell origin in NEAR_CELL units + NEAR_OFF); split.rs and minimap.rs map
+/// them back to 512 m cells. A near cell never crosses a 512 m cell.
+pub const NEAR_CELL: f32 = 64.0;
+pub const NEAR_OFF: i64 = 800;
 
 /// Report entities per ymap and the most loaded at once: at each 128 m grid
 /// point, the sum over ymaps (HD cells and LOD/SLOD levels) whose streaming
@@ -2399,9 +2447,9 @@ fn entity_load(ctx: &Ctx, loads: &[(String, usize, [[f32; 3]; 2])]) {
             if n > worst {
                 (worst, at) = (n, [x, y]);
             }
-            y += NEAR_CELL;
+            y += 128.0;
         }
-        x += NEAR_CELL;
+        x += 128.0;
     }
     let total: usize = loads.iter().map(|l| l.1).sum();
     let biggest = loads.iter().max_by_key(|l| l.1);

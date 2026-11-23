@@ -99,12 +99,12 @@ fn cell_of(stem: &str) -> Option<(i64, i64)> {
     if let Some((a, b)) = stem.strip_prefix("t6m_cc_").and_then(|r| r.split_once('_')) {
         return Some(((a.parse::<i64>().ok()? - 200).div_euclid(CELL / 128), (b.parse::<i64>().ok()? - 200).div_euclid(CELL / 128)));
     }
-    // 128 m near cells (t6m_bn_XXX_YYY, XXX = cell + 200) -> their 512 m cell
+    // near cells (t6m_bn_XXXX_YYYY: origin in NEAR_CELL units + NEAR_OFF) -> their 512 m cell
     if let Some(rest) = stem.strip_prefix("t6m_bn_") {
         let (a, b) = rest.split_once('_')?;
-        let k = (super::buildings::NEAR_CELL as i64).max(1);
-        let f = CELL / k;
-        return Some(((a.parse::<i64>().ok()? - 200).div_euclid(f), (b.parse::<i64>().ok()? - 200).div_euclid(f)));
+        let f = CELL / (super::buildings::NEAR_CELL as i64).max(1);
+        let o = super::buildings::NEAR_OFF;
+        return Some(((a.parse::<i64>().ok()? - o).div_euclid(f), (b.parse::<i64>().ok()? - o).div_euclid(f)));
     }
     let rest = stem.strip_prefix("t6m_bld_").or_else(|| stem.strip_prefix("t6m_col_"))?;
     let (a, b) = rest.split_once('_')?;

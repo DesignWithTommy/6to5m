@@ -118,7 +118,8 @@ pub fn zones(ctx: &Ctx) -> Result<(), String> {
     let mut cells: BTreeMap<(i64, i64), HashMap<String, usize>> = BTreeMap::new();
     for (ym, arcs) in &layout.ymaps {
         let cell = if let Some(r) = ym.strip_prefix("t6m_bn_") {
-            r.split_once('_').and_then(|(a, b)| Some(((a.parse::<i64>().ok()? - 200).div_euclid(4), (b.parse::<i64>().ok()? - 200).div_euclid(4))))
+            let (o, f) = (super::buildings::NEAR_OFF, (512.0 / super::buildings::NEAR_CELL) as i64);
+            r.split_once('_').and_then(|(a, b)| Some(((a.parse::<i64>().ok()? - o).div_euclid(f), (b.parse::<i64>().ok()? - o).div_euclid(f))))
         } else if let Some(r) = ym.strip_prefix("t6m_bld_") {
             r.split_once('_').and_then(|(a, b)| Some((a.parse::<i64>().ok()? - 50, b.parse::<i64>().ok()? - 50)))
         } else {
