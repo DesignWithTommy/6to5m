@@ -534,6 +534,24 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
     result
 }
 
+/// (virtual, physical) bytes of an RSC7 resource from its header page flags
+/// (CodeWalker RpfResourceFileEntry.GetSizeFromFlags).
+fn rsc7_mem(p: &Path) -> Option<(u64, u64)> {
+    use std::io::Read;
+    let mut h = [0u8; 16];
+    fs::File::open(p).ok()?.read_exact(&mut h).ok()?;
+    if &h[..4] != b"RSC7" {
+        return None;
+    }
+    let size = |f: u32| -> u64 {
+        let f = f as u64;
+        let n = ((f >> 27) & 1) + (((f >> 26) & 1) << 1) + (((f >> 25) & 1) << 2) + (((f >> 24) & 1) << 3) + (((f >> 17) & 0x7F) << 4) + (((f >> 11) & 0x3F) << 5) + (((f >> 7) & 0xF) << 6) + (((f >> 5) & 3) << 7) + (((f >> 4) & 1) << 8);
+        (0x200u64 << (f & 0xF)) * n
+    };
+    let u = |o: usize| u32::from_le_bytes(h[o..o + 4].try_into().unwrap());
+    Some((size(u(8)), size(u(12))))
+}
+
 /// End-of-run diagnostics: stage timings, cache hits, largest files and
 /// files over 16 MB (FiveM warns about oversized streaming files), skip
 /// reasons with sample names, entity load. Printed, stored in the report
@@ -556,7 +574,10 @@ stages:
     }
     let mut files: Vec<(String, u64)> = fs::read_dir(&ctx.stream).into_iter().flatten().flatten().filter_map(|e| Some((e.file_name().to_string_lossy().into_owned(), e.metadata().ok()?.len()))).collect();
     files.sort_by(|a, b| b.1.cmp(&a.1));
-    let over: Vec<&(String, u64)> = files.iter().filter(|f| f.1 > 16 << 20).collect();
+    // FiveM limits a streamed file by its in-memory (virtual + physical)
+    // size from the RSC7 page flags, not by the compressed file size
+    let mem = |n: &str| rsc7_mem(&ctx.stream.join(n));
+    let over: Vec<(String, u64)> = files.iter().filter_map(|f| mem(&f.0).filter(|m| m.1 > 16 << 20 || m.0 > 16 << 20).map(|m| (f.0.clone(), m.0.max(m.1)))).collect();
     let mb = |b: u64| b as f64 / 1048576.0;
     t += &format!("stream: {} files, {:.0} MB; largest:
 ", files.len(), mb(files.iter().map(|f| f.1).sum()));
@@ -565,8 +586,8 @@ stages:
 ", mb(*b));
     }
     if !over.is_empty() {
-        t += &format!("WARNING: {} files over 16 MB (FiveM warns / may fail to stream them): {}
-", over.len(), over.iter().take(10).map(|f| f.0.as_str()).collect::<Vec<_>>().join(", "));
+        t += &format!("WARNING: {} files over 16 MB virtual or physical (RSC7 page flags; FiveM refuses or evicts them): {}
+", over.len(), over.iter().take(10).map(|f| format!("{} ({:.0} MB)", f.0, mb(f.1))).collect::<Vec<_>>().join(", "));
     }
     let mut samples: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for v in &r.skipped {

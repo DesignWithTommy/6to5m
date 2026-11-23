@@ -25,7 +25,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-const TXD_CAP: u64 = 48 << 20;
+/// Texture dictionary cap, in DDS bytes (= the ytd's physical/graphics
+/// size: pixel data dominates). Above ~16 MB physical a streamed file
+/// causes hitches when it loads, so stay well under.
+const TXD_CAP: u64 = 14 << 20;
+/// A family dictionary below this many bytes is not closed at the end of
+/// its family: following families are packed into it (fewer, larger files
+/// to download and mount per region).
+const TXD_PACK: u64 = 4 << 20;
 const MISSING: &str = "r6m_missing";
 
 /// 6m render bucket bits -> GTA V shader kind (ydr::Geom::kind).
@@ -244,6 +251,7 @@ const COLOR_SLOTS: [u32; 16] = [
     234123336, 3831897388, 3489704073, 1380592926,
 ];
 
+#[derive(Clone)]
 struct Place {
     name: String,
     off: usize,
@@ -814,7 +822,7 @@ fn load_places(ctx: &Ctx, dir: &Path, index: &ArchiveIndex) -> Result<Vec<Place>
         })
         .collect();
     let mut out = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen: HashMap<(String, i64, i64, i64), Vec<[f32; 4]>> = HashMap::new();
     let mut push = |e: &Value, pos: V3, stored: [f32; 4], key: Option<(String, usize)>, out: &mut Vec<Place>| {
         if !ctx.o.in_bbox(pos, pos) || (pos[0].abs() < 50.0 && pos[1].abs() < 50.0) {
             return;
@@ -835,10 +843,17 @@ fn load_places(ctx: &Ctx, dir: &Path, index: &ArchiveIndex) -> Result<Vec<Place>
             ctx.skip(&name, "model not in levels.rpf", json!({"model_id": e["model_id"]}));
             return;
         };
-        let k = (name.clone(), (pos[0] * 100.0).round() as i64, (pos[1] * 100.0).round() as i64, (pos[2] * 100.0).round() as i64);
-        if !seen.insert(k) {
+        // Same model at the same place (10 cm) with the same orientation is
+        // one entity placed twice: 6m state-variant map files (adjacent
+        // archive entries, different name hashes) repeat their shared
+        // entities. Same spot but a different rotation is a separate entity
+        // (several cable attachments on one pole), so it is kept.
+        let k = (name.clone(), (pos[0] * 10.0).round() as i64, (pos[1] * 10.0).round() as i64, (pos[2] * 10.0).round() as i64);
+        let rots: &mut Vec<[f32; 4]> = seen.entry(k).or_default();
+        if rots.iter().any(|r| (0..4).map(|i| r[i] * stored[i]).sum::<f32>().abs() > 0.9995) {
             return;
         }
+        rots.push(stored);
         let rot = if ctx.o.conjugate { [-stored[0], -stored[1], -stored[2], stored[3]] } else { stored };
         let l = &e["lod"];
         // Tinted placements (palette row > 0) get their own archetype variant.
@@ -903,18 +918,24 @@ fn load_places(ctx: &Ctx, dir: &Path, index: &ArchiveIndex) -> Result<Vec<Place>
         eprintln!("buildings: {n_int} interiors, {n_ent} interior entities placed in world space");
     }
     for (e, pos, stored) in super::batches::props(ctx, index) {
-        push(&e, pos, stored, None, &mut out);
+        // keyed "batch:<map>:<model>" so HD entities whose 6m LOD parent is
+        // an instance of this batch (lod_parents.jsonl kind "batch") find it
+        let key = e["batch_map"].as_str().zip(e["batch_model"].as_str()).map(|(m, n)| (format!("batch:{m}:{n}"), 0));
+        push(&e, pos, stored, key, &mut out);
     }
     Ok(out)
 }
 
 /// child (map, index) -> parent (map, index), from sixng lod-links
 /// (<work>/index/lod_parents.jsonl), for the given maps only.
-fn lod_parents(ctx: &Ctx, maps: &HashSet<&str>) -> HashMap<(String, usize), (String, usize)> {
+/// Second map: child -> (batch map, batchlod model) for parents of kind
+/// "batch" (6m parents most HD props to an instance of a prop batch).
+fn lod_parents(ctx: &Ctx, maps: &HashSet<&str>) -> (HashMap<(String, usize), (String, usize)>, HashMap<(String, usize), String>) {
     let mut out = HashMap::new();
+    let mut batch = HashMap::new();
     let Ok(text) = fs::read_to_string(ctx.o.work.join("index").join("lod_parents.jsonl")) else {
         ctx.skip("(lod chains)", "lod_parents.jsonl missing (run sixng lod-links); entities left as orphans", json!({}));
-        return out;
+        return (out, batch);
     };
     for l in text.lines() {
         let Some(m) = l.strip_prefix("{\"map\":\"").and_then(|r| r.split('"').next()) else { continue };
@@ -923,6 +944,12 @@ fn lod_parents(ctx: &Ctx, maps: &HashSet<&str>) -> HashMap<(String, usize), (Str
         }
         let Ok(v) = serde_json::from_str::<Value>(l) else { continue };
         for p in v["parents"].as_array().into_iter().flatten() {
+            if p["kind"] == "batch" {
+                if let (Some(i), Some(pm), Some(n)) = (p["index"].as_u64(), p["map"].as_str(), p["name"].as_str()) {
+                    batch.insert((m.to_string(), i as usize), format!("batch:{pm}:{n}"));
+                }
+                continue;
+            }
             if p["kind"] != "entity" {
                 continue;
             }
@@ -931,7 +958,7 @@ fn lod_parents(ctx: &Ctx, maps: &HashSet<&str>) -> HashMap<(String, usize), (Str
             }
         }
     }
-    out
+    (out, batch)
 }
 
 /// archetype name -> lodDist from sixng lod-links (<work>/index/archetype_lod.jsonl).
@@ -1459,10 +1486,11 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     let top_shared = dicts.last().map(|d| d.0.clone());
     let mut txd_of: HashMap<String, String> = HashMap::new();
     let mut fam_n = 0usize;
-    for (_, mut v) in fam {
+    let (mut cur, mut size): (Vec<String>, u64) = (Vec::new(), 0);
+    let mut members: Vec<String> = Vec::new();
+    let n_fam = fam.len();
+    for (fi, (_, mut v)) in fam.into_iter().enumerate() {
         v.sort_by(|a, b| a.an.cmp(&b.an));
-        let (mut cur, mut size): (Vec<String>, u64) = (Vec::new(), 0);
-        let mut members: Vec<String> = Vec::new();
         for a in v {
             let mut new: Vec<&String> = a.texs.iter().filter(|t| !is_shared.contains(t) && !cur.contains(t)).collect();
             let add: u64 = new.iter().map(|t| tsize(t)).sum();
@@ -1480,12 +1508,16 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
             cur.extend(new.into_iter().cloned());
             members.push(a.an.clone());
         }
+        if size < TXD_PACK && fi + 1 < n_fam {
+            continue;
+        }
         let name = format!("t6m_txd{fam_n:04}");
         fam_n += 1;
-        for m in members {
+        for m in members.drain(..) {
             txd_of.insert(m, name.clone());
         }
-        dicts.push((name, cur, top_shared.clone()));
+        dicts.push((name, std::mem::take(&mut cur), top_shared.clone()));
+        size = 0;
     }
     let total: usize = dicts.iter().map(|d| d.1.len()).sum();
     eprintln!("buildings: {} textures ({} shared) in {} dictionaries", total, shared.len(), dicts.len());
@@ -1564,12 +1596,14 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     // only near the player: lodDist 40..100 m whatever 6m says.
     let small = |a: &Arch| radius(a) < 3.0;
     let clamp_small = |a: &Arch, d: f32| if small(a) { d.clamp(40.0, 100.0) } else { d };
-    let lod = |n: &str, a: &Arch| {
-        if small(a) {
-            clamp_small(a, alod.get(n).copied().unwrap_or(radius(a) * 30.0))
-        } else {
-            alod.get(n).copied().unwrap_or(0.0).max(floor(a))
-        }
+    // 6m's own lodDist (archetype def `82d6fc83` +0x38, via archetype_lod.jsonl)
+    // wherever it has one: the old 10x-radius floor and clutter clamp were
+    // stand-ins for the missing LOD chain (batch parents were dropped, see
+    // lod_parents), so they now only apply when 6m gives no value.
+    let lod = |n: &str, a: &Arch| match alod.get(n).copied().filter(|d| *d > 0.0) {
+        Some(d) => d,
+        None if small(a) => clamp_small(a, radius(a) * 30.0),
+        None => floor(a),
     };
     let archetypes: Vec<Archetype> = done
         .iter()
@@ -1592,14 +1626,41 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
 
     // LOD chains: level 0 in 512 m cells, each LOD level in one ymap
     // (t6m_lod1 = LOD, t6m_lod2 = SLOD1, ...), each the parent of the one below.
-    let kept: Vec<&Place> = places.iter().filter(|p| done.contains_key(&p.name)).collect();
-    let maps: HashSet<&str> = kept.iter().filter_map(|p| p.key.as_ref().map(|k| k.0.as_str())).collect();
-    let links = lod_parents(ctx, &maps);
+    let mut kept_own: Vec<Place> = places.iter().filter(|p| done.contains_key(&p.name)).cloned().collect();
+    let maps: HashSet<&str> = kept_own.iter().filter_map(|p| p.key.as_ref().map(|k| k.0.as_str())).collect();
+    let (links, blinks) = lod_parents(ctx, &maps);
+    // 6m parents ~94% of HD props to an instance of a prop batch (lod
+    // parent kind "batch", e.g. *_batchlod); GTA V cannot parent to a batch
+    // instance, so the merged batch entity becomes the LOD parent: nearest
+    // batch with that map + model. Dropping these left them ORPHANHD.
+    let mut bcand: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, p) in kept_own.iter().enumerate() {
+        if let Some((k, _)) = p.key.as_ref().filter(|k| k.0.starts_with("batch:")) {
+            bcand.entry(k.clone()).or_default().push(i);
+        }
+    }
+    let d2 = |a: V3, b: V3| (0..3).map(|k| (a[k] - b[k]).powi(2)).sum::<f32>();
+    let bparent: Vec<Option<usize>> = kept_own
+        .iter()
+        .map(|p| {
+            if ctx.o.no_lod || p.level != 0 {
+                return None;
+            }
+            let c = bcand.get(blinks.get(p.key.as_ref()?)?)?;
+            c.iter().copied().min_by(|&a, &b| d2(kept_own[a].pos, p.pos).total_cmp(&d2(kept_own[b].pos, p.pos)))
+        })
+        .collect();
+    for q in bparent.iter().flatten() {
+        kept_own[*q].level = 1;
+    }
+    drop(bcand);
+    let kept: Vec<&Place> = kept_own.iter().collect();
     let by_key: HashMap<&(String, usize), usize> = kept.iter().enumerate().filter_map(|(i, p)| p.key.as_ref().map(|k| (k, i))).collect();
     let mut parent: Vec<Option<usize>> = kept
         .iter()
-        .map(|p| {
-            let q = *by_key.get(links.get(p.key.as_ref()?)?)?;
+        .enumerate()
+        .map(|(i, p)| {
+            let q = bparent[i].or_else(|| by_key.get(links.get(p.key.as_ref()?)?).copied())?;
             (!ctx.o.no_lod && kept[q].level == p.level + 1).then_some(q)
         })
         .collect();
@@ -1635,8 +1696,9 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     let elod = |i: usize| {
         let p = kept[i];
         let a = &done[&p.name];
+        // entity lodDist (`bf74dfa7`; -1 = use the archetype's)
         if p.elod > 0.0 {
-            if small(a) { clamp_small(a, p.elod) } else { p.elod.max(floor(a)) }
+            p.elod
         } else {
             lod(&p.name, a)
         }

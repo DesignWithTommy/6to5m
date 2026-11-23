@@ -350,7 +350,7 @@ fn write_geom(b: &mut Builder, w: &mut W, g: &Geom) -> Result<(), String> {
 }
 
 /// DrawableModelsBlock with a single high-LOD model holding every geometry.
-fn add_models(b: &mut Builder, mesh: &Mesh, aabbs: &[([f32; 3], [f32; 3])]) -> Result<(BlockId, usize), String> {
+fn add_models(b: &mut Builder, mesh: &Mesh, aabbs: &[([f32; 3], [f32; 3])], sh_base: usize) -> Result<(BlockId, usize), String> {
     let id = b.reserve(Seg::Sys);
     let n = mesh.geoms.len();
     let mut w = W::new();
@@ -381,7 +381,7 @@ fn add_models(b: &mut Builder, mesh: &Mesh, aabbs: &[([f32; 3], [f32; 3])]) -> R
     w.ptr_at(Some(id), bounds as u64).ptr_at(Some(id), shmap as u64);
     w.u32(0).u16(0x00FF).u16(n as u16); // SkeletonBinding, RenderMask 255 / Flags 0
     for i in 0..n {
-        w.u16(i as u16);
+        w.u16((sh_base + i) as u16);
     }
     if n == 1 {
         w.zeros(6);
@@ -422,6 +422,15 @@ pub fn add_drawable(b: &mut Builder, mesh: &Mesh, lod_dist: f32, tex_dict: Optio
 
 /// Like `add_drawable`, into a block already reserved with `reserve(Seg::Sys)`.
 pub fn fill_drawable(b: &mut Builder, id: BlockId, mesh: &Mesh, lod_dist: f32, tex_dict: Option<BlockId>, file_root: bool) -> Result<(), String> {
+    fill_drawable_lods(b, id, std::slice::from_ref(mesh), [lod_dist; 4], tex_dict, file_root)
+}
+
+/// Drawable with up to four LOD levels (High, Med, Low, VLow: LodGroup
+/// model lists +0x50..+0x68, distances +0x70..+0x7C, render masks +0x80),
+/// e.g. the source model's own levels and distances. `levels[0]` is High
+/// and sets name and bounds; empty levels after it are skipped.
+pub fn fill_drawable_lods(b: &mut Builder, id: BlockId, levels: &[Mesh], dists: [f32; 4], tex_dict: Option<BlockId>, file_root: bool) -> Result<(), String> {
+    let mesh = levels.first().ok_or("no LOD levels")?;
     if mesh.geoms.is_empty() {
         return Err("mesh has no geometries".into());
     }
@@ -437,7 +446,7 @@ pub fn fill_drawable(b: &mut Builder, id: BlockId, mesh: &Mesh, lod_dist: f32, t
     let name = b.string(&mesh.name);
 
     // shader group
-    let shaders: Vec<BlockId> = mesh.geoms.iter().map(|g| match &g.layers { Some(l) => add_terrain_shader(b, l), None => add_shader(b, &g.texture, g.kind, &g.normal) }).collect();
+    let shaders: Vec<BlockId> = levels.iter().take(4).flat_map(|l| l.geoms.iter()).map(|g| match &g.layers { Some(l) => add_terrain_shader(b, l), None => add_shader(b, &g.texture, g.kind, &g.normal) }).collect();
     let mut pa = W::new();
     for &s in &shaders {
         pa.ptr(Some(s));
@@ -460,16 +469,32 @@ pub fn fill_drawable(b: &mut Builder, id: BlockId, mesh: &Mesh, lod_dist: f32, t
             r2 = r2.max(d);
         }
     }
-    let (models, mlen) = add_models(b, mesh, &aabbs)?;
+    let (models, mlen) = add_models(b, mesh, &aabbs, 0)?;
+    let mut lod_models = [Some(models), None, None, None];
+    let mut base = mesh.geoms.len();
+    for (k, l) in levels.iter().enumerate().take(4).skip(1) {
+        if l.geoms.is_empty() {
+            continue;
+        }
+        let ab: Vec<_> = l.geoms.iter().map(|g| aabb(g.positions.iter().copied())).collect();
+        lod_models[k] = Some(add_models(b, l, &ab, base)?.0);
+        base += l.geoms.len();
+    }
 
     let mut w = W::new();
     w.u32(VFT_FILE).u32(1).ptr(pages);
     w.ptr(Some(sgid)).u64(0);
     w.v3(c).f32(r2.sqrt() as f32);
     w.v3(lo).u32(0x7f800001).v3(hi).u32(0x7f800001);
-    w.ptr(Some(models)).u64(0).u64(0).u64(0);
-    w.f32(lod_dist).f32(lod_dist).f32(lod_dist).f32(lod_dist);
-    w.u32(0xFF01).u32(0).u32(0).u32(0); // FlagsHigh 1, RenderMaskHigh 255
+    for m in lod_models {
+        w.ptr(m);
+    }
+    for d in dists {
+        w.f32(d);
+    }
+    for m in lod_models {
+        w.u32(if m.is_some() { 0xFF01 } else { 0 }); // Flags 1, RenderMask 255
+    }
     w.u64(0).u16(0).u16(mlen.div_ceil(16) as u16).u32(0);
     w.ptr(Some(models));
     w.ptr(Some(name)).u64(0).u16(0).u16(0).u32(0).u64(0).u64(0);
@@ -480,6 +505,14 @@ pub fn fill_drawable(b: &mut Builder, id: BlockId, mesh: &Mesh, lod_dist: f32, t
 
 /// Build a standalone .ydr (resource version 165). `embed` is a builder
 /// hook that adds an embedded texture dictionary and returns its block.
+pub fn build_ydr_lods(levels: &[Mesh], dists: [f32; 4], embed: Option<&dyn Fn(&mut Builder) -> Result<BlockId, String>>) -> Result<Vec<u8>, String> {
+    let mut b = Builder::new();
+    let root = b.reserve(Seg::Sys);
+    let dict = embed.map(|e| e(&mut b)).transpose()?;
+    fill_drawable_lods(&mut b, root, levels, dists, dict, true)?;
+    b.build(165)
+}
+
 pub fn build_ydr(mesh: &Mesh, lod_dist: f32, embed: Option<&dyn Fn(&mut Builder) -> Result<BlockId, String>>) -> Result<Vec<u8>, String> {
     let mut b = Builder::new();
     let root = b.reserve(Seg::Sys); // the drawable must be the root block

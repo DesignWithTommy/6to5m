@@ -175,7 +175,7 @@ pub fn props(ctx: &Ctx, index: &sixng_core::scan::ArchiveIndex) -> Vec<(Value, [
             }
             let name = format!("b6m_{}", &super::sha(&format!("{}|{}|{:?}", b["map"], model, b["bbox"]))[..12]);
             defs.lock().unwrap().insert(name.clone(), std::sync::Arc::new(BatchDef { model: model.to_string(), inst }));
-            let e = json!({"name": name, "model_id": b["model_id"], "lod": {"level": "HD", "lod_dist": b["lod_distance"]}, "scale_xy": 1.0, "scale_z": 1.0});
+            let e = json!({"name": name, "model_id": b["model_id"], "lod": {"level": "HD", "lod_dist": b["lod_distance"]}, "scale_xy": 1.0, "scale_z": 1.0, "batch_map": b["map"], "batch_model": model});
             out.push((e, c, [0.0, 0.0, 0.0, 1.0]));
         }
     }
