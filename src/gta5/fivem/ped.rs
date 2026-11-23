@@ -707,6 +707,19 @@ fn candidates<'a>(ix: &'a sixng_core::scan::ArchiveIndex, o: &PedOpts) -> Vec<&'
         chosen.remove("top");
         chosen.remove("bottom");
     }
+    // No lower body in the default look (cs_lucia: no body, pants or shoes
+    // is named for her, and no packs.rpf wardrobe record links any by id):
+    // her own legacy whole-body copy (clothed, `ws00`) replaces the loose
+    // garments; the head stays.
+    let has_lower = ["bottom", "full", "feet", "body_lower"].iter().any(|g| chosen.contains_key(*g));
+    if chosen.contains_key("head") && !has_lower {
+        if let Some((n, e)) = by.iter().find(|(n, _)| prefix_item(n).is_some_and(|x| x.1.starts_with("legacyped")) && n.contains("_fullbody")) {
+            for g in ["top", "outer", "body_upper"] {
+                chosen.remove(g);
+            }
+            chosen.insert(prefix_item(n).map(|x| x.1).unwrap_or_default(), e);
+        }
+    }
     // no head of its own (cs_jason): the legacy head and whole-body copies
     if !chosen.contains_key("head") {
         for (n, e) in &by {
