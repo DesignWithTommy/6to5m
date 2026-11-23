@@ -27,10 +27,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-/// Texture dictionary cap, in DDS bytes (= the ytd's physical/graphics
-/// size: pixel data dominates). Above ~16 MB physical a streamed file
-/// causes hitches when it loads, so stay well under.
-const TXD_CAP: u64 = 14 << 20;
+/// Texture dictionary cap: graphics bytes after RSC7 page packing
+/// (rsc::gfx_pages_size), what FiveM checks against its 16 MB streaming
+/// limit. Was compared with the plain sum of DDS sizes, which packed to
+/// 18-20 MB (power-of-two pages): 646 ytds evicted, blurry buildings.
+const TXD_CAP: u64 = 15 << 20;
+/// System pages of a texture dictionary (pages info 1 KB + 144 B and a name
+/// per texture): budgeted from the 128-page total.
+const TXD_SYS_PAGES: u32 = 4;
 /// A family dictionary below this many bytes is not closed at the end of
 /// its family: following families are packed into it (fewer, larger files
 /// to download and mount per region).
@@ -1914,6 +1918,9 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     // explicit --max-tex drops top mips (the txd split handles size limits).
     let cap_of = |_: &str| -> u16 { ctx.o.max_tex.unwrap_or(u16::MAX) };
     let tsize = |t: &str| pools.store.len(&cache.join(format!("{}.dds", &t[4..])));
+    // Page-packed graphics size of a texture set (pixel data = DDS minus
+    // its header; the header bytes are left in as slack).
+    let packed = |ts: &mut dyn Iterator<Item = &String>| -> u64 { crate::gta5::rsc::gfx_pages_size(&ts.map(|t| tsize(t)).collect::<Vec<_>>(), TXD_SYS_PAGES).unwrap_or(u64::MAX) };
     let mut fam: BTreeMap<String, Vec<&Arch>> = BTreeMap::new();
     for a in done.values() {
         fam.entry(a.an[4..].split('_').take(2).collect::<Vec<_>>().join("_")).or_default().push(a);
@@ -1926,52 +1933,118 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
             }
         }
     }
-    // No shared parent chain: a texture used by several families is copied
-    // into each family txd. A linear t6m_shr chain (each txd's parent is the
-    // previous one, gtxd.meta) made every building load the whole chain
-    // (~390 MB at the airport, 18 ytds over 16 MB): blurry walls, checkered
-    // glass. Each model now loads only its own txd (<= TXD_CAP).
-    let shared: Vec<String> = Vec::new();
-    let is_shared: HashSet<&String> = shared.iter().collect();
-    // (file stem, textures, parent)
-    let mut dicts: Vec<(String, Vec<String>, Option<String>)> = Vec::new();
-    {
-        let (mut cur, mut size): (Vec<String>, u64) = (Vec::new(), 0);
-        for t in &shared {
-            let s = tsize(t);
-            if !cur.is_empty() && size + s > TXD_CAP {
-                let n = dicts.len();
-                dicts.push((format!("t6m_shr{n:04}"), std::mem::take(&mut cur), n.checked_sub(1).map(|p| format!("t6m_shr{p:04}"))));
-                size = 0;
-            }
-            cur.push(t.clone());
-            size += s;
-        }
-        if !cur.is_empty() {
-            let n = dicts.len();
-            dicts.push((format!("t6m_shr{n:04}"), cur, n.checked_sub(1).map(|p| format!("t6m_shr{p:04}"))));
+    // Shallow txd tree from 6m's own sharing (depth <= 2, gtxd.meta), so a
+    // texture (one 64-bit identity = one r6m_ name, fivem/texslot.rs) used by
+    // several families is stored once instead of copied into each family
+    // txd (a full build shared 0 of 47,229 textures):
+    // - root t6m_shr_root: textures used by >= ROOT_USERS families, most
+    //   used first, up to TXD_CAP;
+    // - one group txd per exact set of families using a texture
+    //   (t6m_shrNNNN, split at TXD_CAP), parent = root;
+    // - each family txd's parent is the group holding most of its shared
+    //   bytes; shared textures of other groups are copied into it.
+    // The old linear chain (each shr the parent of the next) made every
+    // building load all of it (~390 MB at the airport). Per model now: own
+    // txd + one group + root, each <= TXD_CAP packed.
+    const ROOT_USERS: usize = 8;
+    let mut by_use: Vec<(&String, usize)> = users.iter().filter(|(_, f)| f.len() >= ROOT_USERS).map(|(t, f)| (*t, f.len())).collect();
+    by_use.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let mut root: Vec<String> = Vec::new();
+    for (t, _) in by_use {
+        if packed(&mut root.iter().chain([t])) <= TXD_CAP {
+            root.push(t.clone());
         }
     }
-    let top_shared = dicts.last().map(|d| d.0.clone());
+    root.sort();
+    let in_root: HashSet<String> = root.iter().cloned().collect();
+    let root_name = (!root.is_empty()).then(|| "t6m_shr_root".to_string());
+    // (file stem, textures, parent)
+    let mut dicts: Vec<(String, Vec<String>, Option<String>)> = Vec::new();
+    if let Some(r) = &root_name {
+        dicts.push((r.clone(), root, None));
+    }
+    let mut buckets: BTreeMap<Vec<&String>, Vec<&String>> = BTreeMap::new();
+    for (t, f) in &users {
+        if f.len() > 1 && !in_root.contains(*t) {
+            let mut k: Vec<&String> = f.iter().copied().collect();
+            k.sort();
+            buckets.entry(k).or_default().push(*t);
+        }
+    }
+    // texture -> group txd
+    let mut group_of: HashMap<String, String> = HashMap::new();
+    for (_, mut ts) in buckets {
+        ts.sort();
+        let mut parts: Vec<Vec<String>> = vec![Vec::new()];
+        for t in ts {
+            let last = parts.last().unwrap();
+            if !last.is_empty() && packed(&mut last.iter().chain([t])) > TXD_CAP {
+                parts.push(Vec::new());
+            }
+            parts.last_mut().unwrap().push(t.clone());
+        }
+        for part in parts {
+            let name = format!("t6m_shr{:04}", dicts.len());
+            for t in &part {
+                group_of.insert(t.clone(), name.clone());
+            }
+            dicts.push((name, part, root_name.clone()));
+        }
+    }
+    let shared_n = in_root.len() + group_of.len();
+    // family -> parent: the group with most of its shared bytes, else root
+    let parent_of = |v: &Vec<&Arch>| -> Option<String> {
+        let mut score: HashMap<&String, u64> = HashMap::new();
+        let mut seen = HashSet::new();
+        for a in v {
+            for t in &a.texs {
+                if seen.insert(t) {
+                    if let Some(g) = group_of.get(t) {
+                        *score.entry(g).or_default() += tsize(t);
+                    }
+                }
+            }
+        }
+        score.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(a.0))).map(|x| x.0.clone()).or_else(|| root_name.clone())
+    };
     let mut txd_of: HashMap<String, String> = HashMap::new();
     let mut fam_n = 0usize;
     let (mut cur, mut size): (Vec<String>, u64) = (Vec::new(), 0);
     let mut members: Vec<String> = Vec::new();
+    let mut cur_parent: Option<String> = None;
     let n_fam = fam.len();
     for (fi, (_, mut v)) in fam.into_iter().enumerate() {
         v.sort_by(|a, b| a.an.cmp(&b.an));
-        for a in v {
-            let mut new: Vec<&String> = a.texs.iter().filter(|t| !is_shared.contains(t) && !cur.contains(t)).collect();
-            let add: u64 = new.iter().map(|t| tsize(t)).sum();
-            if !cur.is_empty() && size + add > TXD_CAP {
+        let par = parent_of(&v);
+        // small families are packed together only under the same parent
+        if par != cur_parent && !members.is_empty() {
+            if cur.is_empty() {
+                for m in members.drain(..) {
+                    txd_of.insert(m, cur_parent.clone().unwrap_or_default());
+                }
+            } else {
                 let name = format!("t6m_txd{fam_n:04}");
                 fam_n += 1;
                 for m in members.drain(..) {
                     txd_of.insert(m, name.clone());
                 }
-                dicts.push((name, std::mem::take(&mut cur), top_shared.clone()));
+                dicts.push((name, std::mem::take(&mut cur), cur_parent.clone()));
+            }
+            size = 0;
+        }
+        cur_parent = par.clone();
+        let own = |t: &&String| !in_root.contains(*t) && group_of.get(*t) != par.as_ref();
+        for a in v {
+            let mut new: Vec<&String> = a.texs.iter().filter(|t| own(t) && !cur.contains(t)).collect();
+            if !cur.is_empty() && packed(&mut cur.iter().chain(new.iter().copied())) > TXD_CAP {
+                let name = format!("t6m_txd{fam_n:04}");
+                fam_n += 1;
+                for m in members.drain(..) {
+                    txd_of.insert(m, name.clone());
+                }
+                dicts.push((name, std::mem::take(&mut cur), par.clone()));
                 size = 0;
-                new = a.texs.iter().filter(|t| !is_shared.contains(t)).collect();
+                new = a.texs.iter().filter(|t| own(t)).collect();
             }
             size += new.iter().map(|t| tsize(t)).sum::<u64>();
             cur.extend(new.into_iter().cloned());
@@ -1981,10 +2054,9 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
             continue;
         }
         if cur.is_empty() {
-            // every texture is in the shared chain: point the archetypes at
-            // its top instead of writing an empty (295-byte) ytd
+            // everything is in its parent: use the parent, no empty ytd
             for m in members.drain(..) {
-                txd_of.insert(m, top_shared.clone().unwrap_or_default());
+                txd_of.insert(m, par.clone().unwrap_or_default());
             }
             continue;
         }
@@ -1993,7 +2065,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         for m in members.drain(..) {
             txd_of.insert(m, name.clone());
         }
-        dicts.push((name, std::mem::take(&mut cur), top_shared.clone()));
+        dicts.push((name, std::mem::take(&mut cur), par.clone()));
         size = 0;
     }
     // Over-cap dictionaries (one archetype alone can exceed TXD_CAP; the
@@ -2005,20 +2077,17 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     {
         let mut extra: Vec<(String, Vec<String>, Option<String>)> = Vec::new();
         for d in dicts.iter_mut() {
-            if d.1.iter().map(|t| tsize(t)).sum::<u64>() <= TXD_CAP {
+            if packed(&mut d.1.iter()) <= TXD_CAP {
                 continue;
             }
             let mut list = std::mem::take(&mut d.1);
             list.sort_by(|a, b| tsize(b).cmp(&tsize(a)).then(a.cmp(b)));
             let mut parts: Vec<Vec<String>> = vec![Vec::new()];
-            let mut size = 0u64;
             for t in list {
-                let s = tsize(&t);
-                if !parts.last().unwrap().is_empty() && size + s > TXD_CAP {
+                let last = parts.last().unwrap();
+                if !last.is_empty() && packed(&mut last.iter().chain([&t])) > TXD_CAP {
                     parts.push(Vec::new());
-                    size = 0;
                 }
-                size += s;
                 parts.last_mut().unwrap().push(t);
             }
             let top = d.2.take();
@@ -2035,7 +2104,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         dicts.extend(extra);
     }
     let total: usize = dicts.iter().map(|d| d.1.len()).sum();
-    eprintln!("buildings: {} textures ({} shared) in {} dictionaries", total, shared.len(), dicts.len());
+    eprintln!("buildings: {} textures ({} shared) in {} dictionaries", total, shared_n, dicts.len());
     {
         let mut by: Vec<(&String, usize, u64)> = dicts.iter().map(|d| (&d.0, d.1.len(), d.1.iter().map(|t| tsize(t)).sum())).collect();
         by.sort_by(|a, b| b.2.cmp(&a.2));
@@ -2044,7 +2113,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         for v in txd_of.values() {
             *fams.entry(v).or_default() += 1;
         }
-        super::regionlog::set("txd_per_family", json!({"dictionaries": dicts.len(), "textures": total, "shared": shared.len(), "models_per_txd_max": fams.values().max().copied().unwrap_or(0),
+        super::regionlog::set("txd_per_family", json!({"dictionaries": dicts.len(), "textures": total, "shared": shared_n, "models_per_txd_max": fams.values().max().copied().unwrap_or(0),
             "largest": by.iter().take(5).map(|d| json!({"txd": d.0, "textures": d.1, "mb": mb(d.2), "models": fams.get(d.0).copied().unwrap_or(0)})).collect::<Vec<_>>()}));
     }
     let alpha_tex: HashSet<&String> = done.values().flat_map(|a| &a.alpha).collect();

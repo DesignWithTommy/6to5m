@@ -95,8 +95,8 @@ also: 6ixpack fivem vehicle <name> --game <dir> --out <dir>   (one 6m vehicle ->
 
 /// Per-stage output versions: bump only the one whose writer changed, so
 /// other outputs stay cached (each goes into its own outputs' fingerprints).
-pub const TEX_V: &str = "tex5";
-pub const YDR_V: &str = "ydr20";
+pub const TEX_V: &str = "tex6";
+pub const YDR_V: &str = "ydr21";
 /// Fragment props as dynamic .yft (fivem/frags.rs).
 pub const FRAG_V: &str = "frag5";
 pub const YBN_V: &str = "ybn5";
@@ -586,7 +586,7 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
         Ok(())
     })();
     ctx.save_manifest()?;
-    diagnostics(&ctx, t0.elapsed().as_secs_f64());
+    let over = diagnostics(&ctx, t0.elapsed().as_secs_f64());
     quality::finish(&ctx.o.out);
     regionlog::finish(&ctx.o.out, &ctx.stream);
     let r = ctx.report.lock().unwrap();
@@ -610,7 +610,13 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
     if let Some(p) = &ctx.o.report {
         fs::write(p, serde_json::to_vec_pretty(&*r)?).map_err(|e| format!("{}: {e}", p.display()))?;
     }
-    result
+    result?;
+    // FiveM evicts streamed files over 16 MB in memory (blurry fallbacks):
+    // a build that writes one is broken, not merely warned about.
+    if !over.is_empty() {
+        return Err(format!("{} streamed files over 16 MB (RSC7 page flags): {}", over.len(), over.iter().take(10).cloned().collect::<Vec<_>>().join(", ")).into());
+    }
+    Ok(())
 }
 
 /// (virtual, physical) bytes of an RSC7 resource from its header page flags
@@ -632,10 +638,10 @@ fn rsc7_mem(p: &Path) -> Option<(u64, u64)> {
 }
 
 /// End-of-run diagnostics: stage timings, cache hits, largest files and
-/// files over 16 MB (FiveM warns about oversized streaming files), skip
+/// files over 16 MB (returned: they fail the build; FiveM evicts them), skip
 /// reasons with sample names, entity load. Printed, stored in the report
 /// (`diagnostics`) and written to <out>/fivem-build-<unix time>.log.
-fn diagnostics(ctx: &Ctx, total: f64) {
+fn diagnostics(ctx: &Ctx, total: f64) -> Vec<String> {
     let mut t = String::new();
     let r = ctx.report.lock().unwrap();
     t += &format!("fivem build: {total:.1}s total
@@ -698,6 +704,7 @@ stages:
     let secs = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let _ = fs::write(ctx.o.out.join(format!("fivem-build-{secs}.log")), &t);
     ctx.report.lock().unwrap().diagnostics = diag;
+    over.into_iter().map(|f| f.0).collect()
 }
 
 /// gtxd.meta parent chain check after the buildings stage (see

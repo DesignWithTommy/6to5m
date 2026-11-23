@@ -208,6 +208,18 @@ impl Builder {
     }
 }
 
+/// Graphics-segment bytes of a resource whose graphics blocks have these
+/// sizes, laid out by the writer's own packer (`assign`, as `build` does).
+/// Pages are power-of-two sized, so this can be far above the plain sum: a
+/// texture dictionary of 14 MB pixel data packed to 18-20 MB, over FiveM's
+/// 16 MB streaming limit. `sys_pages` is the page count of the system segment
+/// (both segments share the 128-page budget).
+pub fn gfx_pages_size(sizes: &[u64], sys_pages: u32) -> Result<u64, String> {
+    let ids: Vec<usize> = (0..sizes.len()).collect();
+    let mut pos = vec![0u64; sizes.len()];
+    assign(&ids, sizes, GFX_BASE, false, 128 - sys_pages.min(127), &mut pos).map(|r| r.1)
+}
+
 /// Page flags value -> total byte size of its pages.
 pub fn flags_size(v: u32) -> u64 {
     let base = 0x200u64 << (v & 0xF);
