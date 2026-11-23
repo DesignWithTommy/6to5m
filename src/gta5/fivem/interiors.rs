@@ -685,7 +685,7 @@ fn stale_ybn(ctx: &Ctx) {
 /// (`rbox`, grown 0.5 m) holds their centroid, else 0 (limbo). Returns the
 /// number of files written.
 fn collision(ctx: &Ctx, levels: &Path, e: &Entry, it: &Interior, order: &[u32], rbox: &HashMap<u32, [V3; 2]>, surf: &HashMap<u16, u8>) -> Result<usize, String> {
-    let Some(c) = Resource::load_sys(levels, e).ok().and_then(|r| sixng_core::bounds::decode_movement(&r)) else {
+    let Some(c) = sixng_core::bounds::load(levels, e).ok().and_then(|r| sixng_core::bounds::decode_movement(&r)) else {
         ctx.skip(&format!("t6m_int_{:08x}", it.hash), "interior collision does not decode", json!({"bounds": e.id}));
         return Ok(0);
     };

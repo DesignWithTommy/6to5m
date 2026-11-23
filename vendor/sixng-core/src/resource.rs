@@ -53,6 +53,28 @@ impl Resource {
         Ok(r)
     }
 
+    /// System page extended past its last stream: `need` bytes in all, the
+    /// missing part read uncompressed from right after the last zlib stream
+    /// (16-byte aligned), where small pages that the stream index does not
+    /// see are stored (see `load_meta`). Used for collision bounds whose
+    /// vertex array lies there (a 64 KiB stream and a vertex pointer to
+    /// 0x50010000). From SixNG resource.rs.
+    pub fn extend_sys_tail(&mut self, archive: &Path, e: &Entry, need: usize) -> Result<()> {
+        use std::io::{Read, Seek, SeekFrom};
+        let Some(last) = e.streams.last() else { return Ok(()) };
+        if need <= self.sys.len() || need - self.sys.len() > 16 << 20 {
+            return Ok(());
+        }
+        let pos = (last[0] + last[1] + 15) & !15;
+        let mut f = File::open(archive)?;
+        f.seek(SeekFrom::Start(pos))?;
+        let mut buf = vec![0u8; need - self.sys.len()];
+        let n = f.read(&mut buf)?;
+        buf.truncate(n);
+        self.sys.extend_from_slice(&buf);
+        Ok(())
+    }
+
     /// Bytes of graphics page that a meta resource's instance blocks reach.
     fn meta_gfx_extent(&self) -> usize {
         let Some(it) = self.sys_off(self.u64(0x38)) else { return 0 };
@@ -202,14 +224,20 @@ pub fn read_sys(f: &mut File, e: &Entry) -> Result<(Vec<u8>, usize)> {
         // gfx stream into sys, leaving no geometry. Repeats of a real
         // pointer still count (requiring distinct targets lost ~1.5 K
         // archetype definitions from meta resources).
-        let hits = sys
+        let targets: Vec<usize> = sys
             .chunks_exact(8)
             .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
             .filter(|&p| p >> 28 == 5 && (p & 3 == 0 || any_align) && ((p & 0x0FFF_FFFF) as usize) >= len && ((p & 0x0FFF_FFFF) as usize) < len + next)
-            .count();
+            .map(|p| (p & 0x0FFF_FFFF) as usize)
+            .collect();
         // Stray pointer-like values (hashes, packed data) can hit a large gfx
-        // stream; real sys continuations are referenced densely.
-        if hits < 2.max(next / 65536) {
+        // stream; real sys continuations are referenced densely. One pointer
+        // to the very start of a small next stream also counts: collision
+        // geometry keeps its vertex array there (a 0x60000-byte first stream
+        // plus a 43 KB stream of s16 vertices, reached only by the bound's
+        // vertex pointer; 118 minigame bounds came out empty before).
+        let exact_start = next <= 1 << 20 && targets.iter().any(|&t| t == len);
+        if targets.len() < 2.max(next / 65536) && !exact_start {
             break;
         }
         sys.extend(read_stream(f, &e.streams[n])?);

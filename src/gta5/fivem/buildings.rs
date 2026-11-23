@@ -9,7 +9,7 @@ mod interiors;
 mod lodlights;
 #[path = "texopt.rs"]
 mod texopt;
-use super::{safe_name, sha, write_atomic, Ctx, FRAG_V, TEX_V, YDR_V};
+use super::{safe_name, sha, Ctx, FRAG_V, TEX_V, YDR_V};
 use crate::gta5::{
     meta::{self, Archetype, Entity, MapData, MapTypes},
     ydr::{self, Mesh},

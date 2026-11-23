@@ -1584,7 +1584,7 @@ pub fn export_collision(a: &ArchiveInfo, entries: &[&Entry], out: &Path, progres
         .filter_map(|e| {
             let d = done.fetch_add(1, Ordering::Relaxed) + 1;
             progress(&e.id, d, total);
-            let r = Resource::load_sys(&a.path, e).ok()?;
+            let r = crate::bounds::load(&a.path, e).ok()?;
             let c = crate::bounds::decode(&r)?;
             if c.by_mat.values().all(|x| x.1.is_empty()) || !in_region(c.bbox[0], c.bbox[1]) {
                 return None;

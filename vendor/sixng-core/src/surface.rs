@@ -47,7 +47,7 @@ pub fn is_local_xyz(bb: &[[f32; 3]; 2]) -> bool {
 
 /// Decode one bounds file by id.
 pub fn decode_bounds(archive: &Path, e: &Entry) -> Option<bounds::Collision> {
-    let r = Resource::load_sys(archive, e).ok()?;
+    let r = bounds::load(archive, e).ok()?;
     bounds::decode(&r)
 }
 

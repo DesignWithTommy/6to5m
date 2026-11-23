@@ -18,7 +18,6 @@ use crate::gta5::ybn;
 use rayon::prelude::*;
 use serde_json::{json, Value};
 use sixng_core::{
-    resource::Resource,
     classify::Kind,
     scan::{ArchiveIndex, Entry},
 };
@@ -75,7 +74,7 @@ fn material_map(ctx: &Ctx) -> BTreeMap<u16, u8> {
 }
 
 fn decode(path: &std::path::Path, e: &Entry, full: bool) -> Option<sixng_core::bounds::Collision> {
-    let r = Resource::load_sys(path, e).ok()?;
+    let r = sixng_core::bounds::load(path, e).ok()?;
     let c = sixng_core::bounds::decode_native(&r, !full)?;
     (!c.by_mat.values().all(|x| x.1.is_empty()) || !c.native.is_empty()).then_some(c)
 }
