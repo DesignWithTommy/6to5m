@@ -297,6 +297,8 @@ const COLOR_SLOTS: [u32; 16] = [
 
 struct TexSource {
     game: PathBuf,
+    /// wardrobe texture overrides (drawable's own -> the item's)
+    remap: HashMap<u64, u64>,
     catalog: Option<crate::texture::Catalog>,
 }
 
@@ -305,6 +307,7 @@ impl TexSource {
     /// asset key.
     fn rgba(&self, h64: u64, key: u64) -> Result<(Vec<u8>, u32, u32), String> {
         let mut errs = Vec::new();
+        let h64 = self.remap.get(&h64).copied().unwrap_or(h64);
         if h64 != 0 {
             let set = sixng_core::ttpf::global(&self.game);
             match set.get(h64) {
@@ -812,8 +815,9 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     let female = cands.iter().filter(|e| nm(e).contains("_fr1")).count() >= cands.iter().filter(|e| nm(e).contains("_mr1")).count();
     // the ped's wardrobe variation (id-linked records, parts by shared
     // textures) replaces the name-based look; the head stays
+    let mut remap: Vec<(u64, u64)> = Vec::new();
     if !o.all && o.only.is_empty() {
-        if let Some(ws) = super::wardrobe::parts(&o.game, &o.work, &ix, &o.name, if female { "fr1" } else { "mr1" }) {
+        if let Some((ws, rm)) = super::wardrobe::parts(&o.game, &o.work, &ix, &o.name, if female { "fr1" } else { "mr1" }) {
             let mut by_name: HashMap<String, &Entry> = HashMap::new();
             for e in ix.entries.iter().filter(|e| e.rtype.as_deref() == Some("dr")) {
                 let Some(n) = e.name.as_deref() else { continue };
@@ -822,6 +826,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
                     *cur = e;
                 }
             }
+            remap = rm;
             let mut picked: Vec<&Entry> = cands.iter().copied().filter(|e| slot_of(&nm(e)) == Some(0)).collect();
             let head = !picked.is_empty();
             for n in &ws {
@@ -847,7 +852,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     let six = sixng_core::pedskel::get(&o.game, female).ok_or_else(|| format!("6m ped skeleton ({}) not found: index packs.rpf into {}", sixng_core::pedskel::source_name(female), o.work.display()))?;
     let (skel, map6, matched) = retarget(&six.bones, female);
     let nbones = skel.bones.len();
-    let texs = TexSource { game: o.game.clone(), catalog: crate::texture::Catalog::build(&o.game.join("data").join("ttdb")).ok() };
+    let texs = TexSource { game: o.game.clone(), remap: remap.iter().copied().collect(), catalog: crate::texture::Catalog::build(&o.game.join("data").join("ttdb")).ok() };
     use rayon::prelude::*;
     let decoded: Vec<(String, Result<Part, String>)> = cands.par_iter().map(|e| (nm(e), decode_part(&o.game, e, six, &map6, &texs))).collect();
 
