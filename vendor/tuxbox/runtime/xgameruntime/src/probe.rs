@@ -102,6 +102,7 @@ static TABLES: [[Slot; 64]; 10] = {
     t[2][7] = service!(package_progress);
     t[2][9] = service!(package_register_progress);
     t[2][10] = service!(unregister);
+    t[2][39] = service!(package_enumerate);
     // XPersistentLocalStorage
     t[3][4] = service!(storage_get_path);
     // XNetworking

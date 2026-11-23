@@ -386,6 +386,15 @@ pub(super) extern "system" fn unregister(_: &Object, _monitor: usize, _token: u6
     true
 }
 
+/// XPackageEnumeratePackages(kind, scope, context, callback) (slot 39 in the
+/// title's GDK; 35 in older tables). Offline there is no add-on content, and the
+/// game package itself is not listed for kind Content: report none, succeed.
+pub(super) extern "system" fn package_enumerate(_: &Object, kind: u32, scope: u32, _context: *mut c_void, callback: *const c_void) -> i32 {
+    super::report(format_args!("called package_enumerate kind {kind} scope {scope}"));
+    if callback.is_null() { return POINTER; }
+    OK
+}
+
 /// XSystemGetConsoleId(size, buffer, used): a stable local identifier.
 pub(super) unsafe extern "system" fn system_console_id(_: &Object, size: usize, buffer: *mut u8, used: *mut usize) -> i32 {
     const ID: &[u8] = b"54555842-4F58-4C4F-4341-4C434F4E534F\0";
