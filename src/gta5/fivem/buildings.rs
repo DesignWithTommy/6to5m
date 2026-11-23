@@ -1050,7 +1050,7 @@ type Built = (Mesh, Vec<String>, Vec<String>, bool);
 const FOUR_LAYER: [u32; 4] = [0x61e0_9df7, 0xb21f_1ba5, 0x360e_396b, 0x27e5_c49d];
 const DETAIL_TILE: f32 = 64.0;
 /// Writer version of four-layer ground ydrs (in their cache key only).
-const LYR4_V: &str = "lyr4_1";
+const LYR4_V: &str = "lyr4_2";
 
 /// Four-layer ground submesh as terrain_cb_w_4lyr geometries: the layer
 /// diffuses become the shader's four samplers, the section `lookuptexture`
@@ -1070,6 +1070,12 @@ fn four_layer_geoms(pools: &Pools, mat: &crate::model::Material, key_of: &dyn Fn
     let first = names.iter().flatten().next()?.clone();
     if names.iter().flatten().count() < 2 {
         return None;
+    // 6m layer normal maps (bumptexture_layerN); the flat normal where one
+    // does not decode.
+    let flat = flat_bump(pools).ok()?;
+    let bumps: [String; 4] = std::array::from_fn(|i| {
+        slot(&format!("bumptexture_layer{i}")).and_then(|t| pools.get_normal(t.hash, key_of(t), t.h64).ok()).unwrap_or_else(|| flat.clone())
+    });
     }
     let layers: [String; 4] = std::array::from_fn(|i| names[i].clone().unwrap_or_else(|| first.clone()));
     let lt = slot("lookuptexture")?;
@@ -1078,9 +1084,9 @@ fn four_layer_geoms(pools: &Pools, mat: &crate::model::Material, key_of: &dyn Fn
         return None;
     }
     let sample = |uv: [f32; 2]| -> [f32; 3] {
-        // bilinear, clamped to the section
-        let x = (uv[0].clamp(0.0, 1.0) * lw as f32 - 0.5).clamp(0.0, (lw - 1) as f32);
-        let y = (uv[1].clamp(0.0, 1.0) * lh as f32 - 0.5).clamp(0.0, (lh - 1) as f32);
+        // bilinear; wraps like the game's sampler (set pieces run past 0..1)
+        let x = (uv[0].rem_euclid(1.0) * lw as f32 - 0.5).clamp(0.0, (lw - 1) as f32);
+        let y = (uv[1].rem_euclid(1.0) * lh as f32 - 0.5).clamp(0.0, (lh - 1) as f32);
         let (x0, y0) = (x.floor() as u32, y.floor() as u32);
         let (x1, y1) = ((x0 + 1).min(lw - 1), (y0 + 1).min(lh - 1));
         let (fx, fy) = (x - x0 as f32, y - y0 as f32);
@@ -1102,16 +1108,25 @@ fn four_layer_geoms(pools: &Pools, mat: &crate::model::Material, key_of: &dyn Fn
                 let s = (r + gg + b).max(1.0);
                 let (w1, w2, w3) = (gg / s, b / s, (1.0 - (r + gg + b) / s).max(0.0));
                 let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
-                (q(w2 + w3) << 8) | (q(w1 + w3) << 16) | 0xFF00_0000
+                (q(w2 + w3) << 8) | (q(w1 + w3) << 16)
+        // Detail layers tile at TEXCOORD_0 x 64 (SixNG 6046d19: one repeat
+        // per 8 m on map section tiles). Per-layer tiling (c35e27af) is not
+        // decoded yet (SixNG a225c66).
             })
             .collect();
         for uv in &mut g.uvs {
+        // Vertex colours as in GTA V's own terrain drawables: Colour0 =
+        // (ambient, 0, 0, 255), Colour1 = (0, G, B, 0).
+        for c in &mut g.colours {
+            *c = (*c & 0xFF) | 0xFF00_0000;
+        }
             *uv = [uv[0] * DETAIL_TILE, uv[1] * DETAIL_TILE];
+        g.layer_bumps = bumps.clone();
         }
         g.layers = Some(layers.clone());
     }
     let mut texs: Vec<String> = Vec::new();
-    for l in &layers {
+    for l in layers.iter().chain(&bumps).chain([&ydr::FLAT_SPEC.to_string()]) {
         if !texs.contains(l) {
             texs.push(l.clone());
         }
@@ -1383,6 +1398,9 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
         texs.retain(|t| t != MISSING);
     }
     let is_frag = entry.is_some_and(|e| e.rtype.as_deref() == Some("ft"));
+    if frag_out {
+        ctx.skip(name, "fragment geometry outside declared bounds (converted anyway, check placement)", json!({"source": src}));
+    }
     if mesh.geoms.is_empty() {
         ctx.skip(name, "no triangles", json!({"source": format!("levels.rpf@{off:x}")}));
         return Ok(None);
@@ -1391,23 +1409,8 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
         ctx.skip(name, "missing textures (placeholder used)", json!({"textures": missing}));
     }
     let (lo, hi) = aabb(mesh.geoms.iter().flat_map(|g| g.positions.iter()));
-    let cols = entry.filter(|_| frag).map(|e| super::frags::colliders(&ctx.o.game.join("levels.rpf"), e)).unwrap_or_default();
-    // A fragment's drawable bounds (+0x30/+0x40) are not in the frame its
-    // geometry and colliders share (doors: centred on the panel while the
-    // mesh and the bone-placed colliders start at the hinge), so a fragment
-    // with 6m colliders is flagged only when its mesh misses their union.
-    let frag_out = if cols.is_empty() {
-        frag_out
-    } else {
-        let (cl, ch) = cols.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(a, b), c| (std::array::from_fn(|k| a[k].min(c.min[k])), std::array::from_fn(|k| b[k].max(c.max[k]))));
-        let pad = 0.05 * (0..3).map(|k| ch[k] - cl[k]).fold(1.0f32, f32::max);
-        (0..3).any(|k| lo[k] > ch[k] + pad || hi[k] < cl[k] - pad)
-    };
-    if frag_out {
-        ctx.skip(name, "fragment geometry outside its collision (converted anyway, check placement)", json!({"source": src}));
-    }
     let bytes = match entry.filter(|_| frag) {
-        Some(_) => super::frags::build_prop_yft(&mesh, &cols, 9998.0),
+        Some(e) => super::frags::build_prop_yft(&mesh, &super::frags::colliders(&ctx.o.game.join("levels.rpf"), e), 9998.0),
         // the source model's own LOD levels and distances (LodGroup +0x50..+0x7C)
         None if lower.iter().any(|l| !l.geoms.is_empty()) => {
             let mut lv = vec![mesh.clone()];
