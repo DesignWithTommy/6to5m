@@ -136,7 +136,7 @@ pub struct GroomInfo {
 /// Every groom in packs.rpf, cached in `<work>/index/fivem_grooms_packs.json`.
 pub fn catalog(game: &Path, work: &Path, ix: &ArchiveIndex) -> Result<Vec<GroomInfo>, String> {
     use rayon::prelude::*;
-    let p = work.join("index").join("fivem_grooms_packs.json");
+    let p = work.join("index").join("fivem_grooms_packs_v2.json");
     if let Ok(v) = std::fs::read(&p).map_err(|e| e.to_string()).and_then(|b| serde_json::from_slice::<Vec<GroomInfo>>(&b).map_err(|e| e.to_string())) {
         return Ok(v);
     }
@@ -151,9 +151,40 @@ pub fn catalog(game: &Path, work: &Path, ix: &ArchiveIndex) -> Result<Vec<GroomI
         })
         .collect();
     v.sort_by_key(|g| g.off);
-    for i in 1..v.len() {
-        if v[i].bones == v[i - 1].bones && v[i].strands < v[i - 1].strands {
-            v[i].lod = v[i - 1].lod + 1;
+    // LOD grouping (GTA6-Asset-Info 19-ped-physics-resources, replaces
+    // "same bones, fewer strands" as neighbours): LOD names sort apart, so
+    // another piece's chain can sit between a piece's LODs. A groom joins one
+    // of the last three pieces with the same bone set and fewer strands than
+    // that piece's last LOD; a piece further back also needs the same root
+    // box within 2 mm.
+    struct Piece {
+        bones: Vec<u32>,
+        strands: u32,
+        root_box: [[f32; 3]; 2],
+        lod: u32,
+    }
+    let mut pieces: Vec<Piece> = Vec::new();
+    let near = |a: &[[f32; 3]; 2], b: &[[f32; 3]; 2]| (0..2).all(|i| (0..3).all(|k| (a[i][k] - b[i][k]).abs() <= 0.002));
+    for g in v.iter_mut() {
+        let mut set = g.bones.clone();
+        set.sort_unstable();
+        set.dedup();
+        let n = pieces.len();
+        let hit = (n.saturating_sub(3)..n).rev().find(|&i| {
+            let p = &pieces[i];
+            p.bones == set && g.strands < p.strands && (i + 1 == n || near(&p.root_box, &g.root_box))
+        });
+        match hit {
+            Some(i) => {
+                let p = &mut pieces[i];
+                p.lod += 1;
+                p.strands = g.strands;
+                g.lod = p.lod;
+            }
+            None => {
+                g.lod = 0;
+                pieces.push(Piece { bones: set, strands: g.strands, root_box: g.root_box, lod: 0 });
+            }
         }
     }
     let _ = std::fs::write(&p, serde_json::to_vec(&v).unwrap_or_default());
