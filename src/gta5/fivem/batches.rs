@@ -38,7 +38,8 @@ fn key(ctx: &Ctx) -> String {
 fn map_index(ctx: &Ctx, a: &sixng_core::game::ArchiveInfo, index: &sixng_core::scan::ArchiveIndex) -> Result<Vec<(String, Bbox)>, String> {
     use rayon::prelude::*;
     let p = ctx.o.work.join("fivem_batches").join(format!("maps_{}.json", key(ctx)));
-    if let Some(v) = fs::read(&p).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
+    if let Some(v) = fs::read(&p).ok().and_then(|b| serde_json::from_slice::<Vec<(String, Bbox)>>(&b).ok()) {
+        eprintln!("[t6m:batches] map-file index: cached ({} map files with batches)", v.len());
         return Ok(v);
     }
     eprintln!("[t6m:batches] indexing map files with instanced batches (once per input; system pages from one archive map)");
@@ -104,6 +105,7 @@ fn tables(ctx: &Ctx, index: &sixng_core::scan::ArchiveIndex) -> Result<Vec<PathB
         }
         out.push(dir);
     }
+    eprintln!("[t6m:batches] cells in region: {} ({} cached, {} to export)", out.len(), out.len() - todo.len(), todo.len());
     if !todo.is_empty() {
         // One export for every missing cell: export_batches loads the model
         // name table of all archives on each call, so a call per cell spent
