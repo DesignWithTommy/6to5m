@@ -25,7 +25,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// Bump when the batch tables or their use change.
-pub const BATCH_V: &str = "batch1";
+pub const BATCH_V: &str = "batch3";
 const CELL: f32 = 512.0;
 
 type Bbox = [[f32; 3]; 2];
@@ -37,12 +37,12 @@ fn key(ctx: &Ctx) -> String {
 /// Map files holding batches, with the union box of their batches.
 fn map_index(ctx: &Ctx, a: &sixng_core::game::ArchiveInfo, index: &sixng_core::scan::ArchiveIndex) -> Result<Vec<(String, Bbox)>, String> {
     use rayon::prelude::*;
-    use sixng_core::resource::Resource;
     let p = ctx.o.work.join("fivem_batches").join(format!("maps_{}.json", key(ctx)));
     if let Some(v) = fs::read(&p).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
         return Ok(v);
     }
     eprintln!("batches: indexing map files with instanced batches (once per input; system pages from one archive map)");
+    let t = std::time::Instant::now();
     let file = fs::File::open(&a.path).map_err(|e| e.to_string())?;
     // SAFETY: read-only map of the game archive.
     let map = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| e.to_string())?;
@@ -53,17 +53,17 @@ fn map_index(ctx: &Ctx, a: &sixng_core::game::ArchiveInfo, index: &sixng_core::s
         .filter_map(|e| {
             let r = super::buildings::sys_from_map(&map, e)?;
             let m = sixng_core::meta7a::Meta::parse(&r)?;
-            if m.objects(sixng_core::batches::PROP_BATCH).is_empty() && m.objects(sixng_core::batches::GRASS_BATCH).is_empty() {
-                return None;
-            }
-            let r = Resource::load_meta(&a.path, e).ok()?;
-            let m = sixng_core::meta7a::Meta::parse(&r)?;
-            let bbs: Vec<Bbox> = sixng_core::batches::prop_batches(&r, &m).iter().map(|b| b.bbox).chain(sixng_core::batches::grass_batches(&r, &m).iter().map(|b| b.bbox)).collect();
+            // batch boxes sit in the system page (prop +0xA0, grass +0x80);
+            // only the instance arrays need the graphics page
+            let v3 = |o: usize| [r.f32(o), r.f32(o + 4), r.f32(o + 8)];
+            let bbs: Vec<Bbox> = m.objects(sixng_core::batches::PROP_BATCH).into_iter().map(|o| [v3(o + 0xA0), v3(o + 0xB0)])
+                .chain(m.objects(sixng_core::batches::GRASS_BATCH).into_iter().map(|o| [v3(o + 0x80), v3(o + 0x90)])).collect();
             let lo = std::array::from_fn(|k| bbs.iter().map(|b| b[0][k]).fold(f32::MAX, f32::min));
             let hi = std::array::from_fn(|k| bbs.iter().map(|b| b[1][k]).fold(f32::MIN, f32::max));
             (!bbs.is_empty()).then(|| (e.id.clone(), [lo, hi]))
         })
         .collect();
+    eprintln!("batches: indexed {} map files with batches in {:.1}s", v.len(), t.elapsed().as_secs_f32());
     let _ = fs::create_dir_all(p.parent().unwrap());
     fs::write(&p, serde_json::to_vec(&v).unwrap_or_default()).map_err(|e| e.to_string())?;
     Ok(v)
@@ -86,6 +86,8 @@ fn tables(ctx: &Ctx, index: &sixng_core::scan::ArchiveIndex) -> Result<Vec<PathB
     }
     let root = ctx.o.work.join("fivem_batches").join(key(ctx));
     let mut out = Vec::new();
+    let mut todo: Vec<((i32, i32), PathBuf)> = Vec::new();
+    let mut cell_of: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for ((x, y), ids) in cells {
         // a cell's map files reach at most about one cell beyond it
         let lo = [(x - 1) as f32 * CELL, (y - 1) as f32 * CELL, -1e4];
@@ -93,15 +95,53 @@ fn tables(ctx: &Ctx, index: &sixng_core::scan::ArchiveIndex) -> Result<Vec<PathB
         if !ctx.o.in_bbox(lo, hi) {
             continue;
         }
-        let base = root.join(format!("c_{x}_{y}"));
-        let dir = base.join("placements").join("levels");
+        let dir = root.join(format!("c_{x}_{y}")).join("placements").join("levels");
         if !dir.join("done").exists() {
-            let ids: HashSet<&str> = ids.into_iter().collect();
-            let sel: Vec<&sixng_core::scan::Entry> = index.entries.iter().filter(|e| ids.contains(e.id.as_str())).collect();
-            let s = sixng_core::export::export_batches(&ws, &a, &sel, &base, sixng_core::export::no_progress()).map_err(|e| e.to_string())?;
-            fs::write(dir.join("done"), serde_json::to_vec(&s).unwrap_or_default()).map_err(|e| e.to_string())?;
+            for id in ids {
+                cell_of.insert(id, todo.len());
+            }
+            todo.push(((x, y), dir.clone()));
         }
         out.push(dir);
+    }
+    if !todo.is_empty() {
+        // One export for every missing cell: export_batches loads the model
+        // name table of all archives on each call, so a call per cell spent
+        // most of the cold build there. Rows are then split per cell.
+        let t = std::time::Instant::now();
+        let tmp = root.join("_export");
+        let sel: Vec<&sixng_core::scan::Entry> = index.entries.iter().filter(|e| cell_of.contains_key(e.id.as_str())).collect();
+        sixng_core::export::export_batches(&ws, &a, &sel, &tmp, sixng_core::export::no_progress()).map_err(|e| e.to_string())?;
+        let src = tmp.join("placements").join("levels");
+        let pbin = fs::read(src.join("batch_props.bin")).unwrap_or_default();
+        let gbin = fs::read(src.join("batch_grass.bin")).unwrap_or_default();
+        let mut parts: Vec<(String, Vec<u8>, Vec<u8>, usize, usize)> = vec![(String::new(), Vec::new(), Vec::new(), 0, 0); todo.len()];
+        for l in fs::read_to_string(src.join("batches.jsonl")).unwrap_or_default().lines() {
+            let Ok(mut v) = serde_json::from_str::<Value>(l) else { continue };
+            let Some(&ci) = v["map"].as_str().and_then(|m| cell_of.get(m)) else { continue };
+            let (first, count) = (v["first"].as_u64().unwrap_or(0) as usize, v["count"].as_u64().unwrap_or(0) as usize);
+            let c = &mut parts[ci];
+            if v["kind"] == "prop" {
+                c.1.extend_from_slice(pbin.get(first * 44..(first + count) * 44).unwrap_or_default());
+                v["first"] = c.3.into();
+                c.3 += count;
+            } else {
+                c.2.extend_from_slice(gbin.get(first * 20..(first + count) * 20).unwrap_or_default());
+                v["first"] = c.4.into();
+                c.4 += count;
+            }
+            c.0.push_str(&v.to_string());
+            c.0.push('\n');
+        }
+        for ((_, dir), (j, pb, gb, _, _)) in todo.iter().zip(parts) {
+            fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            fs::write(dir.join("batches.jsonl"), j).map_err(|e| e.to_string())?;
+            fs::write(dir.join("batch_props.bin"), pb).map_err(|e| e.to_string())?;
+            fs::write(dir.join("batch_grass.bin"), gb).map_err(|e| e.to_string())?;
+            fs::write(dir.join("done"), b"").map_err(|e| e.to_string())?;
+        }
+        let _ = fs::remove_dir_all(&tmp);
+        eprintln!("batches: exported {} cells ({} map files) in {:.1}s", todo.len(), sel.len(), t.elapsed().as_secs_f32());
     }
     Ok(out)
 }
