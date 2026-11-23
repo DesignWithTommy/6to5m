@@ -196,13 +196,6 @@ pub fn split(ctx: &Ctx, metres: f32, max_mb: u64) -> Result<(), Box<dyn Error>> 
                 for f in &extra {
                     ch |= write_if_changed(&dir.join(f), &fs::read(ctx.o.out.join(f))?)?;
                 }
-                // drop a copy left from an earlier build (a stale gtxd.meta
-                // naming txds that no longer exist, unmounted but shipped)
-                for f in ["water.xml", "gtxd.meta"].into_iter().filter(|f| !extra.contains(f)) {
-                    if fs::remove_file(dir.join(f)).is_ok() {
-                        ch = true;
-                    }
-                }
                 if !extra.is_empty() {
                     t += &format!("files {{ {} }}\n", extra.iter().map(|f| format!("'{f}'")).collect::<Vec<_>>().join(", "));
                 }

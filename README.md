@@ -54,7 +54,7 @@ What works today:
 ## Roadmap
 
 - [x] BCPack BC4
-- [ ] BCPack BC6H: preset endpoints refitted per GTA6-Asset-Info (7f3e1d3), mip-check bad blocks 12.7% -> 7.3%; remaining BC6H and BC7 blocks still open
+- [ ] BCPack BC6H: preset endpoints refitted per GTA6-Asset-Info (7f3e1d3), mip-check bad blocks 12.7% -> 7.3%; BC7 and BC6H now decode through upstream SixNG's fitted rebuilders (5c21d7d, d4b14fa). Live re-measure pending
 - [x] Road and asphalt surfaces
 - [x] Four-layer roads and ground: terrain_cb_w_4lyr.sps with the four 6m layer diffuses, lookup weights baked into Colour1 (no layer bump maps yet)
 - [x] LOD/SLOD drawables with no linked model (unresolved archetypes 84,216 to 37; `#member` model ids resolved, so every airport placement converts)
@@ -63,7 +63,7 @@ What works today:
 - [x] MLO portals decoded from 6m (`995072ca`) and entities attached to their rooms (`T6M_MLO_LIMBO=1` puts them all in limbo); entity sets start off
 - [x] Room ids in interior collision (so the game knows the player is inside a room)
 - [x] MLO lights: 6m light sets of each interior entity (archetype + entity, decoded during the build, no extra pass) as CExtensionDefLightEffect; intensity and capsule extents copied 1:1 (`T6M_LIGHT_SCALE`); MLO lodDist 60-200 m so interior contents only stream near the player
-- [x] Tint palettes: the embedded palette entry (vertex colour blue, row = the placement's `tintValue`) is baked into tinted copies of the colour texture (32-step colours, max 512 px); the palette is no longer picked as a colour map
+- [x] Tint palettes: the embedded palette entry (vertex colour blue, row 0: tintValue-as-row renders wrong, 5849b7b) is baked into tinted copies of the colour texture (32-step colours, max 512 px); the palette is no longer picked as a colour map
 - [x] Quality audit: UVs no longer V-flipped (6m is DirectX top-left), COLOR0 mapped to GTA V ambient (r,r,255,255) so buildings are not black under artificial light
 - [x] Buildings use `normal_spec.sps` with their real 6m normal maps (7624a1a)
 - [x] Colour textures picked by 6m slot hash, glass on glass_env with its real diffuse, texture size from texel density (77ad6e2)

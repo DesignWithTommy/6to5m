@@ -805,7 +805,6 @@ pub fn decode_mesh(blob: &[u8], h: &MeshBlobHeader, ib: &[u8]) -> Mesh {
     // dn_14_structure_03_b: the hinted order scores ~1.0 against the normals
     // on every geometry.
     let hinted = match mode { 1 => 1, 0 => 4, _ => 0 };
-    let known = h.float_positions || mode <= 2;
     let mut axis_order = orders[hinted];
     if let Some(n) = &normals {
         let score = |o: &[usize; 3]| -> f32 {
@@ -831,12 +830,9 @@ pub fn decode_mesh(blob: &[u8], h: &MeshBlobHeader, ib: &[u8]) -> Mesh {
         if std::env::var_os("SIXNG_DEBUG_AXIS").is_some() {
             eprintln!("axis: v={v} mode={mode} scores={:?}", orders.iter().map(|o| (score(o) * 1000.0).round() / 1000.0).collect::<Vec<_>>());
         }
-        // The header is taken at its word for 0-2 (upstream a7c3a1a: every
-        // score-driven switch that could be checked was wrong).
-        if !known {
-            let (bi, _) = orders.iter().enumerate().map(|(i, o)| (i, score(o))).fold((hinted, sh), |a, b| if b.1 > a.1 + 0.05 { b } else { a });
-            axis_order = orders[bi];
-        }
+        let (bi, bs) = orders.iter().enumerate().map(|(i, o)| (i, score(o))).fold((hinted, sh), |a, b| if b.1 > a.1 + 0.05 { b } else { a });
+        let _ = bs;
+        axis_order = orders[bi];
     }
     if axis_order != [0, 1, 2] {
         for p in positions.iter_mut() {
