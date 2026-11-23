@@ -92,6 +92,7 @@ What works today:
 - [x] Collision surface materials: 6m surface ids map to GTA V materials (concrete, tarmac, gravel, dirt, sand, marsh, soil, grass, rock) through `sixng surfaces` categories; needs `<work>/collision/levels/surface_categories.json`, else DEFAULT. Not yet tested in game
 - [x] Coordinate offset: `--offset dx,dy[,dz]` moves every output (ymaps, terrain/collision ybns, interiors, water, minimap, zones); `--bbox` stays in 6m coordinates. GTA VI reaches y 9474, past GTA V's ~±8000
 - [x] Los Santos removal in Rust (part `lsremove`): reads GTA V's RPF7 archives (pure-Rust NG/AES decrypt; keys from GTA5.exe + CodeWalker's magic.dat, cached in `<work>/gta5_keys.bin`), indexes the 8,666 ymaps and 10,837 ybns of _citye/_cityw/_hills incl. DLCs once, and writes empty stand-ins for those seen from the region. The ybn stand-ins are byte-identical, so they share one file in the output cache. Not yet tested in game
+$L
 
 ## Contributing
 
