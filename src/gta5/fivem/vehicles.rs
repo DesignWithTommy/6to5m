@@ -13,7 +13,7 @@
 //!
 //! Output (<out> is the resource):
 //!   <out>/stream/<model>.yft, <model>_hi.yft, <model>.ytd
-//!   <out>/data/vehicles.meta, handling.meta, carvariations.meta, carcols.meta
+//!   <out>/data/vehicles.meta, handling.meta, carvariations.meta
 //!   <out>/fxmanifest.lua
 //!
 //! With `sixng vehicles` data: the configuration's rim + tyre drawables
@@ -813,7 +813,11 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     put(data.join("vehicles.meta"), vehicles_meta(&o, vd.as_ref()).as_bytes())?;
     put(data.join("handling.meta"), handling_meta(&o).as_bytes())?;
     put(data.join("carvariations.meta"), carvariations_meta(&o).as_bytes())?;
-    put(data.join("carcols.meta"), CARCOLS.as_bytes())?;
+    // No carcols.meta: the 6m vehicle carries no mod kit, light or siren
+    // data we decode, and an empty CVehicleModelInfoVarGlobal mounted as
+    // CARCOLS_FILE crashed the client (+1361943). Remove one left by older
+    // builds so it is not shipped.
+    let _ = fs::remove_file(data.join("carcols.meta"));
     put(o.out.join("fxmanifest.lua"), FXMANIFEST.as_bytes())?;
 
     let ntris: usize = frag.lods[0].iter().flat_map(|m| m.geoms.iter()).map(|g| g.indices.len() / 3).sum();
@@ -916,21 +920,11 @@ files {
   'data/vehicles.meta',
   'data/handling.meta',
   'data/carvariations.meta',
-  'data/carcols.meta',
 }
 
 data_file 'HANDLING_FILE' 'data/handling.meta'
 data_file 'VEHICLE_METADATA_FILE' 'data/vehicles.meta'
-data_file 'CARCOLS_FILE' 'data/carcols.meta'
 data_file 'VEHICLE_VARIATION_FILE' 'data/carvariations.meta'
-";
-
-const CARCOLS: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<CVehicleModelInfoVarGlobal>
-  <Kits />
-  <Lights />
-  <Sirens />
-</CVehicleModelInfoVarGlobal>
 ";
 
 fn vehicles_meta(o: &Opts, vd: Option<&VData>) -> String {
