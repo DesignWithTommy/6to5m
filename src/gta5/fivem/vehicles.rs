@@ -64,6 +64,9 @@ const TYRE: &str = "r6m_tyre";
 /// Stand-in surfaces for parts whose colour is in no texture (sixng-core
 /// material.rs `stand_in`: tyre rubber, lamp-reflector chrome).
 const CHROME: &str = "r6m_chrome";
+/// Runtime screen overlay texture key (diffusetex and emissivetex of the
+/// front dashboard-screen mesh; in no store).
+const SCREEN_OVERLAY: &str = "a800afccf01aa36b";
 /// Vehicle material palette (128x256 colour bands): never a base colour.
 const VEH_PALETTE_SLOT: u32 = 0x19df_25d7;
 /// lyr0/lyr1diffusetex: linear data maps on the vehicle two-layer shaders.
@@ -510,6 +513,12 @@ pub(super) fn load_source(rpf: &Path, e: &Entry, pools: &mut Pools, texs: &mut V
             }
             let si = md.shader_indices.get(k).map(|&s| s as usize);
             let sh = si.and_then(|s| info.shaders.get(s));
+            // Not drawn (GTA6-Asset-Info c4ca3e9): wiper mask / water stencil
+            // shaders, and the runtime screen overlay (diffusetex a800afccf01aa36b,
+            // in no store, ~1 mm in front of the real dashboard screen).
+            if sh.is_some_and(|sh| sixng_core::material::classify(&sh.name_hash, &[])["class"] == "hidden" || sh.textures.iter().any(|t| t.hash64.eq_ignore_ascii_case(SCREEN_OVERLAY))) {
+                continue;
+            }
             let tex = match si.and_then(|s| tex_cache.get(&s).cloned()) {
                 Some(t) => t,
                 None => {

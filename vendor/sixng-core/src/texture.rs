@@ -391,6 +391,61 @@ pub fn mip_linear(r: &Resource, t: &TexInfo, m: u32) -> Result<(Fmt, Vec<u8>, u3
     Ok((fmt, lin, mw, mh))
 }
 
+/// Expand a little-endian RGB565 endpoint, replicating the high bits into the
+/// low ones as the BC1 specification describes.
+fn rgb565(v: u16) -> (u8, u8, u8) {
+    (
+        ((v >> 8) & 0xF8) as u8 | (v >> 13) as u8,
+        ((v >> 3) & 0xFC) as u8 | ((v >> 9) & 0x03) as u8,
+        (v << 3) as u8 | ((v >> 2) & 0x07) as u8,
+    )
+}
+
+/// BC2 and BC3 always use four colours. texture2ddecoder decodes their colour
+/// half with the BC1 block decoder, which switches to three colours when
+/// `c0 <= c1`; replace only those blocks' index-2 and index-3 RGB. Alpha is
+/// already correct and is preserved.
+fn repair_bc23_colour(data: &[u8], w: usize, h: usize, img: &mut [u32]) {
+    let (bw, bh) = (w.div_ceil(4), h.div_ceil(4));
+    let mix = |a: u8, b: u8, wa: u16, wb: u16| ((a as u16 * wa + b as u16 * wb) / 3) as u8;
+    for by in 0..bh {
+        for bx in 0..bw {
+            let off = (by * bw + bx) * 16;
+            let block = &data[off + 8..off + 16];
+            let c0 = u16::from_le_bytes([block[0], block[1]]);
+            let c1 = u16::from_le_bytes([block[2], block[3]]);
+            if c0 > c1 {
+                continue;
+            }
+            let (r0, g0, b0) = rgb565(c0);
+            let (r1, g1, b1) = rgb565(c1);
+            let indices = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
+            for y in 0..4 {
+                let py = by * 4 + y;
+                if py >= h {
+                    break;
+                }
+                for x in 0..4 {
+                    let px = bx * 4 + x;
+                    if px >= w {
+                        break;
+                    }
+                    let (wa, wb) = match (indices >> (2 * (y * 4 + x))) & 3 {
+                        2 => (2, 1),
+                        3 => (1, 2),
+                        _ => continue,
+                    };
+                    let rgb = (mix(r0, r1, wa, wb) as u32) << 16
+                        | (mix(g0, g1, wa, wb) as u32) << 8
+                        | mix(b0, b1, wa, wb) as u32;
+                    let pixel = &mut img[py * w + px];
+                    *pixel = (*pixel & 0xFF00_0000) | rgb;
+                }
+            }
+        }
+    }
+}
+
 /// Decode linear mip0 to RGBA8.
 pub fn to_rgba(fmt: Fmt, data: &[u8], w: u32, h: u32) -> Result<Vec<u8>> {
     use texture2ddecoder as td;
@@ -406,9 +461,23 @@ pub fn to_rgba(fmt: Fmt, data: &[u8], w: u32, h: u32) -> Result<Vec<u8>> {
         data
     };
     let r = match fmt {
-        Fmt::Bc1 => td::decode_bc1(data, wu, hu, &mut img),
-        Fmt::Bc2 => td::decode_bc2(data, wu, hu, &mut img),
-        Fmt::Bc3 => td::decode_bc3(data, wu, hu, &mut img),
+        // Spec colour modes (upstream SixNG d246790): BC1 3-colour index 3 is
+        // transparent; BC2/BC3 colour halves always use four colours.
+        Fmt::Bc1 => td::decode_bc1a(data, wu, hu, &mut img),
+        Fmt::Bc2 => {
+            let r = td::decode_bc2(data, wu, hu, &mut img);
+            if r.is_ok() {
+                repair_bc23_colour(data, wu, hu, &mut img);
+            }
+            r
+        }
+        Fmt::Bc3 => {
+            let r = td::decode_bc3(data, wu, hu, &mut img);
+            if r.is_ok() {
+                repair_bc23_colour(data, wu, hu, &mut img);
+            }
+            r
+        }
         Fmt::Bc4 => td::decode_bc4(data, wu, hu, &mut img),
         Fmt::Bc5 => td::decode_bc5(data, wu, hu, &mut img),
         Fmt::Bc6u => td::decode_bc6(data, wu, hu, &mut img, false),
