@@ -783,7 +783,9 @@ pub fn build_ped_ymt(comps: &[PedComponent]) -> Result<Vec<u8>, String> {
         let mut dw = W::new();
         for _ in &ds {
             let tex = mb.add_item(CPVTEXTUREDATA.name, vec![0, 255, 0]);
-            dw.u8(if slot == 2 { 17 } else { 1 }).u8(0).zeros(6);
+            // propMask bit 4 marks a race (_r, texId 1 = whi) drawable in
+            // vanilla ymts; ours are all _u with texId 0 (uni), so 1
+            dw.u8(1).u8(0).zeros(6);
             arr(&mut dw, tex, 1);
             dw.u8(0).zeros(23); // clothData.ownsCloth
         }
@@ -806,7 +808,8 @@ pub fn build_ped_ymt(comps: &[PedComponent]) -> Result<Vec<u8>, String> {
         mb.sinfo(s);
     }
     let mut w = W::new();
-    w.u8(0).u8(1).u8(0).u8(0);
+    // bHas*Variations / LowLODs / SuperLOD: 0 in vanilla cs_ ymts
+    w.u8(0).u8(0).u8(0).u8(0);
     for a in avail {
         w.u8(a);
     }
