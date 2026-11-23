@@ -89,7 +89,7 @@ also: 6ixpack fivem vehicle <name> --game <dir> --out <dir>   (one 6m vehicle ->
 pub const TEX_V: &str = "tex1";
 pub const YDR_V: &str = "ydr11";
 /// Fragment props as dynamic .yft (fivem/frags.rs).
-pub const FRAG_V: &str = "frag2";
+pub const FRAG_V: &str = "frag3";
 pub const YBN_V: &str = "ybn2";
 pub const TERRAIN_V: &str = "terrain2";
 /// Meta files (ymap/ytyp) and water.xml are rebuilt every run and compared

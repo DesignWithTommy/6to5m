@@ -43,12 +43,6 @@ const MARGIN: f32 = 0.04;
 const NAN_BITS: u32 = 0x7f800001;
 const QNAN_BITS: u32 = 0x7fc00001;
 
-/// Composite child flags: vehicle body (type) colliding with the world,
-/// peds, objects and other vehicles (include).
-const VEH_TYPE: u32 = 1 << 6; // VEHICLE_NOT_BVH
-const VEH_INCLUDE: u32 = (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 9) | (1 << 10) | (1 << 11) | (1 << 12)
-    | (1 << 13) | (1 << 15) | (1 << 16) | (1 << 17) | (1 << 20) | (1 << 21) | (1 << 22) | (1 << 23) | (1 << 24) | (1 << 27);
-
 const VECTORS: [(&str, [f32; 4]); 6] = [
     ("matMaterialColorScale", [1.0, 0.0, 0.0, 1.0]),
     ("HardAlphaBlend", [1.0, 0.0, 0.0, 0.0]),
@@ -644,17 +638,14 @@ fn add_composite(b: &mut Builder, f: &Frag, g: &[(V3, Q)]) -> Result<(BlockId, V
         bw.v3(*mn).u32(1).v3(*mx).f32(MARGIN);
     }
     let bb_b = b.add(Seg::Sys, bw);
-    let mut fw = W::new();
-    for _ in 0..n {
-        fw.u32(VEH_TYPE).u32(VEH_INCLUDE);
-    }
-    let f1 = b.add(Seg::Sys, fw.clone());
-    let f2 = b.add(Seg::Sys, fw);
     let (mn, mx) = aabb(world.iter().flat_map(|a| [a.0, a.1]));
     let (i, v) = box_inertia(mn, mx);
     let mut w = W::new();
     bounds_hdr(&mut w, VFT_COMPOSITE, 10, mn, mx, i, v);
-    w.ptr(Some(children_b)).ptr(Some(tr_b)).ptr(Some(tr_b)).ptr(Some(bb_b)).ptr(Some(f1)).ptr(Some(f2));
+    // No child type/include flag arrays: GTA V fragment composites carry none
+    // (CodeWalker BoundComposite.UpdateChildrenFlags, "don't use flags in
+    // fragments"); a fragment with them crashed FiveM ("Invalid fixup").
+    w.ptr(Some(children_b)).ptr(Some(tr_b)).ptr(Some(tr_b)).ptr(Some(bb_b)).u64(0).u64(0);
     // more than 5 children need a BVH over the child boxes (CodeWalker)
     let bvh = (n > 5).then(|| crate::gta5::ybn::composite_bvh(b, &world));
     w.u16(n as u16).u16(n as u16).u32(0).ptr(bvh);

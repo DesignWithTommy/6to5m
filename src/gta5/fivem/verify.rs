@@ -78,12 +78,59 @@ pub fn verify(file: &str, bytes: &[u8]) -> Result<String, String> {
     let body = match ext.as_str() {
         "ytd" => dict(&r, 0x5000_0000).map(|(n, mb)| format!("textures={n} tex_mb={:.1}", mb as f64 / 1048576.0)),
         "ydr" => drawable(&r),
-        "yft" => Ok("fragment".to_string()),
+        "yft" => frag(&r),
         "ybn" => bounds(&r),
         _ => meta(&r, &ext),
     }
     .map_err(e)?;
     Ok(format!("{ext} ok: {body} sys={ss} gfx={gs}"))
+}
+
+/// Each listed pointer field of `blk` must be null or land inside its
+/// segment: the game resolves a pointer only inside a page ("Invalid fixup,
+/// address is neither virtual nor physical").
+fn ptrs(r: &Res, blk: &[u8], offs: &[usize], what: &str) -> Result<(), String> {
+    for &o in offs {
+        r.at(u64_at(blk, o)?, 1).map_err(|x| format!("{what}+{o:#x}: {x}"))?;
+    }
+    Ok(())
+}
+
+/// FragType (yft 162): pointer ranges, the drawable and physics LOD walk,
+/// and composite bounds without child type/include flags. GTA V fragments
+/// carry none (CodeWalker BoundComposite.UpdateChildrenFlags: "don't use
+/// flags in fragments"); the game builds them per instance.
+fn frag(r: &Res) -> Result<String, String> {
+    let root = r.need(0x5000_0000, 0x130, "frag")?;
+    ptrs(r, root, &[0x08, 0x30, 0x38, 0x40, 0x58, 0x60, 0xA8, 0xF0, 0xF8], "frag")?;
+    let comp_ok = |p: u64, what: &str| -> Result<(), String> {
+        let Some(c) = r.at(p, 0xB0)? else { return Ok(()) };
+        if c[0x10] == 10 {
+            ptrs(r, c, &[0x70, 0x78, 0x80, 0x88, 0xA8], what)?;
+        }
+        if c[0x10] == 10 && (u64_at(c, 0x90)? != 0 || u64_at(c, 0x98)? != 0) {
+            return Err(format!("{what}: fragment composite has child flag arrays (must be null)"));
+        }
+        Ok(())
+    };
+    let d = r.need(u64_at(root, 0x30)?, 0x150, "frag drawable")?;
+    ptrs(r, d, &[0x10, 0x18, 0x50, 0x58, 0x60, 0x68, 0xA0, 0xF0, 0x130], "frag drawable")?;
+    comp_ok(u64_at(d, 0xF0)?, "drawable bound")?;
+    let lg = r.need(u64_at(root, 0xF0)?, 0x30, "physics LOD group")?;
+    let lod = r.need(u64_at(lg, 0x10)?, 0x130, "physics LOD")?;
+    ptrs(r, lod, &[0x20, 0x28, 0xC0, 0xC8, 0xD0, 0xD8, 0xE0, 0xE8, 0xF0, 0xF8, 0x100, 0x108, 0x110], "physics LOD")?;
+    comp_ok(u64_at(lod, 0xE8)?, "LOD bound")?;
+    let n = lod[0x11D] as usize;
+    let kids = r.need(u64_at(lod, 0xD0)?, n * 8, "children")?;
+    for i in 0..n {
+        let c = r.need(u64_at(kids, i * 8)?, 0x100, "child")?;
+        ptrs(r, c, &[0xA0, 0xA8, 0xB0], "child")?;
+        if let Some(cd) = r.at(u64_at(c, 0xA0)?, 0x150)? {
+            ptrs(r, cd, &[0x10, 0x18, 0x50, 0xA0, 0xF0, 0x130], "child drawable")?;
+            comp_ok(u64_at(cd, 0xF0)?, "child bound")?;
+        }
+    }
+    Ok(format!("children={n}"))
 }
 
 /// TextureDictionary at `p`: (texture count, pixel bytes).
