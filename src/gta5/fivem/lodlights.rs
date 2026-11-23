@@ -128,6 +128,7 @@ pub fn emit(ctx: &Ctx, dir: &Path, index: &ArchiveIndex) -> Result<(), String> {
     let by_off: HashMap<u64, &Entry> = index.entries.iter().map(|e| (e.off, e)).collect();
     let mut by_arch: HashMap<u32, Vec<(V3, Light)>> = HashMap::new();
     let mut by_ent: HashMap<(&str, usize), Vec<(V3, Light)>> = HashMap::new();
+    let by_off_files = files.len();
     for f in files {
         let Some(e) = u64::from_str_radix(f, 16).ok().and_then(|o| by_off.get(&o)) else { continue };
         let Ok(r) = Resource::load_sys(&levels, e) else { continue };
@@ -155,7 +156,7 @@ pub fn emit(ctx: &Ctx, dir: &Path, index: &ArchiveIndex) -> Result<(), String> {
             cells.entry(((wp[0] / 512.0).floor() as i64, (wp[1] / 512.0).floor() as i64)).or_default().push(ll);
         }
     }
-    let mut total = 0;
+    let (mut total, ncells, nfiles) = (0, cells.len(), by_off_files);
     for ((x, y), mut ls) in cells {
         ls.sort_by_key(|l| l.hash);
         total += ls.len();
@@ -200,7 +201,7 @@ pub fn emit(ctx: &Ctx, dir: &Path, index: &ArchiveIndex) -> Result<(), String> {
         emit_meta(ctx, &format!("{lod}.ymap"), mapdata(mb, &lod, &dist, 0, 128, grow(950.0), grow(20.0), Some(soa.b), None)?)?;
     }
     if total > 0 {
-        eprintln!("lodlights: {total} exterior lights");
+        eprintln!("[t6m:interiors] lodlights: {total} exterior lights in {ncells} cells, {} entities, {nfiles} meta files read", ents.len());
     }
     Ok(())
 }

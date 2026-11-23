@@ -601,7 +601,9 @@ fn placements_dir(ctx: &Ctx, index: &ArchiveIndex) -> Result<PathBuf, Box<dyn Er
     let ie = ix.join("interior_entities.jsonl");
     if stale(&ie, &[]) || !ix.join(sixng_core::interiorents::LIGHT_INDEX).exists() {
         let _p = super::Phase::new(ctx, "  prep interior-ents");
-        sixng_core::interiorents::build(&ws, &a, &metas, sixng_core::export::no_progress())?;
+        let t0 = std::time::Instant::now();
+        let st = sixng_core::interiorents::build(&ws, &a, &metas, sixng_core::export::no_progress())?;
+        eprintln!("[t6m:interiors] prep interior-ents: {} metas read in {:.0}s, {} interior members ({} in rooms, {} in sets), {} lit archetypes indexed", metas.len(), t0.elapsed().as_secs_f32(), st["interior_members"], st["in_room"], st["in_entity_set"], st["lit_archetypes"]);
     }
     let lp = ix.join("lod_parents.jsonl");
     if stale(&lp, &[mtime(&ie)]) || stale(&ix.join("archetype_lod.jsonl"), &[]) {

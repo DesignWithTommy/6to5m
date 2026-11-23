@@ -199,7 +199,7 @@ pub fn load(ctx: &Ctx, dir: &Path, index: &ArchiveIndex) -> Vec<Interior> {
     if !out.is_empty() {
         let n: usize = out.iter().map(|i| i.instances.len()).sum();
         let np = out.iter().filter(|i| i.portals.is_some()).count();
-        eprintln!("interiors: {} MLO archetypes ({np} with portals), {n} instances, {} entities", out.len(), out.iter().map(|i| i.children.len()).sum::<usize>());
+        eprintln!("[t6m:interiors] {} MLO archetypes ({np} with portals), {n} instances, {} entities", out.len(), out.iter().map(|i| i.children.len()).sum::<usize>());
     }
     out
 }
@@ -553,10 +553,10 @@ pub fn emit(ctx: &Ctx, ints: &[Interior], an: &HashMap<String, String>, archetyp
         ptrs.push(mb.add_item(MLOARCH.name, w.b));
     }
     if cols > 0 {
-        eprintln!("interiors: {cols} collision ybns with room ids");
+        eprintln!("[t6m:interiors] {cols} collision ybns with room ids");
     }
     if n_lights > 0 {
-        eprintln!("interiors: {n_lights} lights");
+        eprintln!("[t6m:interiors] {n_lights} MLO lights");
     }
     if dropped > 0 {
         ctx.skip(&format!("({dropped} interior entities)"), "interior entity archetype not converted", json!({"count": dropped}));
