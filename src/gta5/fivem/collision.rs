@@ -117,12 +117,15 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         let c = [(b[0][0] + b[1][0]) / 2.0, (b[0][1] + b[1][1]) / 2.0];
         cells.entry(((c[0] / CELL).floor() as i64, (c[1] / CELL).floor() as i64)).or_default().push(e);
     }
+    // live-test log: [t6m:collision] lines + <out>/t6m_report/collision.json
+    let log = std::sync::Mutex::new(ColLog::default());
     let res: Vec<Result<(), String>> = cells
         .par_iter()
         .map(|((cx, cy), es)| {
             let file = format!("t6m_cc_{:03}_{:03}.ybn", cx + 200, cy + 200);
             let fp = sha(&format!("{YBN_V}|col|{mats_fp}|{}|{}{}", ctx.o.weapon_collision, es.iter().map(|e| e.id.as_str()).collect::<Vec<_>>().join(","), ctx.o.offset_fp()));
             if let Some(info) = ctx.up_to_date(&file, &fp) {
+                log.lock().unwrap().cells_cached += 1;
                 ctx.emit(&file, &fp, info, None)?;
                 return Ok(());
             }
@@ -130,6 +133,23 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
             let mut prims: Vec<sixng_core::bounds::NativePrim> = Vec::new();
             for e in es {
                 let Some(c) = decode(&rpf, e, ctx.o.weapon_collision) else { continue };
+                {
+                    let mut l = log.lock().unwrap();
+                    for (id, (_, idx)) in &c.by_mat {
+                        l.surface(*id, mats.get(id).copied(), idx.len() / 3, &e.id);
+                    }
+                    for p in &c.native {
+                        use sixng_core::bounds::NativePrim as P;
+                        let (k, mat) = match p {
+                            P::Box { mat, .. } => (0, *mat),
+                            P::Sphere { mat, .. } => (1, *mat),
+                            P::Capsule { mat, .. } => (2, *mat),
+                            P::Cylinder { mat, .. } => (3, *mat),
+                        };
+                        l.prims[k] += 1;
+                        l.surface(mat, mats.get(&mat).copied(), 1, &e.id);
+                    }
+                }
                 for (id, (v, idx)) in &c.by_mat {
                     let base = verts.len() as u32;
                     verts.extend_from_slice(v);
@@ -164,6 +184,17 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
             let verts: Vec<[f32; 3]> = verts.iter().map(|v| ctx.o.shift(*v)).collect();
             let bytes = ybn::build_ybn_polys(&verts, &polys, &words).map_err(|e| format!("{file}: {e}"))?;
             let info = json!({"bounds": es.len(), "triangles": n_tris, "primitives": prims.len(), "raw_triangles": raw});
+            {
+                let mut l = log.lock().unwrap();
+                l.cells_built += 1;
+                l.bounds += es.len();
+                l.tris_raw += raw;
+                l.tris += n_tris;
+                l.bytes += bytes.len();
+                if bytes.len() > l.largest.1 {
+                    l.largest = (file.clone(), bytes.len());
+                }
+            }
             let s = ctx.emit(&file, &fp, info, Some(bytes))?;
             ctx.report.lock().unwrap().converted.push(json!({"kind": "collision", "ybn": s, "bounds": es.len(), "triangles": n_tris, "primitives": prims.len()}));
             Ok(())
@@ -172,7 +203,57 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     for r in res {
         r?;
     }
+    log.into_inner().unwrap().write(ctx, mats.is_empty());
     Ok(())
+}
+
+/// Counters for the live-test log (cells rebuilt this run only; cached
+/// cells are counted but not decoded).
+#[derive(Default)]
+struct ColLog {
+    cells_built: usize,
+    cells_cached: usize,
+    bounds: usize,
+    tris_raw: usize,
+    tris: usize,
+    bytes: usize,
+    largest: (String, usize),
+    /// box, sphere, capsule, cylinder
+    prims: [usize; 4],
+    /// surface id -> (GTA V material if mapped, polygons, example bounds id)
+    surfaces: BTreeMap<u16, (Option<u8>, usize, String)>,
+}
+
+impl ColLog {
+    fn surface(&mut self, id: u16, mat: Option<u8>, n: usize, example: &str) {
+        let e = self.surfaces.entry(id).or_insert_with(|| (mat, 0, example.to_string()));
+        e.1 += n;
+    }
+
+    fn write(self, ctx: &Ctx, no_map: bool) {
+        let (hit, miss): (Vec<_>, Vec<_>) = self.surfaces.iter().partition(|(_, v)| v.0.is_some());
+        let polys = |v: &[(&u16, &(Option<u8>, usize, String))]| v.iter().map(|x| x.1 .1).sum::<usize>();
+        let mut miss_top = miss.clone();
+        miss_top.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+        let t = "[t6m:collision]";
+        println!("{t} cells built {} cached {}, bounds {}, triangles {} (raw {}), {:.1} MB, largest {} {:.2} MB", self.cells_built, self.cells_cached, self.bounds, self.tris, self.tris_raw, self.bytes as f64 / 1e6, self.largest.0, self.largest.1 as f64 / 1e6);
+        println!("{t} primitives: box {} sphere {} capsule {} cylinder {}", self.prims[0], self.prims[1], self.prims[2], self.prims[3]);
+        println!("{t} surfaces: {} ids, mapped {} ({} polys), unmapped {} ({} polys){}", self.surfaces.len(), hit.len(), polys(&hit), miss.len(), polys(&miss), if no_map { " - no material map, all DEFAULT" } else { "" });
+        for (id, (_, n, ex)) in miss_top.iter().take(8) {
+            println!("{t}   unmapped {id:04x}: {n} polys, e.g. {ex}");
+        }
+        let doc = json!({
+            "cells_built": self.cells_built, "cells_cached": self.cells_cached, "bounds": self.bounds,
+            "triangles": self.tris, "triangles_raw": self.tris_raw, "bytes": self.bytes,
+            "largest": {"file": self.largest.0, "bytes": self.largest.1},
+            "primitives": {"box": self.prims[0], "sphere": self.prims[1], "capsule": self.prims[2], "cylinder": self.prims[3]},
+            "material_map_loaded": !no_map,
+            "surfaces_mapped": hit.iter().map(|(id, v)| json!({"id": format!("{id:04x}"), "material": v.0, "polys": v.1, "example": v.2})).collect::<Vec<_>>(),
+            "surfaces_unmapped": miss_top.iter().map(|(id, v)| json!({"id": format!("{id:04x}"), "polys": v.1, "example": v.2})).collect::<Vec<_>>(),
+        });
+        let dir = ctx.o.out.join("t6m_report");
+        let _ = fs::create_dir_all(&dir).and_then(|_| fs::write(dir.join("collision.json"), serde_json::to_vec_pretty(&doc).unwrap_or_default()));
+    }
 }
 
 /// Weld vertices on a 5 cm grid and drop degenerate and duplicate triangles
