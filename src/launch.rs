@@ -34,6 +34,7 @@ const USAGE: &str = "usage: 6ixpack launch --game <dir> [--tuxbox <TuxBox checko
                crash event, registers, stack and loaded modules go to the log
   --sandbox    run inside Sandboxie-Plus (box DefaultBox, or env SANDBOXIE_BOX); the
                game's writes stay in the box; with --debug the cdb log is fetched back
+  --cdb FILE   extra cdb commands (breakpoints etc.) run before the game starts; implies --debug
 Needs Visual Studio Build Tools (x64 C++), cargo and the x86_64-pc-windows-msvc target.";
 
 /// (cargo package, output DLL, export table relative to the TuxBox root, extra import libs, extra C++ sources)
@@ -67,7 +68,7 @@ enum Mode {
 
 pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
     let (mut game, mut tuxbox, mut exe, mut log, mut mode, mut game_args) = (None, env_path("TUXBOX_ROOT"), None, None, Mode::Run, Vec::new());
-    let (mut debug, mut sandbox) = (false, false);
+    let (mut debug, mut sandbox, mut cdb_extra) = (false, false, None);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut val = |n: &str| it.next().cloned().ok_or_else(|| format!("{n} needs a value\n{USAGE}"));
@@ -81,6 +82,10 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
             Some("--restore") => mode = Mode::Restore,
             Some("--debug") => debug = true,
             Some("--sandbox") => sandbox = true,
+            Some("--cdb") => {
+                cdb_extra = Some(fs::read_to_string(val("--cdb")?)?);
+                debug = true;
+            }
             Some("--") => {
                 game_args.extend(it.by_ref().cloned());
             }
@@ -116,7 +121,7 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
         println!("[launch] staged {} providers beside {}; not started (--stage-only)", dlls.len(), target.display());
         return Ok(());
     }
-    start(&game, &target, &game_args, log, debug, sandbox)
+    start(&game, &target, &game_args, log, debug.then(|| cdb_extra.unwrap_or_default()), sandbox)
 }
 
 fn env_path(k: &str) -> Option<PathBuf> {
@@ -221,6 +226,18 @@ fn build_providers(tuxbox: &Path, out: &Path) -> Result<Vec<PathBuf>, Box<dyn Er
     let lib_dir = cargo_dir.join(TARGET).join("release");
     let mut dlls = Vec::new();
     for (i, (pkg, dll, def, libs, cpp)) in PROVIDERS.iter().enumerate() {
+        // Skip the link when the DLL is newer than its archive, .def and C++ sources.
+        let mtime = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
+        let inputs: Vec<PathBuf> = std::iter::once(lib_dir.join(format!("{}.lib", pkg.replace('-', "_"))))
+            .chain(std::iter::once(tuxbox.join(def)))
+            .chain(cpp.iter().map(|c| tuxbox.join(c)))
+            .collect();
+        if let Some(t) = mtime(&out.join(dll)) {
+            if inputs.iter().all(|p| mtime(p).is_some_and(|m| m <= t)) {
+                dlls.push(out.join(dll));
+                continue;
+            }
+        }
         eprintln!("[launch] link {}/{}: {dll}", i + 1, PROVIDERS.len());
         let mut objs = Vec::new();
         for src in *cpp {
@@ -299,7 +316,7 @@ fn restore(game: &Path) -> Result<(), Box<dyn Error>> {
 
 /// Start the exe from its folder (optionally under cdb and/or in Sandboxie);
 /// stdout+stderr go to the console and the log.
-fn start(game: &Path, exe: &Path, args: &[OsString], log: Option<PathBuf>, debug: bool, sandbox: bool) -> Result<(), Box<dyn Error>> {
+fn start(game: &Path, exe: &Path, args: &[OsString], log: Option<PathBuf>, debug: Option<String>, sandbox: bool) -> Result<(), Box<dyn Error>> {
     let log = log.unwrap_or_else(|| {
         let base = env_path("LOCALAPPDATA").unwrap_or_else(std::env::temp_dir).join("6ixpack/logs");
         let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
@@ -312,7 +329,7 @@ fn start(game: &Path, exe: &Path, args: &[OsString], log: Option<PathBuf>, debug
     let cdb_log = log.with_extension("cdb.txt");
     let mut argv: Vec<OsString> = vec![exe.as_os_str().into()];
     argv.extend(args.iter().cloned());
-    if debug {
+    if let Some(extra) = &debug {
         let cdb = find_cdb().ok_or("--debug needs cdb.exe (Windows SDK 'Debugging Tools for Windows')")?;
         let _ = fs::remove_file(&cdb_log);
         // -g/-G: skip the initial and final breaks; first-chance exceptions are logged
@@ -321,10 +338,11 @@ fn start(game: &Path, exe: &Path, args: &[OsString], log: Option<PathBuf>, debug
         let script = log.with_extension("cdb.cmd");
         // Trace every C++ (e06d7363), msxml/app (e0000001) and WinRT-originate (40080201)
         // exception with its record and stack, then dump the fatal event.
-        fs::write(&script, "sxe -c \".exr -1;kn 25;gn\" e06d7363
+        fs::write(&script, format!("sxe -c \".exr -1;kn 25;gn\" e06d7363
 sxe -c \".exr -1;kn 25;gn\" e0000001
 sxe -c \".exr -1;kn 25;gn\" 40080201
 sxe -c \".exr -1;kn 25;gn\" av
+{extra}
 g
 .lastevent
 r
@@ -333,7 +351,7 @@ kn 60
 kn 60
 lm o
 q
-")?;
+"))?;
         let mut d: Vec<OsString> = vec![cdb.into(), "-G".into(), "-logo".into(), cdb_log.clone().into(), "-cf".into(), script.into()];
         d.extend(argv);
         argv = d;
@@ -349,7 +367,7 @@ q
         argv = w;
     }
     println!("[launch] log: {}", log.display());
-    if debug {
+    if debug.is_some() {
         println!("[launch] debugger log: {}", cdb_log.display());
     }
     println!("[launch] starting {}", argv.iter().map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" "));
@@ -375,7 +393,7 @@ q
     let status = child.wait()?;
     let _ = (a.join(), b.join());
     println!("[launch] exited with {status}{} after {:.1}s", status.code().map(|c| format!(" (0x{:08x}{})", c as u32, ntstatus(c as u32))).unwrap_or_default(), t.elapsed().as_secs_f64());
-    if debug {
+    if debug.is_some() {
         // Sandboxie redirects the debugger's log write into the box; fetch it back.
         if !cdb_log.is_file() && sandbox {
             if let Some(boxed) = sandboxed_copy(&cdb_log) {
