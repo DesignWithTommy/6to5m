@@ -743,22 +743,27 @@ impl<'a> ModelReader<'a> {
                 {
                     continue;
                 }
-                // Texture record (0x20 bytes, chained): +0x00 self - 11 marker,
-                // +0x08 64-bit hash (the ttdb asset key and TTPF key), +0x10 u32
-                // type 6, +0x18 u32 hash. The fields before +0x00 belong to the
-                // previous record of the chain (reading them gave every texture
-                // its neighbour's hash: shared names and cache files).
-                let asset = self.s(texture + 48, 32)?;
-                if r32(sys, asset + 16)? != 6
-                    || r32(sys, asset + 20)? != 0
-                    || r32(sys, asset + 28)? != 0
+                // Keyed texture descriptor (as the dictionary parser reads
+                // it, texture/rage.rs): +0x00 self - 11 marker, +0x08 64-bit
+                // key (ttdb asset key and TTPF key); the 16 bytes BEFORE it
+                // are {u32 type 6, 0, u32 name hash, 0}. The words at +0x10
+                // / +0x18 are the next descriptor's type and name: reading
+                // them named every texture after its neighbour (one key
+                // carried 3 different names in prop_am_walllight_32a; at
+                // -0x08 every key has one name), so embedded-texture and
+                // palette lookups by name hit the wrong texture.
+                let asset = self.s(texture + 48, 16)?;
+                if asset < 16
+                    || r32(sys, asset - 16)? != 6
+                    || r32(sys, asset - 12)? != 0
+                    || r32(sys, asset - 4)? != 0
                     || r64(sys, asset)? != SYS + asset as u64 - 11
                     || r64(sys, asset + 8)? == 0
                 {
                     continue;
                 }
                 let key = r64(sys, asset + 8)?;
-                refs.push(TexRef { param: r32(sys, at)?, hash: r32(sys, asset + 24)?, key, h64: key });
+                refs.push(TexRef { param: r32(sys, at)?, hash: r32(sys, asset - 8)?, key, h64: key });
             }
             result.push(Material { shader_hash: hash, bucket: sys.get(shader + 0x3C).copied().unwrap_or(0), textures: refs });
         }

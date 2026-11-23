@@ -1350,16 +1350,14 @@ fn sixng_mesh(ctx: &Ctx, pools: &Pools, an: &str, e: &Entry) -> Result<Built, St
     };
     let main: Vec<_> = info.models.iter().filter(|m| !m.part && m.lod == 0).collect();
     let models = if main.iter().any(|m| !m.geometries.is_empty()) { main } else { info.models.iter().filter(|m| m.part).collect() };
-    let key_of = |sh: &drawable::Shader, param: usize| -> u64 {
-        (|| {
-            let ta = r.sys_off(r.u64(sh.record_off as usize + 0x10))?;
-            let t = r.sys_off(r.u64(ta + 8 * param))?;
-            let tr = r.sys_off(r.u64(t + 0x30))?;
-            // Texture record +0x08 is its own 64-bit key; +0x28 is the next
-            // record's (the neighbour texture was looked up in the pools).
-            Some(r.u64(tr + 8))
-        })()
-        .unwrap_or(0)
+    // (32-bit name hash, 64-bit key) of a shader texture: the key is at
+    // descriptor +0x08, the name at -0x08 (+0x18 is the next texture's;
+    // model/decode.rs read_materials).
+    let own = |sh: &drawable::Shader, param: usize| -> Option<(u32, u64)> {
+        let ta = r.sys_off(r.u64(sh.record_off as usize + 0x10))?;
+        let t = r.sys_off(r.u64(ta + 8 * param))?;
+        let d = r.sys_off(r.u64(t + 0x30))?.checked_sub(16)?;
+        (r.u32(d) == 6).then(|| (r.u32(d + 8), r.u64(d + 24)))
     };
     let drawable = r.sys_off(r.u64(0x18)).unwrap_or(0);
     let emb = [drawable, 0].into_iter().find_map(|d| crate::texture::embedded_dictionary(&r.sys, &r.gfx, d));
@@ -1381,9 +1379,9 @@ fn sixng_mesh(ctx: &Ctx, pools: &Pools, an: &str, e: &Entry) -> Result<Built, St
                     let cands: Vec<_> = COLOR_SLOTS.iter().filter_map(|slot| sh.textures.iter().find(|t| ph(t) == Some(*slot))).collect();
                     let mut errs = Vec::new();
                     for t in cands {
-                        let hash = u32::from_str_radix(&t.hash32, 16).unwrap_or(0);
-                        let key = emb.as_ref().and_then(|e| e.by_hash(hash)).and_then(|x| x.asset_key).unwrap_or_else(|| key_of(sh, t.param));
-                        match pools.get(hash, key, u64::from_str_radix(&t.hash64, 16).unwrap_or(0)) {
+                        let Some((hash, own_key)) = own(sh, t.param) else { continue };
+                        let key = emb.as_ref().and_then(|e| e.by_hash(hash)).and_then(|x| x.asset_key).unwrap_or(own_key);
+                        match pools.get(hash, key, own_key) {
                             Ok(p) => {
                                 super::quality::hit("colour_pick", 1, || format!("{an} shader {:?} slot {} -> {hash:08x}", sh.name_hash, t.param_hash));
                                 return tex_name(&p);
