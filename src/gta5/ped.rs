@@ -543,7 +543,9 @@ fn drawable_base(b: &mut Builder, w: &mut W, vft: u32, d: &SkinDrawable, skel: O
     w.v3(lo).u32(0x7f800001).v3(hi).u32(0x7f800001);
     w.ptr(Some(models)).u64(0).u64(0).u64(0);
     w.f32(lod).f32(lod).f32(lod).f32(9998.0);
-    w.u32(0x01).u32(0).u32(0).u32(0); // FlagsHigh 1
+    // FlagsHigh 1, RenderMaskHigh 0xFF: as vanilla ped drawables (yft and
+    // ydd, cs_amandatownley); mask 0 left the ped in no render phase
+    w.u32(0xFF01).u32(0).u32(0).u32(0);
     w.u64(0).u16(0).u16(mlen.div_ceil(16) as u16).u32(0);
     w.ptr(Some(models));
     debug_assert_eq!(w.len(), 0xA8);
