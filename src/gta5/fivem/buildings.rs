@@ -1482,7 +1482,12 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
             }
         }
     }
-    let mut shared: Vec<String> = users.iter().filter(|(_, f)| f.len() > 1).map(|(t, _)| (*t).clone()).collect();
+    // No shared parent chain: a texture used by several families is copied
+    // into each family txd. A linear t6m_shr chain (each txd's parent is the
+    // previous one, gtxd.meta) made every building load the whole chain
+    // (~390 MB at the airport, 18 ytds over 16 MB): blurry walls, checkered
+    // glass. Each model now loads only its own txd (<= TXD_CAP).
+    let mut shared: Vec<String> = if std::env::var_os("T6M_SHARED_TXD").is_some() { users.iter().filter(|(_, f)| f.len() > 1).map(|(t, _)| (*t).clone()).collect() } else { Vec::new() };
     shared.sort();
     let is_shared: HashSet<&String> = shared.iter().collect();
     // (file stem, textures, parent)
