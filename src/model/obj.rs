@@ -234,6 +234,8 @@ pub fn parse(text: &str, name: &str) -> Result<Model, String> {
         materials: None,
         embedded: None,
         palettes: Vec::new(),
+        lower: Default::default(),
+        lod_dist: [9998.0; 4],
     })
 }
 

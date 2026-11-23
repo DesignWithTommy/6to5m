@@ -1112,7 +1112,9 @@ fn four_layer_geoms(pools: &Pools, mat: &crate::model::Material, key_of: &dyn Fn
 }
 
 /// rpf9 decoder path; None when the model does not decode (or is skinned).
-fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: usize, entry: Option<&Entry>) -> Result<Option<Built>, String> {
+/// Also returns the model's lower LOD levels (Med/Low/VLow, empty when
+/// absent) and its LodGroup distances.
+fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: usize, entry: Option<&Entry>) -> Result<Option<(Built, Vec<Mesh>, [f32; 4])>, String> {
     let ext_palettes = std::cell::OnceCell::new();
     let an = an.to_string();
     let models = crate::model::load_models(&ctx.levels, off);
@@ -1130,10 +1132,12 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: us
         let pad = 0.05 * (0..3).map(|k| dh[k] - dl[k]).fold(1.0f32, f32::max);
         (0..3).any(|k| m.min[k] < dl[k] - pad || m.max[k] > dh[k] + pad)
     };
-    let mut mesh = Mesh { name: an.clone(), geoms: Vec::new() };
+    let mut levels: Vec<Mesh> = (0..4).map(|_| Mesh { name: an.clone(), geoms: Vec::new() }).collect();
     let (mut texs, mut missing) = (Vec::new(), Vec::new());
     let key_of = |t: &crate::model::TexRef| m.embedded.as_ref().and_then(|e| e.by_hash(t.hash)).and_then(|x| x.asset_key).unwrap_or(t.key);
-    for sm in &m.meshes {
+    let srcs = [&m.meshes, &m.lower[0], &m.lower[1], &m.lower[2]];
+    for (mesh, sms) in levels.iter_mut().zip(srcs) {
+    for sm in sms.iter() {
         if let Some(mat) = sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).filter(|mt| FOUR_LAYER.contains(&mt.shader_hash)) {
             if let Some((geoms, lt)) = four_layer_geoms(pools, mat, &key_of, sm) {
                 mesh.geoms.extend(geoms);
@@ -1231,7 +1235,9 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: us
             mesh.geoms[g0..].iter_mut().for_each(|g| g.normal = n.clone());
         }
     }
-    Ok(Some((mesh, texs, missing, frag_out)))
+    }
+    let mesh = levels.remove(0);
+    Ok(Some(((mesh, texs, missing, frag_out), levels, m.lod_dist)))
 }
 
 /// Fragment path through sixng-core's decoder: LOD0 models of the main
@@ -1339,8 +1345,13 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
         None => split_tint(name),
     };
     let rpf = rpf9_mesh(ctx, pools, base, row, &an, off, entry)?;
+    let mut lower: Vec<Mesh> = Vec::new();
+    let mut lod_dist = [9998.0f32; 4];
     let (mesh, texs, missing, frag_out) = match (rpf, entry) {
-        (Some(x), _) => x,
+        (Some((x, lw, ld)), _) => {
+            (lower, lod_dist) = (lw, ld);
+            x
+        }
         (None, Some(e)) => match sixng_mesh(ctx, pools, &an, e) {
             Ok(x) => x,
             Err(err) => {
@@ -1355,6 +1366,10 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
     };
     let (mut mesh, mut texs) = (mesh, texs);
     promote_base_layer(&mut mesh);
+    lower.iter_mut().for_each(promote_base_layer);
+    if batch.is_some() {
+        lower.clear();
+    }
     if let Some(d) = &batch {
         (mesh, texs) = super::batches::bake(d, &mesh, &|t, c| tinted(pools, t, c).unwrap_or_else(|_| t.to_string()));
         texs.retain(|t| t != MISSING);
@@ -1373,6 +1388,12 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
     let (lo, hi) = aabb(mesh.geoms.iter().flat_map(|g| g.positions.iter()));
     let bytes = match entry.filter(|_| frag) {
         Some(e) => super::frags::build_prop_yft(&mesh, &super::frags::colliders(&ctx.o.game.join("levels.rpf"), e), 9998.0),
+        // the source model's own LOD levels and distances (LodGroup +0x50..+0x7C)
+        None if lower.iter().any(|l| !l.geoms.is_empty()) => {
+            let mut lv = vec![mesh.clone()];
+            lv.extend(lower.iter().cloned());
+            ydr::build_ydr_lods(&lv, lod_dist, None)
+        }
         None => ydr::build_ydr(&mesh, 9998.0, None),
     }
     .map_err(|e| format!("{file}: {e}"))?;
@@ -1509,6 +1530,14 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
             members.push(a.an.clone());
         }
         if size < TXD_PACK && fi + 1 < n_fam {
+            continue;
+        }
+        if cur.is_empty() {
+            // every texture is in the shared chain: point the archetypes at
+            // its top instead of writing an empty (295-byte) ytd
+            for m in members.drain(..) {
+                txd_of.insert(m, top_shared.clone().unwrap_or_default());
+            }
             continue;
         }
         let name = format!("t6m_txd{fam_n:04}");

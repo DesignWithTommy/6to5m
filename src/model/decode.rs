@@ -62,6 +62,13 @@ pub struct Model {
     pub embedded: Option<crate::texture::Embedded>,
     /// One-row embedded textures (tint palettes) by name hash, RGBA8.
     pub palettes: Vec<(u32, Vec<[u8; 4]>)>,
+    /// Lower LOD levels Med, Low, VLow of the drawable's LodGroup (model
+    /// lists +0x58/+0x60/+0x68, GTA V layout, checked on 400 levels.rpf
+    /// drawables); empty when absent, repeating High, or not decodable.
+    /// `meshes` stays the High level.
+    pub lower: [Vec<Mesh>; 3],
+    /// LodGroup distances High..VLow (+0x70..+0x7C).
+    pub lod_dist: [f32; 4],
 }
 
 pub struct Extent {
@@ -589,6 +596,17 @@ impl<'a> ModelReader<'a> {
             }
         }
         req(!meshes.is_empty())?;
+        let mut lower: [Vec<Mesh>; 3] = Default::default();
+        let mut seen_lists = vec![r64(self.sys, drawable + 80)?];
+        for k in 1..4 {
+            let p = r64(self.sys, drawable + 80 + 8 * k).unwrap_or(0);
+            if p == 0 || seen_lists.contains(&p) {
+                continue;
+            }
+            seen_lists.push(p);
+            lower[k - 1] = self.lod_meshes(drawable + 80 + 8 * k, materials.as_ref().map(|m| m.len())).unwrap_or_default();
+        }
+        let lod_dist: [f32; 4] = std::array::from_fn(|k| r32(self.sys, drawable + 0x70 + 4 * k).map(f32::from_bits).unwrap_or(9998.0));
         let (mut lo, mut hi) = (min, max);
         // rpf9-explorer 1.2: zero-size declared bounds fall back to the decoded geometry.
         if dictionary || self.bones || min == max {
@@ -630,7 +648,42 @@ impl<'a> ModelReader<'a> {
                 e.textures.iter().filter_map(|t| Some((t.name_hash, crate::texture::palette_rgba(t, self.gfx)?))).collect()
             }),
             embedded,
+            lower,
+            lod_dist,
         })
+    }
+
+    /// Meshes of one LodGroup model list (the pointer at `field`), read like
+    /// the High list.
+    fn lod_meshes(&mut self, field: usize, materials: Option<usize>) -> R<Vec<Mesh>> {
+        let lod = self.s(field, 16)?;
+        let model_count = r16(self.sys, lod + 8)? as usize;
+        req(model_count > 0 && model_count <= 256 && model_count == r16(self.sys, lod + 10)? as usize)?;
+        let list = self.s(lod, model_count * 8)?;
+        let mut meshes = Vec::new();
+        for mi in 0..model_count {
+            let model = self.s(list + mi * 8, 56)?;
+            let count = r16(self.sys, model + 16)? as usize;
+            req(count > 0 && count <= MAX_MESHES && count == r16(self.sys, model + 18)? as usize)?;
+            let bone_count = r16(self.sys, model + 20)? as usize;
+            req(bone_count <= 4096)?;
+            let geometries = self.s(model + 8, count * 8)?;
+            let mapping = materials.and_then(|n| self.shader_mapping(model, count, n).ok());
+            let extra = usize::from(count > 1);
+            let bounds = self.s(model + 24, (count + extra) * 32)?;
+            for gi in 0..count {
+                req(meshes.len() < MAX_MESHES)?;
+                let geometry = self.s(geometries + gi * 8, 160)?;
+                let bound = bounds + (gi + extra) * 32;
+                let (part_min, part_max) = (rv(self.sys, bound)?, rv(self.sys, bound + 16)?);
+                let mut mesh = self.read_mesh(geometry, format!("lod_model_{mi}_geometry_{gi}"), part_min, part_max, bone_count)?;
+                if let Some(m) = mapping {
+                    mesh.shader = Some(r16(self.sys, m + gi * 2)? as usize);
+                }
+                meshes.push(mesh);
+            }
+        }
+        Ok(meshes)
     }
 
     fn shader_mapping(&self, model: usize, count: usize, materials: usize) -> R<usize> {
