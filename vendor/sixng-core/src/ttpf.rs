@@ -174,7 +174,9 @@ impl Ttpf {
             if a == 0 && b == 0 {
                 break;
             }
-            chunks.push((((a & 0xFF_FFFF) as u64) << 8, 0x1000 + (b & 0xF_FFFF) as u64 * 0x4000 + (a >> 30) as u64 * 0x1000, (a >> 24) as u8, (b >> 20) as u64));
+            // file offset = 26 bits << 8; codec = bits 26-29 (multiples of 4);
+            // bits 30-31 are virtual-offset bits (bcpack-rs ttpf.rs)
+            chunks.push((((a & 0x3FF_FFFF) as u64) << 8, 0x1000 + (b & 0xF_FFFF) as u64 * 0x4000 + (a >> 30) as u64 * 0x1000, ((a >> 24) & 0x3C) as u8, (b >> 20) as u64));
         }
         let eoff = ((0x10 + 8 * n + 0xFF) & !0xFF) as u64;
         f.seek(SeekFrom::Start(eoff))?;
@@ -435,10 +437,15 @@ impl TtpfTex {
         if let Some(m) = self.mips_fixed {
             return m;
         }
-        if (9..=12).contains(&self.tile_mode()) {
-            (self.d0 >> 28).max(1)
-        } else {
-            (self.d0 >> 28) + 1
+        let field = self.d0 >> 28;
+        match self.tile_mode() {
+            // cubes: field + copies - 1, copies = tile mode - 8
+            // (GTA6-Asset-Info 05-ttpf.md "Cube mip count")
+            tm @ 9..=12 => (field + tm - 9).max(1),
+            // tile mode 1, field 1 always means one mip (UI sprites; store
+            // spacing agrees on all 4,071 checkable ones)
+            1 if field == 1 => 1,
+            _ => field + 1,
         }
     }
     /// A `TexInfo` describing this texture, with `data_off` = 0 relative to

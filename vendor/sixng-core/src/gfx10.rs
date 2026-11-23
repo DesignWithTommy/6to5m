@@ -134,7 +134,9 @@ impl Layout {
         // level's own size only for odd counts, where flooring shifted every
         // later mip's offset.
         let padded: Vec<(u32, u32)> = (0..nm).map(|i| (w.div_ceil(1 << i).max(1), h.div_ceil(1 << i).max(1))).collect();
-        let first = padded.iter().enumerate().position(|(i, &(mw, mh))| mw <= tw && mh <= th && nm - i as u32 <= max_tail).unwrap_or(nm as usize);
+        // A single-mip surface has no mip tail: its data starts at offset 0
+        // (Gfx10 builds a tail only for more than one mip; 05-ttpf.md).
+        let first = if nm > 1 { padded.iter().enumerate().position(|(i, &(mw, mh))| mw <= tw && mh <= th && nm - i as u32 <= max_tail).unwrap_or(nm as usize) } else { nm as usize };
         let mut place: Vec<MipPlace> = dims.iter().zip(&padded).map(|(&(mw, mh), &(pw, _))| MipPlace { w: mw, h: mh, pw, offset: 0, tail: None }).collect();
         let mut off = if first < nm as usize { bs } else { 0 };
         for i in (0..first).rev() {

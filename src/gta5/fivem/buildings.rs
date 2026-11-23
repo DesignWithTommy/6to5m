@@ -1234,7 +1234,7 @@ type Built = (Mesh, Vec<String>, Vec<String>, bool);
 const FOUR_LAYER: [u32; 4] = [0x61e0_9df7, 0xb21f_1ba5, 0x360e_396b, 0x27e5_c49d];
 const DETAIL_TILE: f32 = 64.0;
 /// Writer version of four-layer ground ydrs (in their cache key only).
-const LYR4_V: &str = "lyr4_2";
+const LYR4_V: &str = "lyr4_3";
 
 /// Four-layer ground submesh as terrain_cb_w_4lyr geometries: the layer
 /// diffuses become the shader's four samplers, the section `lookuptexture`
@@ -1286,6 +1286,21 @@ fn four_layer_geoms(an: &str, pools: &Pools, mat: &crate::model::Material, key_o
             top * (1.0 - fy) + bot * fy
         })
     };
+    // Detail mapping (SixNG material.rs four_layer_detail_uv): map section
+    // tiles have TEXCOORD_0 = section position / 512 m (430-620 m per unit
+    // allowing for quantisation) and repeat the layers 64x per unit; other
+    // models (set pieces, rocks) tile from position, one repeat per 8 m.
+    let (mut pa, mut ua) = (0f64, 0f64);
+    for t in sm.indices.chunks_exact(3) {
+        let [a, b, c] = [t[0], t[1], t[2]].map(|i| i as usize);
+        let (Some(pa_), Some(pb), Some(pc)) = (sm.positions.get(a), sm.positions.get(b), sm.positions.get(c)) else { continue };
+        let (Some(ta), Some(tb), Some(tc)) = (uvs.get(a), uvs.get(b), uvs.get(c)) else { continue };
+        let (e1, e2) = ([pb[0] - pa_[0], pb[1] - pa_[1], pb[2] - pa_[2]], [pc[0] - pa_[0], pc[1] - pa_[1], pc[2] - pa_[2]]);
+        let cr = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]];
+        pa += ((cr[0] * cr[0] + cr[1] * cr[1] + cr[2] * cr[2]) as f64).sqrt();
+        ua += (((tb[0] - ta[0]) * (tc[1] - ta[1]) - (tb[1] - ta[1]) * (tc[0] - ta[0])) as f64).abs();
+    }
+    let section_tile = ua > 0.0 && (430.0..=620.0).contains(&(pa / ua).sqrt());
     let mut out = Vec::new();
     push_geoms_n(&mut out, &sm.positions, &sm.indices, sm.normals.as_deref(), Some(uvs), sm.colors.as_deref(), &layers[0], 0);
     for g in &mut out {
@@ -1303,8 +1318,14 @@ fn four_layer_geoms(an: &str, pools: &Pools, mat: &crate::model::Material, key_o
         // Detail layers tile at TEXCOORD_0 x 64 (SixNG 6046d19: one repeat
         // per 8 m on map section tiles). Per-layer tiling (c35e27af) is not
         // decoded yet (SixNG a225c66).
-        for uv in &mut g.uvs {
-            *uv = [uv[0] * DETAIL_TILE, uv[1] * DETAIL_TILE];
+        if section_tile {
+            for uv in &mut g.uvs {
+                *uv = [uv[0] * DETAIL_TILE, uv[1] * DETAIL_TILE];
+            }
+        } else {
+            for (uv, p) in g.uvs.iter_mut().zip(&g.positions) {
+                *uv = [p[0] / 8.0, p[1] / 8.0];
+            }
         }
         // Vertex colours as in GTA V's own terrain drawables: Colour0 =
         // (ambient, 0, 0, 255), Colour1 = (0, G, B, 0).

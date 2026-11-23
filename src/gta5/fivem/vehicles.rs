@@ -64,6 +64,14 @@ const TYRE: &str = "r6m_tyre";
 /// Stand-in surfaces for parts whose colour is in no texture (sixng-core
 /// material.rs `stand_in`: tyre rubber, lamp-reflector chrome).
 const CHROME: &str = "r6m_chrome";
+/// Dark trim stand-in: two-layer paint-shader parts that are not body panels
+/// (SixNG export.rs: a layer detail texture binds, or the meshes hang on
+/// interior / lamp / mechanical bones).
+const TRIM: &str = "r6m_trim";
+/// Bone-name substrings of parts that are not body panels (SixNG export.rs NOT_BODY_BONES).
+const NOT_BODY_BONES: [&str; 22] = [
+    "interior", "steering", "doorcard", "seat", "sunvisor", "dash", "pedal", "handbrake", "gear", "headrest", "brake", "gas", "clutch", "winder", "light", "siren", "indicator", "lamp", "engine", "exhaust", "suspension", "axle",
+];
 /// Runtime screen overlay texture key (diffusetex and emissivetex of the
 /// front dashboard-screen mesh; in no store).
 const SCREEN_OVERLAY: &str = "a800afccf01aa36b";
@@ -564,6 +572,25 @@ pub(super) fn load_source(rpf: &Path, e: &Entry, pools: &mut Pools, texs: &mut V
                     t
                 }
             };
+            // Paint shaders cover the whole car; only untextured materials on
+            // body bones are body paint (SixNG export.rs classify rule).
+            let tex = if tex == PAINT {
+                let textured = sh.is_some_and(|sh| {
+                    sh.textures.iter().any(|t| {
+                        u32::from_str_radix(&t.param_hash, 16).is_ok_and(|h| VEH_DATA_SLOTS.contains(&h)) && {
+                            let hash = u32::from_str_radix(&t.hash32, 16).unwrap_or(0);
+                            let key = emb.as_ref().and_then(|e| e.by_hash(hash)).and_then(|x| x.asset_key).unwrap_or_else(|| key_of(sh, t.param));
+                            pools.get(hash, key, u64::from_str_radix(&t.hash64, 16).unwrap_or(0)).is_ok()
+                        }
+                    })
+                });
+                let bones: HashSet<&str> = m.joints.iter().flatten().filter_map(|j| info.skeleton.get(j[0] as usize)).map(|b| b.name.as_str()).collect();
+                let off = bones.iter().filter(|b| { let b = b.to_ascii_lowercase(); NOT_BODY_BONES.iter().any(|k| b.contains(k)) }).count();
+                let not_body = !bones.is_empty() && off * 10 >= bones.len() * 7;
+                if textured || not_body { TRIM.to_string() } else { tex }
+            } else {
+                tex
+            };
             if !texs.contains(&tex) {
                 texs.push(tex.clone());
             }
@@ -807,7 +834,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     // texture dictionary
     let mut tx = Vec::new();
     for t in &texs {
-        if t == MISSING || t == PAINT || t == TYRE || t == CHROME {
+        if t == MISSING || t == PAINT || t == TYRE || t == CHROME || t == TRIM {
             continue;
         }
         let p = cache.join(format!("{}.dds", &t[4..]));
@@ -820,6 +847,9 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     }
     if wf.0.is_empty() || wr.0.is_empty() || texs.iter().any(|t| t == TYRE) {
         tx.push(solid(TYRE, [0x20, 0x20, 0x20, 0xFF], 16));
+    }
+    if texs.iter().any(|t| t == TRIM) {
+        tx.push(solid(TRIM, [0x1C, 0x1C, 0x1E, 0xFF], 16));
     }
     if texs.iter().any(|t| t == CHROME) {
         tx.push(solid(CHROME, [0xE6, 0xE6, 0xE6, 0xFF], 16));
