@@ -75,6 +75,17 @@ struct Portal {
     corners: [V3; 4],
 }
 
+/// Add another archive's interiors: an interior archetype already loaded
+/// (same name hash) gains the new instances, others are appended.
+pub fn merge(into: &mut Vec<Interior>, more: Vec<Interior>) {
+    for m in more {
+        match into.iter_mut().find(|i| i.hash == m.hash) {
+            Some(i) => i.instances.extend(m.instances),
+            None => into.push(m),
+        }
+    }
+}
+
 /// Portals of every interior archetype in one 6m meta file, by name hash.
 fn file_portals(levels: &Path, index: &ArchiveIndex, off: u64) -> HashMap<u32, Vec<Portal>> {
     let mut out = HashMap::new();
@@ -117,8 +128,11 @@ fn qrot(q: Q, v: V3) -> V3 {
 }
 
 /// Interiors whose instances fall in the region, one per archetype.
-pub fn load(ctx: &Ctx, dir: &Path, index: &ArchiveIndex) -> Vec<Interior> {
-    let levels = ctx.o.game.join("levels.rpf");
+/// Interiors of one archive (`archive_id`, e.g. "levels.rpf"): its
+/// placement dir and index. Child model offsets are virtual (Ctx::voff_of).
+pub fn load(ctx: &Ctx, dir: &Path, index: &ArchiveIndex, archive_id: &str) -> Vec<Interior> {
+    let levels = if archive_id == "levels.rpf" { ctx.o.game.join("levels.rpf") } else { ctx.o.game.join(archive_id) };
+    let prefix = format!("{archive_id}@");
     let limbo = std::env::var_os("T6M_MLO_LIMBO").is_some();
     let mut meta: HashMap<String, HashMap<u32, Vec<Portal>>> = HashMap::new();
     let by_id: HashMap<&str, &Entry> = index.entries.iter().map(|e| (e.id.as_str(), e)).collect();
@@ -139,7 +153,7 @@ pub fn load(ctx: &Ctx, dir: &Path, index: &ArchiveIndex) -> Vec<Interior> {
             i.instances.push((ip, ri));
             continue;
         }
-        let Some(file) = inst["interior_file"].as_str().and_then(|f| f.strip_prefix("levels.rpf@")) else {
+        let Some(file) = inst["interior_file"].as_str().and_then(|f| f.strip_prefix(prefix.as_str())) else {
             missing += 1;
             continue;
         };
@@ -158,7 +172,7 @@ pub fn load(ctx: &Ctx, dir: &Path, index: &ArchiveIndex) -> Vec<Interior> {
         let mut children = Vec::new();
         for ix in inst["entities"].as_array().into_iter().flatten().chain(inst["entity_set_entities"].as_array().into_iter().flatten()) {
             let Some((ei, e)) = ix.as_u64().and_then(|i| Some((i as usize, ents.get(i as usize)?))) else { continue };
-            let (Some(name), Some(off)) = (e["name"].as_str(), e["model_id"].as_str().and_then(|m| m.strip_prefix("levels.rpf@")).and_then(|h| usize::from_str_radix(h, 16).ok())) else {
+            let (Some(name), Some(off)) = (e["name"].as_str(), e["model_id"].as_str().and_then(|m| ctx.voff_of(m))) else {
                 continue;
             };
             let rot = q4(&e["rotation_world"]).map(|q| [-q[0], -q[1], -q[2], q[3]]).or_else(|| q4(&e["rotation"])).unwrap_or([0.0, 0.0, 0.0, 1.0]);
@@ -192,7 +206,7 @@ pub fn load(ctx: &Ctx, dir: &Path, index: &ArchiveIndex) -> Vec<Interior> {
         ctx.skip(&format!("({missing} interior instances)"), "interior archetype file missing", json!({"count": missing}));
     }
     let mut out: Vec<Interior> = by_hash.into_values().collect();
-    let (arch_lights, ent_lights) = light_sets(ctx, index, &out);
+    let (arch_lights, ent_lights) = light_sets(ctx, index, &out, &levels);
     for c in out.iter_mut().flat_map(|i| i.children.iter_mut()) {
         c.lights = arch_lights.get(&crate::gta5::rsc::joaat(&c.name)).into_iter().chain(ent_lights.get(&c.src)).flatten().cloned().collect();
     }
@@ -430,7 +444,6 @@ pub fn emit(ctx: &Ctx, ints: &[Interior], an: &HashMap<String, String>, archetyp
         }
     };
     let by_an: HashMap<&str, &Archetype> = archetypes.iter().map(|a| (a.name.as_str(), a)).collect();
-    let levels = ctx.o.game.join("levels.rpf");
     let surf = surface_map(ctx);
     let mut cols = 0;
     stale_ybn(ctx);
@@ -481,7 +494,7 @@ pub fn emit(ctx: &Ctx, ints: &[Interior], an: &HashMap<String, String>, archetyp
         if it.portals.is_some() {
             if let Some(e) = &it.col {
                 let order: Vec<u32> = it.rooms.iter().map(|r| r.0).collect();
-                cols += collision(ctx, &levels, e, it, &order, &rbox, &surf)?;
+                cols += collision(ctx, &ctx.entry_path(e), e, it, &order, &rbox, &surf)?;
             }
         }
         let (ep, en) = mb.ptr_array(meta::CENTITYDEF.name, main);
@@ -731,7 +744,7 @@ type LightMaps = (HashMap<u32, Vec<Value>>, HashMap<(String, usize), Vec<Value>>
 /// extensions of the archetypes defined beside them; archetypes defined in
 /// other files keep no lights): by archetype hash, and by (meta file
 /// offset, entity index). Each light gets its set's offset added to its position.
-fn light_sets(ctx: &Ctx, index: &ArchiveIndex, ints: &[Interior]) -> LightMaps {
+fn light_sets(ctx: &Ctx, index: &ArchiveIndex, ints: &[Interior], levels: &Path) -> LightMaps {
     let (mut by_arch, mut by_ent): LightMaps = Default::default();
     if ints.is_empty() || std::env::var_os("T6M_NO_LIGHTS").is_some() {
         return (by_arch, by_ent);
@@ -739,11 +752,10 @@ fn light_sets(ctx: &Ctx, index: &ArchiveIndex, ints: &[Interior]) -> LightMaps {
     let kids = || ints.iter().flat_map(|i| i.children.iter());
     let want: std::collections::HashSet<u32> = kids().map(|c| crate::gta5::rsc::joaat(&c.name)).collect();
     let files: std::collections::BTreeSet<String> = kids().map(|c| c.src.0.clone()).collect();
-    let levels = ctx.o.game.join("levels.rpf");
     let by_off: HashMap<u64, &Entry> = index.entries.iter().map(|e| (e.off, e)).collect();
     for f in files {
         let Some(e) = u64::from_str_radix(&f, 16).ok().and_then(|o| by_off.get(&o)) else { continue };
-        let Ok(r) = Resource::load_sys(&levels, e) else { continue };
+        let Ok(r) = Resource::load_sys(levels, e) else { continue };
         for s in sixng_core::lights::light_sets(&r) {
             let off = s.ext_offset;
             let lights: Vec<Value> = s

@@ -735,9 +735,8 @@ fn export_region(ctx: &Ctx, ws: &sixng_core::export::Workspace, archive: &Path, 
 
 /// Placement dirs of the story / minigame packs (<work>/placements/<stem>):
 /// their LOD links (per-archive sixng side files) and region export, built
-/// like levels.rpf's. Their interiors are not placed (MLO instances come
-/// from levels.rpf only).
-fn pack_placements(ctx: &Ctx) -> Result<Vec<PathBuf>, Box<dyn Error>> {
+/// like levels.rpf's, plus their MLO instances (sixng export_interiors).
+fn pack_placements(ctx: &Ctx) -> Result<Vec<(PathBuf, String)>, Box<dyn Error>> {
     if ctx.o.placements.is_some() {
         return Ok(Vec::new());
     }
@@ -745,7 +744,7 @@ fn pack_placements(ctx: &Ctx) -> Result<Vec<PathBuf>, Box<dyn Error>> {
     let mut out = Vec::new();
     for pk in &ctx.packs {
         let a = ws.resolve(&pk.id)?;
-        let dir = ctx.o.work.join("placements").join(sixng_core::game::index_stem(&pk.id));
+        let dir = ctx.o.work.join("placements").join(pk.id.trim_end_matches(".rpf"));
         let metas: Vec<&Entry> = pk.index.entries.iter().filter(|e| e.kind == sixng_core::classify::Kind::Resource && e.sub == "7a").collect();
         let ix = ctx.o.work.join("index");
         let mtime = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
@@ -758,7 +757,13 @@ fn pack_placements(ctx: &Ctx) -> Result<Vec<PathBuf>, Box<dyn Error>> {
             sixng_core::lodlinks::build(&ws, &a, &metas, sixng_core::export::no_progress())?;
         }
         export_region(ctx, &ws, &pk.path, &pk.id, &metas, &dir, &[mtime(&lp)])?;
-        out.push(dir);
+        // MLO instances of the pack (interiors.jsonl next to its placements)
+        let ij = dir.join("interiors.jsonl");
+        if old(&ij) {
+            let _p = super::Phase::new(ctx, "  prep interiors (pack)");
+            sixng_core::export::export_interiors(&a, &metas, &pk.index.entries, &ctx.o.work, sixng_core::export::no_progress())?;
+        }
+        out.push((dir, pk.id.clone()));
     }
     Ok(out)
 }
@@ -965,10 +970,9 @@ pub(crate) fn sys_from_map(map: &[u8], e: &Entry) -> Option<sixng_core::resource
 
 /// World placements from every placement dir (levels.rpf first, then the
 /// story / minigame packs); interiors from the levels.rpf dir.
-fn load_places(ctx: &Ctx, dirs: &[PathBuf], index: &ArchiveIndex) -> Result<Vec<Place>, Box<dyn Error>> {
-    let dir = &dirs[0];
+fn load_places(ctx: &Ctx, dirs: &[(PathBuf, String)], index: &ArchiveIndex) -> Result<Vec<Place>, Box<dyn Error>> {
     let mut files: Vec<PathBuf> = Vec::new();
-    for (k, d) in dirs.iter().enumerate() {
+    for (k, (d, _)) in dirs.iter().enumerate() {
         let idx = match fs::read_to_string(d.join("index.jsonl")) {
             Ok(t) => t,
             Err(e) if k == 0 => return Err(e.into()),
@@ -1052,8 +1056,9 @@ fn load_places(ctx: &Ctx, dirs: &[PathBuf], index: &ArchiveIndex) -> Result<Vec<
     }
     // Interiors (MLO instances): interior-space entities moved into world space.
     let (mut n_int, mut n_ent) = (0, 0);
-    let int_text = fs::read_to_string(dir.join("interiors.jsonl")).ok();
-    if let Some(text) = int_text.filter(|_| ctx.o.interiors) {
+    for (dir, aid) in dirs.iter().filter(|_| ctx.o.interiors) {
+        let Ok(text) = fs::read_to_string(dir.join("interiors.jsonl")) else { continue };
+        let prefix = format!("{aid}@");
         let mut cache: HashMap<String, Option<Arc<Value>>> = HashMap::new();
         for l in text.lines() {
             let Ok(inst) = serde_json::from_str::<Value>(l) else { continue };
@@ -1061,7 +1066,7 @@ fn load_places(ctx: &Ctx, dirs: &[PathBuf], index: &ArchiveIndex) -> Result<Vec<
             if !ctx.o.in_bbox(ip, ip) {
                 continue;
             }
-            let Some(file) = inst["interior_file"].as_str().and_then(|f| f.strip_prefix("levels.rpf@")) else { continue };
+            let Some(file) = inst["interior_file"].as_str().and_then(|f| f.strip_prefix(prefix.as_str())) else { continue };
             let Some(src) = cache.entry(file.to_string()).or_insert_with(|| load(&dir.join(format!("{file}.json"))).map(Arc::new)).clone() else {
                 ctx.skip(&format!("interior {}", inst["archetype"].as_str().unwrap_or("?")), "interior entity file missing", json!({"file": file}));
                 continue;
@@ -1738,11 +1743,20 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
 pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     let p = super::Phase::new(ctx, "  placements");
     let dir = placements_dir(ctx, index)?;
-    let mut dirs = vec![dir.clone()];
+    let mut dirs = vec![(dir.clone(), "levels.rpf".to_string())];
     dirs.extend(pack_placements(ctx)?);
     let places = load_places(ctx, &dirs, index)?;
     // interiors as MLOs (default; --interiors flattens them into world space instead)
-    let mlos = if ctx.o.interiors { Vec::new() } else { interiors::load(ctx, &dir, index) };
+    let mlos = if ctx.o.interiors {
+        Vec::new()
+    } else {
+        let mut v = interiors::load(ctx, &dir, index, "levels.rpf");
+        // pack dirs are pushed in ctx.packs order
+        for ((d, id), pk) in dirs[1..].iter().zip(&ctx.packs) {
+            interiors::merge(&mut v, interiors::load(ctx, d, &pk.index, id));
+        }
+        v
+    };
     // archetype name -> model offset (first wins), most used first
     let grass = super::batches::grass_archetypes(ctx, index);
     let mut use_count: HashMap<&str, (usize, usize)> = HashMap::new();

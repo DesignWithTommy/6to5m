@@ -34,10 +34,18 @@ fn key(ctx: &Ctx) -> String {
     super::sha(&format!("{BATCH_V}|{}", ctx.input_stamp))[..16].to_string()
 }
 
+/// Cache tag of one archive: "" for levels.rpf (the layout every earlier
+/// build wrote), else "<index stem>_<size>" so a changed pack re-exports.
+fn tag(a: &sixng_core::game::ArchiveInfo) -> String {
+    let st = sixng_core::game::index_stem(&a.id);
+    if st == "levels" { String::new() } else { format!("{st}_{}", a.size) }
+}
+
 /// Map files holding batches, with the union box of their batches.
 fn map_index(ctx: &Ctx, a: &sixng_core::game::ArchiveInfo, index: &sixng_core::scan::ArchiveIndex) -> Result<Vec<(String, Bbox)>, String> {
     use rayon::prelude::*;
-    let p = ctx.o.work.join("fivem_batches").join(format!("maps_{}.json", key(ctx)));
+    let t = tag(a);
+    let p = ctx.o.work.join("fivem_batches").join(if t.is_empty() { format!("maps_{}.json", key(ctx)) } else { format!("maps_{}_{t}.json", key(ctx)) });
     if let Some(v) = fs::read(&p).ok().and_then(|b| serde_json::from_slice::<Vec<(String, Bbox)>>(&b).ok()) {
         eprintln!("[t6m:batches] map-file index: cached ({} map files with batches)", v.len());
         return Ok(v);
@@ -80,12 +88,25 @@ fn tables(ctx: &Ctx, index: &sixng_core::scan::ArchiveIndex) -> Result<Vec<PathB
     }
     let ws = sixng_core::export::Workspace::new(&ctx.o.game, &ctx.o.work);
     let a = ws.resolve("levels.rpf").map_err(|e| e.to_string())?;
+    let mut out = tables_of(ctx, &ws, &a, index)?;
+    // story / minigame packs: same tables from their own map files
+    for pk in &ctx.packs {
+        let a = ws.resolve(&pk.id).map_err(|e| e.to_string())?;
+        out.extend(tables_of(ctx, &ws, &a, &pk.index)?);
+    }
+    Ok(out)
+}
+
+/// Batch table dirs of one archive's map files (see `tables`).
+fn tables_of(ctx: &Ctx, ws: &sixng_core::export::Workspace, a: &sixng_core::game::ArchiveInfo, index: &sixng_core::scan::ArchiveIndex) -> Result<Vec<PathBuf>, String> {
+    let a = a.clone();
     let maps = map_index(ctx, &a, index)?;
     let mut cells: BTreeMap<(i32, i32), Vec<&str>> = BTreeMap::new();
     for (id, b) in &maps {
         cells.entry((((b[0][0] + b[1][0]) * 0.5 / CELL).floor() as i32, ((b[0][1] + b[1][1]) * 0.5 / CELL).floor() as i32)).or_default().push(id);
     }
     let root = ctx.o.work.join("fivem_batches").join(key(ctx));
+    let root = match tag(&a) { t if t.is_empty() => root, t => root.join(t) };
     let mut out = Vec::new();
     let mut todo: Vec<((i32, i32), PathBuf)> = Vec::new();
     let mut cell_of: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
@@ -113,8 +134,8 @@ fn tables(ctx: &Ctx, index: &sixng_core::scan::ArchiveIndex) -> Result<Vec<PathB
         let t = std::time::Instant::now();
         let tmp = root.join("_export");
         let sel: Vec<&sixng_core::scan::Entry> = index.entries.iter().filter(|e| cell_of.contains_key(e.id.as_str())).collect();
-        sixng_core::export::export_batches(&ws, &a, &sel, &tmp, sixng_core::export::no_progress()).map_err(|e| e.to_string())?;
-        let src = tmp.join("placements").join("levels");
+        sixng_core::export::export_batches(ws, &a, &sel, &tmp, sixng_core::export::no_progress()).map_err(|e| e.to_string())?;
+        let src = tmp.join("placements").join(a.id.trim_end_matches(".rpf"));
         let pbin = fs::read(src.join("batch_props.bin")).unwrap_or_default();
         let gbin = fs::read(src.join("batch_grass.bin")).unwrap_or_default();
         let mut parts: Vec<(String, Vec<u8>, Vec<u8>, usize, usize)> = vec![(String::new(), Vec::new(), Vec::new(), 0, 0); todo.len()];
