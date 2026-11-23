@@ -699,6 +699,25 @@ fn f3(v: &Value) -> V3 {
 /// each output is (re)built only when missing or older than its inputs, and
 /// placements also when they were made for a region not covering --bbox
 /// (recorded in .fivem_region.json).
+/// Version of the small derived index tables (interior entities, light
+/// index, LOD links, archetype LODs): with the sixng index version and
+/// crate version it forms the stamp in <work>/index/derived_tables.json.
+/// Tables made under another stamp are rebuilt. Bump on producer changes.
+const DERIVED_V: &str = "derived1";
+
+fn derived_stamp() -> String {
+    format!("{}|{}|{DERIVED_V}", sixng_core::INDEX_VERSION, env!("CARGO_PKG_VERSION"))
+}
+
+/// True when the derived index tables were made by this code.
+fn derived_ok(ctx: &Ctx) -> bool {
+    fs::read_to_string(ctx.o.work.join("index").join("derived_tables.json")).is_ok_and(|s| s == derived_stamp())
+}
+
+fn mark_derived(ctx: &Ctx) {
+    let _ = fs::write(ctx.o.work.join("index").join("derived_tables.json"), derived_stamp());
+}
+
 fn placements_dir(ctx: &Ctx, index: &ArchiveIndex) -> Result<PathBuf, Box<dyn Error>> {
     if let Some(d) = &ctx.o.placements {
         if sixng_core::vfs::exists(&d.join("index.jsonl")) {
@@ -712,9 +731,10 @@ fn placements_dir(ctx: &Ctx, index: &ArchiveIndex) -> Result<PathBuf, Box<dyn Er
     let metas: Vec<&Entry> = index.entries.iter().filter(|e| e.kind == sixng_core::classify::Kind::Resource && e.sub == "7a").collect();
     let ix = ctx.o.work.join("index");
     let mtime = |p: &Path| sixng_core::vfs::modified(p);
+    let fresh_code = derived_ok(ctx);
     let stale = |p: &Path, deps: &[Option<std::time::SystemTime>]| match mtime(p) {
         None => true,
-        Some(t) => t < ctx.input_time || deps.iter().flatten().any(|d| *d > t),
+        Some(t) => !fresh_code || t < ctx.input_time || deps.iter().flatten().any(|d| *d > t),
     };
     let ie = ix.join("interior_entities.jsonl");
     if stale(&ie, &[]) || !sixng_core::vfs::exists(&ix.join(sixng_core::interiorents::LIGHT_INDEX)) {
@@ -785,6 +805,7 @@ fn pack_placements(ctx: &Ctx) -> Result<Vec<(PathBuf, String)>, Box<dyn Error>> 
     }
     let ws = sixng_core::export::Workspace::new(&ctx.o.game, &ctx.o.work);
     let mut out = Vec::new();
+    let fresh_code = derived_ok(ctx);
     for pk in &ctx.packs {
         let a = ws.resolve(&pk.id)?;
         let dir = ctx.o.work.join("placements").join(pk.id.trim_end_matches(".rpf"));
@@ -795,7 +816,7 @@ fn pack_placements(ctx: &Ctx) -> Result<Vec<(PathBuf, String)>, Box<dyn Error>> 
         let al = ix.join(sixng_core::game::per_archive_name("archetype_lod", "jsonl", &pk.id));
         let src = mtime(&pk.path);
         let old = |p: &Path| mtime(p).map_or(true, |t| src.is_some_and(|s| t < s));
-        if old(&lp) || old(&al) {
+        if !fresh_code || old(&lp) || old(&al) {
             let _p = super::Phase::new(ctx, "  prep lod-links (pack)");
             sixng_core::lodlinks::build(&ws, &a, &metas, sixng_core::export::no_progress())?;
         }
@@ -1817,6 +1838,10 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     let dir = placements_dir(ctx, index)?;
     let mut dirs = vec![(dir.clone(), "levels.rpf".to_string())];
     dirs.extend(pack_placements(ctx)?);
+    // levels and pack tables are now made by this code
+    if !derived_ok(ctx) {
+        mark_derived(ctx);
+    }
     let places = load_places(ctx, &dirs, index)?;
     // interiors as MLOs (default; --interiors flattens them into world space instead)
     let mlos = if ctx.o.interiors {

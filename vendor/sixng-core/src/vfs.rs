@@ -1,9 +1,9 @@
 //! Process-wide in-memory files for derived work data.
 //!
-//! After `set_memory(work)`, the derived data under `work` (placements,
-//! collision, batches, LOD / interior tables, fivem side tables: see
-//! `derived`) is kept in memory instead of on disk; the scan indexes and
-//! fingerprint / texture records stay on disk. Paths outside are passed straight to `std::fs`, so the
+//! After `set_memory(work)`, the big derived data under `work` (placements,
+//! collision, batches, fivem side tables: see `derived`) is kept in memory
+//! instead of on disk; the scan indexes, the small derived index tables and
+//! the fingerprint / texture records stay on disk. Paths outside are passed straight to `std::fs`, so the
 //! functions here are drop-in replacements for the `std::fs` calls of the
 //! producers (export, lod links, interior entities) and their consumers:
 //! nothing extracted or derived is written to disk during a build.
@@ -43,10 +43,11 @@ fn derived(rel: &str) -> bool {
         return true;
     }
     let file = |name: &str| ["fivem_meta_xy", "fivem_ground", "fivem_water_low", "fivem_paths_src", "fivem_navmesh_index", "fivem_collision_index", "zone_names"].iter().any(|d| name.starts_with(d));
-    match rel.strip_prefix("index/") {
-        Some(name) => !name.contains('/') && ["lod_parents", "archetype_lod", "archetype_links", "interior_entities", "light_index"].iter().any(|d| name.starts_with(d)),
-        None => !rel.contains('/') && file(rel),
-    }
+    // index/: the scan indexes and the small derived tables (LOD links,
+    // archetype LODs, interior entities, light index; MBs, keyed by
+    // fivem::buildings' DERIVED_V stamp) stay on disk so an unchanged
+    // rebuild skips their prep
+    !rel.contains('/') && file(rel)
 }
 
 /// Memory key of `p`, None = on disk.
