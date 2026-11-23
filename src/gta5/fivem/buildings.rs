@@ -1448,18 +1448,21 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
     // geometry and colliders share (doors: centred on the panel while the
     // mesh and the bone-placed colliders start at the hinge), so a fragment
     // with 6m colliders is flagged only when its mesh misses their union.
-    let frag_out = if cols.is_empty() {
-        frag_out
+    let (frag_out, delta) = if cols.is_empty() {
+        (frag_out, None)
     } else {
         let (cl, ch) = cols.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(a, b), c| (std::array::from_fn(|k| a[k].min(c.min[k])), std::array::from_fn(|k| b[k].max(c.max[k]))));
         let pad = 0.05 * (0..3).map(|k| ch[k] - cl[k]).fold(1.0f32, f32::max);
-        (0..3).any(|k| lo[k] > ch[k] + pad || hi[k] < cl[k] - pad)
+        // per axis: how far the mesh box lies outside the collider union
+        let delta: [f32; 3] = std::array::from_fn(|k| (cl[k] - lo[k]).max(hi[k] - ch[k]).max(0.0));
+        ((0..3).any(|k| lo[k] > ch[k] + pad || hi[k] < cl[k] - pad), Some(delta))
     };
     if frag_out {
         ctx.skip(name, "fragment geometry outside its collision (converted anyway, check placement)", json!({"source": src}));
+        super::vlog::outside(name, delta);
     }
     let bytes = match entry.filter(|_| frag) {
-        Some(_) => super::frags::build_prop_yft(&mesh, &cols, 9998.0),
+        Some(_) => super::frags::build_prop_yft(&mesh, &cols, 9998.0).inspect(|b| super::vlog::yft(&format!("{an}.yft"), b, cols.len().max(1))),
         // the source model's own LOD levels and distances (LodGroup +0x50..+0x7C)
         None if lower.iter().any(|l| !l.geoms.is_empty()) => {
             let mut lv = vec![mesh.clone()];

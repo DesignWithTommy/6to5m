@@ -32,6 +32,7 @@ mod terrain;
 mod vehicles;
 mod weapons;
 mod frags;
+mod vlog;
 mod texslot;
 pub mod verify;
 
@@ -529,6 +530,7 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
         t0.elapsed().as_secs_f32(),
         ctx.o.out.display()
     );
+    vlog::flush(&ctx.o.out);
     let moved = texslot::MOVED.load(std::sync::atomic::Ordering::Relaxed);
     if moved > 0 {
         println!("fivem: {moved} texture lookups moved off a 32-bit hash slot owned by another texture");

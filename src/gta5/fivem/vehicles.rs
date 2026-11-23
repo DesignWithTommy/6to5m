@@ -770,13 +770,18 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
         written.push((file, b.len()));
         Ok(())
     };
-    put(stream.join(format!("{}.yft", o.model)), &yft::build_yft(&frag)?)?;
+    let y = yft::build_yft(&frag)?;
+    super::vlog::yft(&format!("{}.yft", o.model), &y, frag.children.len());
+    put(stream.join(format!("{}.yft", o.model)), &y)?;
     if let Some(s) = &s_hi {
         let mut hi = frag.clone();
         hi.lods = Default::default();
         hi.lods[0] = to_models(&s.lods[0]);
-        put(stream.join(format!("{}_hi.yft", o.model)), &yft::build_yft(&hi)?)?;
+        let y = yft::build_yft(&hi)?;
+        super::vlog::yft(&format!("{}_hi.yft", o.model), &y, hi.children.len());
+        put(stream.join(format!("{}_hi.yft", o.model)), &y)?;
     }
+    super::vlog::flush(&o.out);
 
     // texture dictionary
     let mut tx = Vec::new();
