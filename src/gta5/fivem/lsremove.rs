@@ -269,7 +269,7 @@ pub fn gta5_cli(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             if e.path.contains(&pat) {
                 println!("{}\t{}", e.path, e.size.max(e.usize));
                 if let Some(o) = &out {
-                    let b = if e.resource { rpf7::resource_data(&data, e) } else { data.get(e.offset as usize..(e.offset + e.size.max(e.usize) as u64) as usize).map(|b| b.to_vec()) };
+                    let b = if e.resource { rpf7::resource_data(&data, e) } else { rpf7::binary_data(&keys, &data, e) };
                     if let Some(b) = b {
                         let _ = fs::create_dir_all(o);
                         let _ = fs::write(o.join(&e.name), b);

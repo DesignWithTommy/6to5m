@@ -224,6 +224,9 @@ pub struct FileEntry {
     pub resource: bool,
     pub sys_flags: u32,
     pub gfx_flags: u32,
+    /// binary entry encryption: 0 none, 1 AES, 2 NG (archive's scheme when
+    /// the entry's encrypted flag is set; resources are never encrypted)
+    pub enc: u8,
 }
 
 /// Walk one archive (and nested .rpf files for which `descend(path)` holds),
@@ -288,6 +291,12 @@ pub fn walk(keys: &Keys, data: &[u8], start: u64, len: u64, name: &str, prefix: 
                 resource,
                 sys_flags: if resource { u32_(e, 8) } else { 0 },
                 gfx_flags: if resource { u32_(e, 12) } else { 0 },
+                enc: match (resource, u32_(e, 12) != 0, enc) {
+                    (false, true, 0x0FFF_FFF9) => 1,
+                    (false, true, 0 | 0x4E45_504F) => 0,
+                    (false, true, _) => 2,
+                    _ => 0,
+                },
             };
             if !resource && fe.name.ends_with(".rpf") && descend(&format!("{}/", fe.path)) {
                 let l = if fe.size == 0 { fe.usize } else { fe.size } as u64;
@@ -307,6 +316,25 @@ pub fn resource_data(data: &[u8], e: &FileEntry) -> Option<Vec<u8>> {
     let b = data.get(e.offset as usize + 16..(e.offset + e.size as u64) as usize)?;
     let mut out = Vec::new();
     flate2::read::DeflateDecoder::new(b).read_to_end(&mut out).ok()?;
+    Some(out)
+}
+
+/// Contents of a binary (non-resource) entry: decrypted with the archive's
+/// scheme when the entry is encrypted (NG key from name + uncompressed size,
+/// as CodeWalker RpfFile.ExtractFileBinary), then inflated when compressed.
+pub fn binary_data(keys: &Keys, data: &[u8], e: &FileEntry) -> Option<Vec<u8>> {
+    let stored = if e.size == 0 { e.usize } else { e.size } as u64;
+    let mut b = data.get(e.offset as usize..(e.offset + stored) as usize)?.to_vec();
+    match e.enc {
+        1 => keys.decrypt_aes(&mut b),
+        2 => keys.decrypt_ng(&mut b, &e.name, e.usize),
+        _ => {}
+    }
+    if e.size == 0 {
+        return Some(b);
+    }
+    let mut out = Vec::with_capacity(e.usize as usize);
+    flate2::read::DeflateDecoder::new(&b[..]).read_to_end(&mut out).ok()?;
     Some(out)
 }
 
