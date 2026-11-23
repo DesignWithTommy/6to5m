@@ -421,31 +421,6 @@ struct Part {
     warnings: Vec<String>,
 }
 
-/// Area-weighted vertex normals; vertices at the same position share one
-/// (UV seams stay smooth).
-fn smooth_normals(p: &[[f32; 3]], idx: &[u32]) -> Vec<[f32; 3]> {
-    let key = |v: &[f32; 3]| v.map(|x| (x * 1e4).round() as i32);
-    let mut acc: HashMap<[i32; 3], [f32; 3]> = HashMap::new();
-    for t in idx.chunks_exact(3) {
-        let (a, b, c) = (p[t[0] as usize], p[t[1] as usize], p[t[2] as usize]);
-        let (u, v) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
-        let f = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
-        for &i in t {
-            let e = acc.entry(key(&p[i as usize])).or_insert([0.0; 3]);
-            for k in 0..3 {
-                e[k] += f[k];
-            }
-        }
-    }
-    p.iter()
-        .map(|v| {
-            let s = acc.get(&key(v)).copied().unwrap_or([0.0, 0.0, 1.0]);
-            let l = (s[0] * s[0] + s[1] * s[1] + s[2] * s[2]).sqrt();
-            if l > 1e-12 { [s[0] / l, s[1] / l, s[2] / l] } else { [0.0, 0.0, 1.0] }
-        })
-        .collect()
-}
-
 fn tri_area(p: &[[f32; 3]], idx: &[u32]) -> f64 {
     idx.chunks_exact(3)
         .filter(|t| t.iter().all(|&i| (i as usize) < p.len()))
@@ -600,15 +575,7 @@ fn decode_part(game: &Path, e: &Entry, six: &sixng_core::pedskel::PedSkeleton, m
                 }
             };
             let uv = m.uvs.iter().find(|u| u.0 == 3).or(m.uvs.first()).map(|u| u.1.clone()).filter(|u| u.len() == n).unwrap_or_else(|| vec![[0.0; 2]; n]);
-            // stored normals, else smooth ones from the faces (a constant
-            // normal shaded every limb flat and faceted)
-            let normals = match m.normals.clone().filter(|v| v.len() == n) {
-                Some(v) => v,
-                None => {
-                    part.warnings.push(format!("geometry {gi}: no stored normals, smoothed from faces"));
-                    smooth_normals(&m.positions, &m.indices)
-                }
-            };
+            let normals = m.normals.clone().filter(|v| v.len() == n).unwrap_or_else(|| vec![[0.0, 0.0, 1.0]; n]);
             let tangents = m.tangents.clone().filter(|v| v.len() == n).unwrap_or_else(|| uv_tangents(&m.positions, &normals, &uv, &m.indices));
             let mut verts = Vec::with_capacity(n);
             for i in 0..n {

@@ -937,7 +937,7 @@ fn run_cli(cli: &Cli, out: &Out) -> Result<()> {
             let unnamed: Vec<_> = ix.entries.iter().filter(|e| e.kind == Kind::RageObj && (e.name.is_none() || matches!(e.rtype.as_deref(), Some("dr") | Some("ft")))).collect();
             let t = Instant::now();
             let v = export::link_archetypes(&ws, &a, &metas, &unnamed, pr)?;
-            out.print(&json!({"ok": true, "archive": a.id, "stats": v, "seconds": t.elapsed().as_secs_f64(), "out": ws.index_dir().join("archetype_links.json")}));
+            out.print(&json!({"ok": true, "archive": a.id, "stats": v, "seconds": t.elapsed().as_secs_f64(), "out": export::links_path(&ws, &a)}));
         }
         Cmd::Pso { archive, filter, out: po } => {
             let a = ws.resolve(archive)?;

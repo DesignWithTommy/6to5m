@@ -59,6 +59,34 @@ pub fn discover(root: &Path) -> Vec<ArchiveInfo> {
     v
 }
 
+/// Per-archive index side file: `<base>.<ext>` for levels.rpf (the name
+/// every earlier build wrote), `<base>__<index stem>.<ext>` for any other
+/// archive, so indexing story000 or shared_minigame000 does not overwrite
+/// the levels.rpf results.
+pub fn per_archive_name(base: &str, ext: &str, archive_id: &str) -> String {
+    let stem = index_stem(archive_id);
+    if stem == "levels" { format!("{base}.{ext}") } else { format!("{base}__{stem}.{ext}") }
+}
+
+/// Every per-archive side file of `base` in `dir`: levels.rpf's first,
+/// then the others in name order (earlier files win on duplicate keys).
+pub fn per_archive_files(dir: &Path, base: &str, ext: &str) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = vec![dir.join(format!("{base}.{ext}"))];
+    let pre = format!("{base}__");
+    let suf = format!(".{ext}");
+    let mut rest: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_name().to_str().is_some_and(|n| n.starts_with(&pre) && n.ends_with(&suf)))
+        .map(|e| e.path())
+        .collect();
+    rest.sort();
+    v.extend(rest);
+    v.retain(|p| p.is_file());
+    v
+}
+
 /// Resolve a user-supplied archive name ("levels", "levels.rpf",
 /// "data/ttdb/vehicles/ttdb_vehicles.ttpf", or a unique substring).
 pub fn resolve<'a>(all: &'a [ArchiveInfo], q: &str) -> Option<&'a ArchiveInfo> {

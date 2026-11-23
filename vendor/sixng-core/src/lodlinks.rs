@@ -76,11 +76,13 @@ pub struct FileRec {
     pub archs: Vec<(u32, ArchLod)>,
 }
 
-pub fn archetype_lod_path(ws: &Workspace) -> PathBuf {
-    ws.index_dir().join("archetype_lod.jsonl")
+/// `<work>/index/archetype_lod[__<archive>].jsonl` (one per archive).
+pub fn archetype_lod_path(ws: &Workspace, a: &ArchiveInfo) -> PathBuf {
+    ws.index_dir().join(crate::game::per_archive_name("archetype_lod", "jsonl", &a.id))
 }
-pub fn parents_path(ws: &Workspace) -> PathBuf {
-    ws.index_dir().join("lod_parents.jsonl")
+/// `<work>/index/lod_parents[__<archive>].jsonl` (one per archive).
+pub fn parents_path(ws: &Workspace, a: &ArchiveInfo) -> PathBuf {
+    ws.index_dir().join(crate::game::per_archive_name("lod_parents", "jsonl", &a.id))
 }
 
 pub fn read_file(a: &ArchiveInfo, e: &Entry) -> Option<FileRec> {
@@ -188,7 +190,7 @@ pub fn build(ws: &Workspace, a: &ArchiveInfo, metas: &[&Entry], progress: Progre
         arch.insert(*h, (v[best], v.len(), vals));
     }
     {
-        let mut w = std::io::BufWriter::new(fs::File::create(archetype_lod_path(ws))?);
+        let mut w = std::io::BufWriter::new(fs::File::create(archetype_lod_path(ws, a))?);
         let mut keys: Vec<_> = arch.keys().copied().collect();
         keys.sort();
         for h in keys {
@@ -430,7 +432,7 @@ pub fn build(ws: &Workspace, a: &ArchiveInfo, metas: &[&Entry], progress: Progre
             Some((f.id.clone(), out, st))
         })
         .collect();
-    let mut w = std::io::BufWriter::new(fs::File::create(parents_path(ws))?);
+    let mut w = std::io::BufWriter::new(fs::File::create(parents_path(ws, a))?);
     let mut t = St::default();
     for (id, v, s) in &results {
         if !v.is_empty() {
@@ -455,7 +457,7 @@ pub fn build(ws: &Workspace, a: &ArchiveInfo, metas: &[&Entry], progress: Progre
         "batch_parents": {"resolved": t.batch_ok, "ambiguous_resolved": t.batch_ambiguous, "by_index_and_name": t.batch_named, "unresolved": t.batch_none},
         "entity_parents": {"by_parent_hash": t.ent_hash, "by_region": t.ent_region, "by_position": t.ent_spatial, "unresolved": t.ent_none,
             "confidence": {"high": t.high, "medium": t.medium, "low": t.low}},
-        "out": [archetype_lod_path(ws), parents_path(ws)]}))
+        "out": [archetype_lod_path(ws, a), parents_path(ws, a)]}))
 }
 
 /// Archetype LOD table from `<work>/index/archetype_lod.jsonl` (empty if
@@ -467,13 +469,15 @@ pub fn load_archetype_lod(ws: &Workspace) -> HashMap<u32, ArchLod> {
 /// Same, from an index directory.
 pub fn load_archetype_lod_from(index_dir: &std::path::Path) -> HashMap<u32, ArchLod> {
     let mut m = HashMap::new();
-    let Ok(s) = fs::read_to_string(index_dir.join("archetype_lod.jsonl")) else { return m };
+    for p in crate::game::per_archive_files(index_dir, "archetype_lod", "jsonl") {
+    let Ok(s) = fs::read_to_string(p) else { continue };
     for l in s.lines() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(l) else { continue };
         let Some(h) = v["archetype"].as_str().and_then(|x| u32::from_str_radix(x, 16).ok()) else { continue };
         let f = |k: &str| v[k].as_f64().unwrap_or(-1.0) as f32;
         let c = |i: usize| v["bs_centre"][i].as_f64().unwrap_or(0.0) as f32;
-        m.insert(h, ArchLod { lod_dist: f("lod_dist"), hd_texture_dist: f("hd_texture_dist"), bs_radius: f("bs_radius"), bs_centre: [c(0), c(1), c(2)] });
+        m.entry(h).or_insert(ArchLod { lod_dist: f("lod_dist"), hd_texture_dist: f("hd_texture_dist"), bs_radius: f("bs_radius"), bs_centre: [c(0), c(1), c(2)] });
+    }
     }
     m
 }
@@ -487,8 +491,10 @@ pub fn load_parents(ws: &Workspace) -> HashMap<String, HashMap<u64, serde_json::
 /// Same, from an index directory.
 pub fn load_parents_from(index_dir: &std::path::Path) -> HashMap<String, HashMap<u64, serde_json::Value>> {
     let mut m: HashMap<String, HashMap<u64, serde_json::Value>> = HashMap::new();
-    let Ok(f) = fs::File::open(index_dir.join("lod_parents.jsonl")) else { return m };
     use std::io::BufRead;
+    // map ids carry their archive, so the per-archive files never collide
+    for p in crate::game::per_archive_files(index_dir, "lod_parents", "jsonl") {
+    let Ok(f) = fs::File::open(p) else { continue };
     for l in std::io::BufReader::new(f).lines().map_while(|l| l.ok()) {
         let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&l) else { continue };
         let Some(id) = v["map"].as_str().map(|s| s.to_string()) else { continue };
@@ -503,6 +509,7 @@ pub fn load_parents_from(index_dir: &std::path::Path) -> HashMap<String, HashMap
                 }
             }
         }
+    }
     }
     m
 }

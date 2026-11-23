@@ -2108,8 +2108,9 @@ pub fn export_paths(a: &ArchiveInfo, entries: &[&Entry], out: &Path, progress: P
 /// dictionary, +0x88 asset name (all joaat).
 pub const ARCHETYPE_DEF: u32 = 0x82d6_fc83;
 
-fn links_path(ws: &Workspace) -> PathBuf {
-    ws.index_dir().join("archetype_links.json")
+/// `<work>/index/archetype_links[__<archive>].json` (one per archive).
+pub fn links_path(ws: &Workspace, a: &ArchiveInfo) -> PathBuf {
+    ws.index_dir().join(game::per_archive_name("archetype_links", "json", &a.id))
 }
 
 /// Named drawables plus the archetype links from `sixng link-archetypes`
@@ -2117,7 +2118,8 @@ fn links_path(ws: &Workspace) -> PathBuf {
 /// drawable has no recovered name.
 pub fn model_names_linked(ws: &Workspace) -> std::collections::HashMap<u32, (String, String)> {
     let mut m = model_names_base(ws);
-    if let Some(v) = fs::read(links_path(ws)).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()) {
+    for p in game::per_archive_files(&ws.index_dir(), "archetype_links", "json") {
+    if let Some(v) = fs::read(p).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()) {
         if let Some(o) = v["links"].as_object() {
             for (k, x) in o {
                 let (Ok(h), Some(id)) = (u32::from_str_radix(k, 16), x["model_id"].as_str()) else { continue };
@@ -2125,6 +2127,7 @@ pub fn model_names_linked(ws: &Workspace) -> std::collections::HashMap<u32, (Str
                 m.entry(h).or_insert((name, id.to_string()));
             }
         }
+    }
     }
     m
 }
@@ -2386,7 +2389,7 @@ pub fn link_archetypes(ws: &Workspace, a: &ArchiveInfo, metas: &[&Entry], candid
     let doc = serde_json::json!({"note": "Archetypes (struct 82d6fc83) with no named drawable, linked first by the name stored inside an unindexed drawable (joaat match), else to the one drawable (unnamed, or named but not matching its own archetype) whose bounds equal the archetype bbox (0.03 m; ambiguous and degenerate boxes are not linked); names guessed by joaat of sibling-name stems. Merged into model_id resolution (placements, lights, ...). Regenerate with `sixng link-archetypes` after re-indexing.",
         "stats": stats, "links": links});
     fs::create_dir_all(ws.index_dir())?;
-    fs::write(links_path(ws), serde_json::to_vec_pretty(&doc)?)?;
+    fs::write(links_path(ws, a), serde_json::to_vec_pretty(&doc)?)?;
     Ok(stats)
 }
 
