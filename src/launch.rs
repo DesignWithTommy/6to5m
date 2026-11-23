@@ -30,12 +30,16 @@ const USAGE: &str = "usage: 6ixpack launch --game <dir> [--tuxbox <TuxBox checko
   --build-only build the providers, touch nothing in the game folder
   --stage-only build and stage the providers beside the exe, do not start it
   --restore    remove staged providers and put the original game files back
+  --debug      run under cdb (Windows Kits debugger): first-chance exceptions, the
+               crash event, registers, stack and loaded modules go to the log
+  --sandbox    run inside Sandboxie-Plus (box DefaultBox, or env SANDBOXIE_BOX); the
+               game's writes stay in the box; with --debug the cdb log is fetched back
 Needs Visual Studio Build Tools (x64 C++), cargo and the x86_64-pc-windows-msvc target.";
 
 /// (cargo package, output DLL, export table relative to the TuxBox root, extra import libs, extra C++ sources)
 const PROVIDERS: &[(&str, &str, &str, &[&str], &[&str])] = &[
     ("tuxbox-xmem-http", "tuxbox_xhttp.dll", "runtime/xmem/xhttp.def", &["winhttp.lib"], &[]),
-    ("tuxbox-xmem", "xmem.dll", "runtime/xmem/xmem.def", &["tuxbox_xhttp.lib"], &[]), // forwards XMemSetWinHttpHooks to tuxbox_xhttp
+    ("tuxbox-xmem", "xmem.dll", "runtime/xmem/xmem.def", &["tuxbox_xhttp.lib", "/include:DllMain"], &[]), // own DllMain must win over the libcmt stub; forwards XMemSetWinHttpHooks to tuxbox_xhttp
     ("tuxbox-acphal", "AcpHal.dll", "runtime/acphal/AcpHal.def", &[], &[]),
     ("tuxbox-xapu", "xapu.dll", "runtime/xapu/xapu.def", &[], &[]),
     ("tuxbox-xapu", "chad.dll", "runtime/xapu/chad.def", &[], &[]),
@@ -45,10 +49,10 @@ const PROVIDERS: &[(&str, &str, &str, &[&str], &[&str])] = &[
     ("tuxbox-xg", "xg_xs.dll", "runtime/xg/xg_xs.def", &[], &[]),
     ("tuxbox-dxc", "dxcompiler_xs.dll", "runtime/dxc/dxcompiler_xs.def", &[], &[]),
     ("tuxbox-d3d12", "d3d12_xs.dll", "runtime/d3d12/d3d12_xs.def", &["dxgi.lib", "d3d12.lib", "user32.lib", "d3dcompiler.lib"], &[]),
-    ("tuxbox-gameinput", "GameInput.dll", "runtime/gameinput/GameInput.def", &["user32.lib", "xinput.lib"], &["runtime/gameinput/abi.cpp"]),
+    ("tuxbox-gameinput", "GameInput.dll", "runtime/gameinput/GameInput.def", &["libcmt.lib", "user32.lib", "xinput.lib"] /* CRT first: xinput.lib also exports DllMain */, &["runtime/gameinput/abi.cpp"]),
 ];
 /// `rustc --print native-static-libs` for the MSVC target with +crt-static (TuxBox build.py).
-const RUST_STD_LIBS: &[&str] = &["/include:DllMain", "kernel32.lib", "ntdll.lib", "userenv.lib", "ws2_32.lib", "dbghelp.lib", "/defaultlib:libcmt"];
+const RUST_STD_LIBS: &[&str] = &["kernel32.lib", "ntdll.lib", "userenv.lib", "ws2_32.lib", "dbghelp.lib", "/defaultlib:libcmt"];
 const TARGET: &str = "x86_64-pc-windows-msvc";
 const BACKUP: &str = "_6ixpack_orig";
 const STAGED: &str = "_6ixpack_staged.txt";
@@ -63,6 +67,7 @@ enum Mode {
 
 pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
     let (mut game, mut tuxbox, mut exe, mut log, mut mode, mut game_args) = (None, env_path("TUXBOX_ROOT"), None, None, Mode::Run, Vec::new());
+    let (mut debug, mut sandbox) = (false, false);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut val = |n: &str| it.next().cloned().ok_or_else(|| format!("{n} needs a value\n{USAGE}"));
@@ -74,6 +79,8 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
             Some("--build-only") => mode = Mode::BuildOnly,
             Some("--stage-only") => mode = Mode::StageOnly,
             Some("--restore") => mode = Mode::Restore,
+            Some("--debug") => debug = true,
+            Some("--sandbox") => sandbox = true,
             Some("--") => {
                 game_args.extend(it.by_ref().cloned());
             }
@@ -109,7 +116,7 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
         println!("[launch] staged {} providers beside {}; not started (--stage-only)", dlls.len(), target.display());
         return Ok(());
     }
-    start(&game, &target, &game_args, log)
+    start(&game, &target, &game_args, log, debug, sandbox)
 }
 
 fn env_path(k: &str) -> Option<PathBuf> {
@@ -235,8 +242,10 @@ fn build_providers(tuxbox: &Path, out: &Path) -> Result<Vec<PathBuf>, Box<dyn Er
                 .arg(format!("/implib:{stem}.lib"))
                 .arg(format!("/out:{dll}"))
                 .args(&objs)
-                .arg(lib_dir.join(format!("{}.lib", pkg.replace('-', "_"))))
+                // extra libs (CRT first) before the Rust archive, so DllMain binds to the
+                // CRT stub, not to an import library that also exports it (xinput.lib)
                 .args(*libs)
+                .arg(lib_dir.join(format!("{}.lib", pkg.replace('-', "_"))))
                 .args(RUST_STD_LIBS),
             &format!("link {dll}"),
         )?;
@@ -287,8 +296,9 @@ fn restore(game: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Start the exe from its folder; stdout+stderr go to the console and the log.
-fn start(game: &Path, exe: &Path, args: &[OsString], log: Option<PathBuf>) -> Result<(), Box<dyn Error>> {
+/// Start the exe from its folder (optionally under cdb and/or in Sandboxie);
+/// stdout+stderr go to the console and the log.
+fn start(game: &Path, exe: &Path, args: &[OsString], log: Option<PathBuf>, debug: bool, sandbox: bool) -> Result<(), Box<dyn Error>> {
     let log = log.unwrap_or_else(|| {
         let base = env_path("LOCALAPPDATA").unwrap_or_else(std::env::temp_dir).join("6ixpack/logs");
         let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
@@ -298,12 +308,38 @@ fn start(game: &Path, exe: &Path, args: &[OsString], log: Option<PathBuf>) -> Re
         fs::create_dir_all(p)?;
     }
     let file = fs::OpenOptions::new().create(true).append(true).open(&log)?;
+    let cdb_log = log.with_extension("cdb.txt");
+    let mut argv: Vec<OsString> = vec![exe.as_os_str().into()];
+    argv.extend(args.iter().cloned());
+    if debug {
+        let cdb = find_cdb().ok_or("--debug needs cdb.exe (Windows SDK 'Debugging Tools for Windows')")?;
+        let _ = fs::remove_file(&cdb_log);
+        // -g/-G: skip the initial and final breaks; first-chance exceptions are logged
+        // as they happen; at the fatal event print it, registers, stack and modules.
+        let mut d: Vec<OsString> = vec![cdb.into(), "-g".into(), "-G".into(), "-logo".into(), cdb_log.clone().into(), "-c".into(),
+            ".lastevent; r; kn 40; .ecxr; kn 40; lm o; q".into()];
+        d.extend(argv);
+        argv = d;
+    }
+    if sandbox {
+        let start = Path::new(&std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into())).join(r"Sandboxie-Plus\Start.exe");
+        if !start.is_file() {
+            return Err(format!("--sandbox needs Sandboxie-Plus ({} not found)", start.display()).into());
+        }
+        let bx = std::env::var("SANDBOXIE_BOX").unwrap_or_else(|_| "DefaultBox".into());
+        let mut w: Vec<OsString> = vec![start.into(), format!("/box:{bx}").into(), "/wait".into()];
+        w.extend(argv);
+        argv = w;
+    }
     println!("[launch] log: {}", log.display());
-    println!("[launch] starting {}", exe.display());
+    if debug {
+        println!("[launch] debugger log: {}", cdb_log.display());
+    }
+    println!("[launch] starting {}", argv.iter().map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" "));
     let t = Instant::now();
-    let mut child = Command::new(exe)
+    let mut child = Command::new(&argv[0])
         .current_dir(game)
-        .args(args)
+        .args(&argv[1..])
         .env("TUXBOX_LOG", std::env::var("TUXBOX_LOG").unwrap_or_else(|_| "stderr".into()))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -318,9 +354,64 @@ fn start(game: &Path, exe: &Path, args: &[OsString], log: Option<PathBuf>) -> Re
         })
     };
     let a = tee(Box::new(child.stdout.take().unwrap()), file.try_clone()?);
-    let b = tee(Box::new(child.stderr.take().unwrap()), file);
+    let b = tee(Box::new(child.stderr.take().unwrap()), file.try_clone()?);
     let status = child.wait()?;
     let _ = (a.join(), b.join());
-    println!("[launch] exited with {status} after {:.1}s (log {})", t.elapsed().as_secs_f64(), log.display());
+    println!("[launch] exited with {status}{} after {:.1}s", status.code().map(|c| format!(" (0x{:08x}{})", c as u32, ntstatus(c as u32))).unwrap_or_default(), t.elapsed().as_secs_f64());
+    if debug {
+        // Sandboxie redirects the debugger's log write into the box; fetch it back.
+        if !cdb_log.is_file() && sandbox {
+            if let Some(boxed) = sandboxed_copy(&cdb_log) {
+                let _ = fs::copy(boxed, &cdb_log);
+            }
+        }
+        match fs::read_to_string(&cdb_log) {
+            Ok(text) => {
+                let mut f = file;
+                let _ = writeln!(f, "---- cdb ----\n{text}");
+                for l in text.lines().filter(|l| l.contains("chance") || l.starts_with("Subcode") || l.starts_with("Last event")).take(12) {
+                    println!("[launch:debug] {l}");
+                }
+                let stack: Vec<_> = text.lines().filter(|l| l.len() > 3 && l.as_bytes()[2] == b' ' && l[..2].chars().all(|c| c.is_ascii_hexdigit())).take(12).collect();
+                for l in stack {
+                    println!("[launch:debug] {l}");
+                }
+            }
+            Err(_) => println!("[launch:debug] no debugger log at {}", cdb_log.display()),
+        }
+    }
+    println!("[launch] log: {}", log.display());
     Ok(())
+}
+
+fn find_cdb() -> Option<PathBuf> {
+    ["ProgramFiles(x86)", "ProgramFiles"]
+        .iter()
+        .filter_map(|k| std::env::var(k).ok())
+        .map(|p| Path::new(&p).join(r"Windows Kits\10\Debuggers\x64\cdb.exe"))
+        .find(|p| p.is_file())
+}
+
+/// Where Sandboxie puts a file the boxed process wrote under the user profile.
+fn sandboxed_copy(p: &Path) -> Option<PathBuf> {
+    let user = std::env::var("USERNAME").ok()?;
+    let bx = std::env::var("SANDBOXIE_BOX").unwrap_or_else(|_| "DefaultBox".into());
+    let profile = env_path("USERPROFILE")?;
+    let rel = p.strip_prefix(&profile).ok()?;
+    let c = Path::new(r"C:\Sandbox").join(user).join(bx).join(r"user\current").join(rel);
+    c.is_file().then_some(c)
+}
+
+fn ntstatus(c: u32) -> &'static str {
+    match c {
+        0xc0000005 => ", access violation",
+        0xc0000409 => ", fail-fast / stack buffer overrun",
+        0xc0000135 => ", DLL not found",
+        0xc0000139 => ", entry point (import) not found",
+        0xc000007b => ", bad DLL image",
+        0xc0000142 => ", DLL init failed",
+        0xc000001d => ", illegal instruction",
+        0x80000003 => ", breakpoint",
+        _ => "",
+    }
 }
