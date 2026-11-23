@@ -201,7 +201,7 @@ pub fn props(ctx: &Ctx, index: &sixng_core::scan::ArchiveIndex) -> Vec<(Value, [
             if !ctx.o.in_bbox(lo, hi) {
                 continue;
             }
-            let off = b["model_id"].as_str().and_then(|m| m.strip_prefix("levels.rpf@")).and_then(|h| usize::from_str_radix(h.split('#').next().unwrap_or(h), 16).ok());
+            let off = b["model_id"].as_str().and_then(|m| ctx.voff_of(m));
             let (Some(model), Some(_)) = (b["name"].as_str(), off) else { continue };
             let c: [f32; 3] = std::array::from_fn(|k| (lo[k] + hi[k]) * 0.5);
             let (first, count) = (b["first"].as_u64().unwrap_or(0) as usize, b["count"].as_u64().unwrap_or(0) as usize);
@@ -293,7 +293,7 @@ pub fn grass_archetypes(ctx: &Ctx, index: &sixng_core::scan::ArchiveIndex) -> Ve
         if !ctx.o.in_bbox(f3(&b["bbox"][0]), f3(&b["bbox"][1])) {
             continue;
         }
-        let off = b["model_id"].as_str().and_then(|m| m.strip_prefix("levels.rpf@")).and_then(|h| usize::from_str_radix(h.split('#').next().unwrap_or(h), 16).ok());
+        let off = b["model_id"].as_str().and_then(|m| ctx.voff_of(m));
         if let (Some(n), Some(off)) = (b["name"].as_str(), off) {
             seen.entry(n.to_string()).or_insert(off);
         }
