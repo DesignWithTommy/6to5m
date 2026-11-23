@@ -871,8 +871,11 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
 
 /// peds.meta with one CPedModelInfo entry (ambient civilian defaults).
 fn peds_meta(ped: &str, female: bool) -> String {
+    // pose matcher: every vanilla ped (female too) uses Male / Male_prone
+    // (update.rpf peds.ymt); any other name takes a new PoseMatcherStore
+    // slot and the full pool (28) crashes the data file mounter
     let (ptype, clip, expr, gest, face, visem, pose, capsule, perso) = if female {
-        ("CIVFEMALE", "move_f@generic", "expr_set_ambient_female", "ANIM_GROUP_GESTURE_F_GENERIC", "facial_clipset_group_gen_female", "ANIM_GROUP_VISEMES_F_LO", "Female", "STANDARD_FEMALE", "YoungFemale")
+        ("CIVFEMALE", "move_f@generic", "expr_set_ambient_female", "ANIM_GROUP_GESTURE_F_GENERIC", "facial_clipset_group_gen_female", "ANIM_GROUP_VISEMES_F_LO", "Male", "STANDARD_FEMALE", "YoungFemale")
     } else {
         ("CIVMALE", "move_m@generic", "expr_set_ambient_male", "ANIM_GROUP_GESTURE_M_GENERIC", "facial_clipset_group_gen_male", "ANIM_GROUP_VISEMES_M_LO", "Male", "STANDARD_MALE", "YoungMale")
     };
