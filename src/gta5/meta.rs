@@ -347,6 +347,15 @@ const LODLIGHT_E: &[(u32, i32, u8, u8, i16, u32)] = &[
     (0x00000100, 0, 0x11, 0, 0, 0x00000000),
     (0x88a2b1fb, 120, 0x52, 0, 14, 0x00000000),
 ];
+/// FloatXYZ (CodeWalker MetaTypes): element type of the LOD light
+/// direction / position arrays. Any meta with FloatXYZ data blocks must
+/// declare it, or the game's meta loader finds no structure for the block.
+pub(crate) const FLOATXYZ: SInfo = SInfo { name: 0xe2cbcfd4, key: 0xa3fefcd0, unk8: 0x200, size: 12, entries: FLOATXYZ_E };
+const FLOATXYZ_E: &[(u32, i32, u8, u8, i16, u32)] = &[
+    (0x9303a5e5, 0, 0x21, 0, 0, 0x00000000),
+    (0x80950108, 4, 0x21, 0, 0, 0x00000000),
+    (0xb6606c9e, 8, 0x21, 0, 0, 0x00000000),
+];
 pub(crate) const DISTLODLIGHT: SInfo = SInfo { name: 0x793441f4, key: 0xa823a583, unk8: 0x300, size: 48, entries: DISTLODLIGHT_E };
 const DISTLODLIGHT_E: &[(u32, i32, u8, u8, i16, u32)] = &[
     (0x00000100, 0, 0x05, 0, 0, 0xe2cbcfd4),

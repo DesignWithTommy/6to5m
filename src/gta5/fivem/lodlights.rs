@@ -214,6 +214,10 @@ fn mapdata(mut mb: MB, name: &str, parent: &str, flags: u32, content: u32, se: [
     mb.sinfo(&meta::INSTANCED);
     mb.sinfo(&meta::LODLIGHT);
     mb.sinfo(&meta::DISTLODLIGHT);
+    // the direction/position arrays are FloatXYZ blocks (CodeWalker
+    // YmapFile.BuildCMapData adds this whenever LOD lights are present);
+    // without it the loader crashed on a null structure (+1361943)
+    mb.sinfo(&meta::FLOATXYZ);
     mb.sinfo(&meta::BLOCKDESC);
     mb.sinfo(&meta::CMAPDATA);
     let mut w = W::new();
