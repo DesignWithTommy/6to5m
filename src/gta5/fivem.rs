@@ -35,6 +35,7 @@ mod weapons;
 mod frags;
 mod vlog;
 mod texslot;
+mod quality;
 pub mod verify;
 
 use memmap2::Mmap;
@@ -518,6 +519,7 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
     })();
     ctx.save_manifest()?;
     diagnostics(&ctx, t0.elapsed().as_secs_f64());
+    quality::finish(&ctx.o.out);
     regionlog::finish(&ctx.o.out, &ctx.stream);
     let r = ctx.report.lock().unwrap();
     let written = r.outputs.iter().filter(|v| v["status"] == "written").count();

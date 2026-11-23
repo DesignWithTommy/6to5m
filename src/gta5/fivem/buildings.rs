@@ -433,12 +433,16 @@ impl Pools {
             return Err(format!("format {} / tile mode {} not decodable", t.dxgi_format, t.tile_mode()));
         }
         let (data, skipped) = store.data_ex(t).map_err(|e| e.to_string())?;
+        if skipped > 0 {
+            super::quality::hit("bcpack_skipped_mips", 1, || format!("{h64:016x} {}x{} fmt {}: {skipped} top mips without clean data", t.width, t.height, t.dxgi_format));
+        }
         let mip = if skipped == 0 { 0 } else { store.best_mip(t).ok_or("only BCPack mips")? };
         let (rgba, w, h) = sixng_core::ttpf::decode_rgba(t, &data, mip).map_err(|e| e.to_string())?;
         if w <= 8 && h <= 8 {
             return Err("placeholder (8 px or less)".into());
         }
         if let Some(why) = bad_colour(&rgba) {
+            super::quality::hit("flat_decode", 1, || format!("ttpf {h64:016x} {w}x{h}: {why}"));
             return Err(why.into());
         }
         let dds = rgba_dds(&rgba, w, h);
@@ -1224,7 +1228,10 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: us
                         // fallback (non-colour slot): AO/roughness maps are
                         // grayscale and pass bad_colour; never use them as diffuse
                         Ok(p) if !COLOR_SLOTS.contains(&t.param) && near_gray(&p) => errs.push(format!("{:08x}: grayscale map in non-colour slot", t.hash)),
-                        Ok(p) => return tex_name(&p),
+                        Ok(p) => {
+                            super::quality::hit("colour_pick", 1, || format!("{name} mat {:08x} slot {:08x} -> {:08x}", mat.shader_hash, t.param, t.hash));
+                            return tex_name(&p);
+                        }
                         Err(e) => errs.push(format!("{:08x}: {e}", t.hash)),
                     }
                 }
@@ -1278,6 +1285,10 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: us
                     Some(g) => g.1.extend_from_slice(t),
                     None => groups.push((c, t.to_vec())),
                 }
+            }
+            let fill = sm.indices.chunks_exact(3).filter(|t| cols.get(t[0] as usize).and_then(|c| pal.get(base + (c >> 16 & 255) as usize)).is_some_and(|p| [p[0], p[1], p[2]] == PALETTE_FILL)).count();
+            if fill > 0 {
+                super::quality::hit("palette_fill", fill as u64, || format!("{name}: {fill} of {} triangles (row {row})", sm.indices.len() / 3));
             }
             for (c, idx) in groups {
                 let t = if c == [255; 3] { tex.clone() } else { tinted(pools, &tex, c).unwrap_or_else(|_| tex.clone()) };
@@ -1346,7 +1357,10 @@ fn sixng_mesh(ctx: &Ctx, pools: &Pools, an: &str, e: &Entry) -> Result<Built, St
                         let hash = u32::from_str_radix(&t.hash32, 16).unwrap_or(0);
                         let key = emb.as_ref().and_then(|e| e.by_hash(hash)).and_then(|x| x.asset_key).unwrap_or_else(|| key_of(sh, t.param));
                         match pools.get(hash, key, u64::from_str_radix(&t.hash64, 16).unwrap_or(0)) {
-                            Ok(p) => return tex_name(&p),
+                            Ok(p) => {
+                                super::quality::hit("colour_pick", 1, || format!("{an} shader {:?} slot {} -> {hash:08x}", sh.name_hash, t.param_hash));
+                                return tex_name(&p);
+                            }
                             Err(e) => errs.push(format!("{hash:08x}: {e}")),
                         }
                     }
