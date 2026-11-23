@@ -57,6 +57,42 @@ pub fn save(ctx: &Ctx) -> Result<(), String> {
 
 const CELL: i64 = 512;
 
+/// `name` of a `[name]` resource category dir.
+pub fn category(p: &Path) -> Option<String> {
+    let n = p.file_name()?.to_string_lossy().to_lowercase();
+    let b = n.strip_prefix('[')?.strip_suffix(']')?;
+    (!b.is_empty()).then(|| b.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect())
+}
+
+/// Build start and the resource each stream file sat in before the build
+/// (category mode), so the split reports only resources that changed.
+static ORIGIN: std::sync::Mutex<Option<(std::time::SystemTime, HashMap<String, String>)>> = std::sync::Mutex::new(None);
+
+/// Category mode: move the stream files of the build's other resources
+/// (`<base>_*`) into the main stream (renames on one volume, bytes and mtime
+/// kept) so every part sees the whole output; `split` moves them back.
+pub fn gather(root: &Path, stream: &Path) -> Result<(), Box<dyn Error>> {
+    let base = category(root).unwrap_or_default();
+    let main = stream.parent().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut origin = HashMap::new();
+    for e in fs::read_dir(stream)?.flatten() {
+        origin.insert(e.file_name().to_string_lossy().into_owned(), main.clone());
+    }
+    for d in fs::read_dir(root)?.flatten() {
+        let name = d.file_name().to_string_lossy().into_owned();
+        if name == main || !(name == base || name.starts_with(&format!("{base}_"))) {
+            continue;
+        }
+        for e in fs::read_dir(d.path().join("stream")).into_iter().flatten().flatten() {
+            let f = e.file_name().to_string_lossy().into_owned();
+            fs::rename(e.path(), stream.join(&f))?;
+            origin.insert(f, name.clone());
+        }
+    }
+    *ORIGIN.lock().unwrap() = Some((std::time::SystemTime::now(), origin));
+    Ok(())
+}
+
 /// (cx, cy) of a `<prefix>XX_YY.<ext>` cell file (XX = cell + 50).
 fn cell_of(stem: &str) -> Option<(i64, i64)> {
     // 128 m collision cells (t6m_cc_XXX_YYY, XXX = cell + 200) -> their 512 m cell
@@ -96,7 +132,10 @@ fn idx(v: i64) -> String {
 
 pub fn split(ctx: &Ctx, metres: f32, max_mb: u64) -> Result<(), Box<dyn Error>> {
     let top = ((metres.max(CELL as f32) / CELL as f32).round() as i64).max(1) * CELL;
-    let base: String = ctx.o.out.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_else(|| "t6m".into()).chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
+    let base: String = match &ctx.root {
+        Some(r) => category(r).unwrap_or_default(),
+        None => ctx.o.out.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_else(|| "t6m".into()).chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect(),
+    };
     let common = format!("{base}_common");
     let lay = ctx.layout.lock().unwrap();
     let files: Vec<(String, u64)> = fs::read_dir(&ctx.stream)?
@@ -153,7 +192,8 @@ pub fn split(ctx: &Ctx, metres: f32, max_mb: u64) -> Result<(), Box<dyn Error>> 
             continue;
         }
         // write
-        let root = ctx.o.out.join(format!("[{base}]"));
+        let root = ctx.root.clone().unwrap_or_else(|| ctx.o.out.join(format!("[{base}]")));
+        let origin = ORIGIN.lock().unwrap();
         // synced in place: unchanged files keep their link (and mtime), so
         // FXServer only rehashes resources whose files changed
         fs::create_dir_all(&root)?;
@@ -171,7 +211,10 @@ pub fn split(ctx: &Ctx, metres: f32, max_mb: u64) -> Result<(), Box<dyn Error>> 
             let st = dir.join("stream");
             fs::create_dir_all(&st)?;
             let want: BTreeSet<&str> = v.iter().map(|f| f.0.as_str()).collect();
-            for e in fs::read_dir(&st)?.flatten() {
+            // category mode: the main stream is common's own stream and
+            // still holds the region files (pruning is prune()'s job)
+            let in_place = st == ctx.stream;
+            for e in fs::read_dir(&st)?.flatten().filter(|_| !in_place) {
                 if !want.contains(e.file_name().to_string_lossy().as_ref()) {
                     fs::remove_file(e.path())?;
                     ch = true;
@@ -179,6 +222,17 @@ pub fn split(ctx: &Ctx, metres: f32, max_mb: u64) -> Result<(), Box<dyn Error>> 
             }
             for (f, _) in v {
                 let (src, dst) = (ctx.stream.join(f), st.join(f));
+                if let Some((t0, from)) = &*origin {
+                    // category mode: move, no second link
+                    let new = fs::metadata(&src).and_then(|m| m.modified()).is_ok_and(|m| m >= *t0);
+                    if new || from.get(f.as_str()) != Some(&name) {
+                        ch = true;
+                    }
+                    if !in_place {
+                        fs::rename(&src, &dst)?;
+                    }
+                    continue;
+                }
                 let stamp = |p: &Path| fs::metadata(p).ok().map(|m| (m.len(), m.modified().ok()));
                 if stamp(&dst).is_none() || stamp(&dst) != stamp(&src) {
                     super::link_into(&src, &dst)?;
@@ -240,12 +294,17 @@ pub fn split(ctx: &Ctx, metres: f32, max_mb: u64) -> Result<(), Box<dyn Error>> 
         super::live_report(ctx, &changed);
         // resources from an earlier split layout
         for e in fs::read_dir(&root)?.flatten() {
-            if e.path().is_dir() && !names.iter().any(|n| e.file_name().to_string_lossy() == n.as_str()) {
+            let n = e.file_name().to_string_lossy().into_owned();
+            // in a category dir only the build's own resources are touched
+            let ours = ctx.root.is_none() || n == base || n.starts_with(&format!("{base}_"));
+            if ours && e.path().is_dir() && !names.iter().any(|x| n == x.as_str()) {
                 fs::remove_dir_all(e.path())?;
             }
         }
         // <out> itself must not be a resource any more, or FiveM loads both
-        let _ = fs::remove_file(ctx.o.out.join("fxmanifest.lua"));
+        if ctx.root.is_none() {
+            let _ = fs::remove_file(ctx.o.out.join("fxmanifest.lua"));
+        }
         eprintln!("split: {} resources in {} ({} m regions, cap {max_mb} MB)", names.len(), root.display(), top);
         ctx.report.lock().unwrap().outputs.push(json!({"file": format!("[{base}]"), "status": "split", "resources": summary}));
         return Ok(());

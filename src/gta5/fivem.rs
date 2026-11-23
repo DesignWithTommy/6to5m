@@ -55,7 +55,9 @@ use std::{
 pub const USAGE: &str = "\
 usage: 6ixpack fivem build --game <dir> --out <resource dir> [options]
   --game <dir>         GTA VI install (levels.rpf, data/ttdb)
-  --out <dir>          FiveM resource directory (stream/, fxmanifest.lua, water.xml)
+  --out <dir>          FiveM resource directory (stream/, fxmanifest.lua, water.xml),
+                       or a [name] category (e.g. server-data/resources/[t6m]):
+                       resources are written there directly, no build dir
   --bbox x0,y0,x1,y1   world region (metres); default: everything
   --offset dx,dy[,dz]  shift every output by this (metres; --bbox stays in 6m
                        coordinates). GTA VI reaches y 9474, past GTA V's ~8000
@@ -186,6 +188,8 @@ pub struct Pack {
 pub struct Ctx {
     pub o: Opts,
     pub stream: PathBuf,
+    /// the `[name]` category dir when --out is one (resources written in place)
+    pub root: Option<PathBuf>,
     pub levels: Mmap,
     /// Other placement archives (PACK_ARCHIVES that are present and
     /// indexed). Model offsets into them are "virtual": the 1-based slot in
@@ -449,11 +453,23 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
             return Ok(());
         }
     }
-    let o = parse(&args[1..])?;
+    let mut o = parse(&args[1..])?;
     crate::gta5::meta::set_world_offset(o.offset);
     let t0 = std::time::Instant::now();
+    // `--out <dir>/[name]` (a FiveM resource category, e.g.
+    // server-data/resources/[t6m]): resources are written straight into it,
+    // no build dir. The main resource (`name`, or `name_common` with
+    // --split) takes the place of <out>; the deployed files are the cache.
+    let root = split::category(&o.out).map(|_| o.out.clone());
+    if let Some(r) = &root {
+        let base = split::category(r).unwrap();
+        o.out = r.join(if o.split.is_some() { format!("{base}_common") } else { base });
+    }
     let stream = o.out.join("stream");
     fs::create_dir_all(&stream)?;
+    if let Some(r) = &root {
+        split::gather(r, &stream)?;
+    }
     let lp = o.game.join("levels.rpf");
     let lf = fs::File::open(&lp).map_err(|e| format!("{}: {e}", lp.display()))?;
     let input_time = lf.metadata()?.modified()?;
@@ -492,7 +508,7 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
     } else {
         Vec::new()
     };
-    let ctx = Ctx { o, stream, levels, packs, input_time, manifest: Mutex::new(manifest), report: Mutex::new(Report::default()), layout: Mutex::new(layout), emitted: Default::default(), manifest_path, input_stamp };
+    let ctx = Ctx { o, stream, root, levels, packs, input_time, manifest: Mutex::new(manifest), report: Mutex::new(Report::default()), layout: Mutex::new(layout), emitted: Default::default(), manifest_path, input_stamp };
     let part = |p: &str| ctx.o.only.iter().any(|x| x == p);
 
     let result = (|| -> Result<(), Box<dyn Error>> {
