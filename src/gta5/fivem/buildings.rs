@@ -1495,8 +1495,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     // previous one, gtxd.meta) made every building load the whole chain
     // (~390 MB at the airport, 18 ytds over 16 MB): blurry walls, checkered
     // glass. Each model now loads only its own txd (<= TXD_CAP).
-    let mut shared: Vec<String> = if std::env::var_os("T6M_SHARED_TXD").is_some() { users.iter().filter(|(_, f)| f.len() > 1).map(|(t, _)| (*t).clone()).collect() } else { Vec::new() };
-    shared.sort();
+    let shared: Vec<String> = Vec::new();
     let is_shared: HashSet<&String> = shared.iter().collect();
     // (file stem, textures, parent)
     let mut dicts: Vec<(String, Vec<String>, Option<String>)> = Vec::new();
