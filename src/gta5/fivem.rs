@@ -27,6 +27,7 @@ mod geom;
 mod lsremove;
 mod minimap;
 mod nav;
+mod regionlog;
 pub mod split;
 mod terrain;
 mod vehicles;
@@ -93,7 +94,7 @@ pub const TEX_V: &str = "tex2";
 pub const YDR_V: &str = "ydr14";
 /// Fragment props as dynamic .yft (fivem/frags.rs).
 pub const FRAG_V: &str = "frag4";
-pub const YBN_V: &str = "ybn3";
+pub const YBN_V: &str = "ybn5";
 pub const TERRAIN_V: &str = "terrain2";
 /// Meta files (ymap/ytyp) and water.xml are rebuilt every run and compared
 /// byte for byte, so they need no version. MANIFEST_V is the manifest layout.
@@ -519,6 +520,7 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
     ctx.save_manifest()?;
     diagnostics(&ctx, t0.elapsed().as_secs_f64());
     quality::finish(&ctx.o.out);
+    regionlog::finish(&ctx.o.out, &ctx.stream);
     let r = ctx.report.lock().unwrap();
     let written = r.outputs.iter().filter(|v| v["status"] == "written").count();
     println!(

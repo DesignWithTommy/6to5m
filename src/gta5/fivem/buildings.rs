@@ -895,6 +895,7 @@ fn load_places(ctx: &Ctx, dir: &Path, index: &ArchiveIndex) -> Result<Vec<Place>
         let k = (name.clone(), (pos[0] * 10.0).round() as i64, (pos[1] * 10.0).round() as i64, (pos[2] * 10.0).round() as i64);
         let rots: &mut Vec<[f32; 4]> = seen.entry(k).or_default();
         if rots.iter().any(|r| (0..4).map(|i| r[i] * stored[i]).sum::<f32>().abs() > 0.9995) {
+            super::regionlog::bump("dedup_drops", "same model, spot and rotation", &name);
             return;
         }
         rots.push(stored);
@@ -1413,6 +1414,9 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
     if let Some(info) = ctx.up_to_date(&file, &fp).filter(trusted) {
         let a = from_info(&info);
         if a.texs.iter().all(|t| pools.dir.join(format!("{}.dds", &t[4..])).exists()) {
+            // per-file stats stored with the cache entry (older entries: unknown)
+            let lods = info["lods"].as_u64().map_or("unknown (cached before stats)".to_string(), |n| n.to_string());
+            super::regionlog::bump_n("ydr_lod_levels", &format!("{lods} (cached)"), &an, info["bytes"].as_u64().unwrap_or(0));
             if frag {
                 super::vlog::cached(&file, info.get("t6m_vehicles"));
             }
@@ -1494,8 +1498,10 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
         None => ydr::build_ydr(&mesh, 9998.0, None),
     }
     .map_err(|e| format!("{file}: {e}"))?;
+    let n_lod = 1 + lower.iter().filter(|l| !l.geoms.is_empty()).count();
+    super::regionlog::bump_n("ydr_lod_levels", &format!("{n_lod} (fresh)"), &an, bytes.len() as u64);
     let alpha: std::collections::BTreeSet<&String> = mesh.geoms.iter().filter(|g| g.kind != 0).map(|g| &g.texture).collect();
-    let mut info = json!({"lo": lo, "hi": hi, "texs": texs, "alpha": alpha, "tpx": texel_px(&mesh), "writer": writer});
+    let mut info = json!({"lo": lo, "hi": hi, "texs": texs, "alpha": alpha, "tpx": texel_px(&mesh), "writer": writer, "lods": n_lod, "bytes": bytes.len()});
     if frag {
         // [t6m:vehicles] record, kept in the cache info for cached builds
         info["t6m_vehicles"] = super::vlog::fresh(&file, &bytes, cols.len().max(1), frag_out.then_some(delta));
@@ -1583,111 +1589,42 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
             }
         }
     }
-    // Shallow txd tree from 6m's own sharing (depth <= 2, gtxd.meta):
-    // - root t6m_shr_root: the most widely used textures (>= ROOT_USERS
-    //   families), most used first, up to TXD_CAP;
-    // - one group parent per exact set of families using a texture
-    //   (t6m_shrNNNN, split at TXD_CAP), parent = root;
-    // - each family txd's parent is the group holding most of its shared
-    //   bytes; shared textures in other groups are copied into it.
-    // The old linear chain (each shr the parent of the next) made every
-    // building load all of it (~390 MB at the airport). Worst case now per
-    // model: own txd + one group + root, each <= TXD_CAP.
-    const ROOT_USERS: usize = 8;
-    let mut by_use: Vec<(&String, usize)> = users.iter().filter(|(_, f)| f.len() >= ROOT_USERS).map(|(t, f)| (*t, f.len())).collect();
-    by_use.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-    let mut root: Vec<String> = Vec::new();
-    let mut rsize = 0u64;
-    for (t, _) in by_use {
-        let s = tsize(t);
-        if rsize + s > TXD_CAP {
-            continue;
-        }
-        rsize += s;
-        root.push(t.clone());
-    }
-    root.sort();
-    let in_root: HashSet<&String> = root.iter().collect();
-    let root_name = (!root.is_empty()).then(|| "t6m_shr_root".to_string());
+    // No shared parent chain: a texture used by several families is copied
+    // into each family txd. A linear t6m_shr chain (each txd's parent is the
+    // previous one, gtxd.meta) made every building load the whole chain
+    // (~390 MB at the airport, 18 ytds over 16 MB): blurry walls, checkered
+    // glass. Each model now loads only its own txd (<= TXD_CAP).
+    let shared: Vec<String> = Vec::new();
+    let is_shared: HashSet<&String> = shared.iter().collect();
     // (file stem, textures, parent)
     let mut dicts: Vec<(String, Vec<String>, Option<String>)> = Vec::new();
-    if let Some(r) = &root_name {
-        dicts.push((r.clone(), root.clone(), None));
-    }
-    let mut buckets: BTreeMap<Vec<&String>, Vec<&String>> = BTreeMap::new();
-    for (t, f) in &users {
-        if f.len() > 1 && !in_root.contains(t) {
-            let mut k: Vec<&String> = f.iter().copied().collect();
-            k.sort();
-            buckets.entry(k).or_default().push(*t);
-        }
-    }
-    // texture -> group txd
-    let mut group_of: HashMap<String, String> = HashMap::new();
-    let mut n_grp = 0usize;
-    for (_, mut ts) in buckets {
-        ts.sort();
+    {
         let (mut cur, mut size): (Vec<String>, u64) = (Vec::new(), 0);
-        let mut flush = |cur: &mut Vec<String>, dicts: &mut Vec<(String, Vec<String>, Option<String>)>, group_of: &mut HashMap<String, String>| {
-            let name = format!("t6m_shr{n_grp:04}");
-            n_grp += 1;
-            for t in cur.iter() {
-                group_of.insert(t.clone(), name.clone());
-            }
-            dicts.push((name, std::mem::take(cur), root_name.clone()));
-        };
-        for t in ts {
+        for t in &shared {
             let s = tsize(t);
             if !cur.is_empty() && size + s > TXD_CAP {
-                flush(&mut cur, &mut dicts, &mut group_of);
+                let n = dicts.len();
+                dicts.push((format!("t6m_shr{n:04}"), std::mem::take(&mut cur), n.checked_sub(1).map(|p| format!("t6m_shr{p:04}"))));
                 size = 0;
             }
             cur.push(t.clone());
             size += s;
         }
         if !cur.is_empty() {
-            flush(&mut cur, &mut dicts, &mut group_of);
+            let n = dicts.len();
+            dicts.push((format!("t6m_shr{n:04}"), cur, n.checked_sub(1).map(|p| format!("t6m_shr{p:04}"))));
         }
     }
-    let shared_n = in_root.len() + group_of.len();
-    // family -> parent: the group with most of its shared bytes (else root)
-    let parent_of = |v: &Vec<&Arch>| -> Option<String> {
-        let mut score: HashMap<&String, u64> = HashMap::new();
-        let mut seen = HashSet::new();
-        for a in v {
-            for t in &a.texs {
-                if seen.insert(t) {
-                    if let Some(g) = group_of.get(t) {
-                        *score.entry(g).or_default() += tsize(t);
-                    }
-                }
-            }
-        }
-        score.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(a.0))).map(|x| x.0.clone()).or_else(|| root_name.clone())
-    };
+    let top_shared = dicts.last().map(|d| d.0.clone());
     let mut txd_of: HashMap<String, String> = HashMap::new();
     let mut fam_n = 0usize;
     let (mut cur, mut size): (Vec<String>, u64) = (Vec::new(), 0);
     let mut members: Vec<String> = Vec::new();
-    let mut cur_parent: Option<String> = None;
     let n_fam = fam.len();
     for (fi, (_, mut v)) in fam.into_iter().enumerate() {
         v.sort_by(|a, b| a.an.cmp(&b.an));
-        let par = parent_of(&v);
-        // small families are packed together only under the same parent
-        if par != cur_parent && !members.is_empty() {
-            let name = format!("t6m_txd{fam_n:04}");
-            fam_n += 1;
-            for m in members.drain(..) {
-                txd_of.insert(m, name.clone());
-            }
-            dicts.push((name, std::mem::take(&mut cur), cur_parent.clone()));
-            size = 0;
-        }
-        cur_parent = par.clone();
-        let own = |t: &&String| !in_root.contains(*t) && group_of.get(*t) != par.as_ref();
         for a in v {
-            let mut new: Vec<&String> = a.texs.iter().filter(|t| own(t) && !cur.contains(t)).collect();
+            let mut new: Vec<&String> = a.texs.iter().filter(|t| !is_shared.contains(t) && !cur.contains(t)).collect();
             let add: u64 = new.iter().map(|t| tsize(t)).sum();
             if !cur.is_empty() && size + add > TXD_CAP {
                 let name = format!("t6m_txd{fam_n:04}");
@@ -1695,9 +1632,9 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
                 for m in members.drain(..) {
                     txd_of.insert(m, name.clone());
                 }
-                dicts.push((name, std::mem::take(&mut cur), par.clone()));
+                dicts.push((name, std::mem::take(&mut cur), top_shared.clone()));
                 size = 0;
-                new = a.texs.iter().filter(|t| own(t)).collect();
+                new = a.texs.iter().filter(|t| !is_shared.contains(t)).collect();
             }
             size += new.iter().map(|t| tsize(t)).sum::<u64>();
             cur.extend(new.into_iter().cloned());
@@ -1707,9 +1644,10 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
             continue;
         }
         if cur.is_empty() {
-            // everything is in its parent: use the parent, no empty ytd
+            // every texture is in the shared chain: point the archetypes at
+            // its top instead of writing an empty (295-byte) ytd
             for m in members.drain(..) {
-                txd_of.insert(m, par.clone().unwrap_or_default());
+                txd_of.insert(m, top_shared.clone().unwrap_or_default());
             }
             continue;
         }
@@ -1718,12 +1656,22 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         for m in members.drain(..) {
             txd_of.insert(m, name.clone());
         }
-        dicts.push((name, std::mem::take(&mut cur), par.clone()));
+        dicts.push((name, std::mem::take(&mut cur), top_shared.clone()));
         size = 0;
     }
-    let shared: Vec<()> = vec![(); shared_n];
     let total: usize = dicts.iter().map(|d| d.1.len()).sum();
     eprintln!("buildings: {} textures ({} shared) in {} dictionaries", total, shared.len(), dicts.len());
+    {
+        let mut by: Vec<(&String, usize, u64)> = dicts.iter().map(|d| (&d.0, d.1.len(), d.1.iter().map(|t| tsize(t)).sum())).collect();
+        by.sort_by(|a, b| b.2.cmp(&a.2));
+        let mb = |b: u64| (b as f64 / 1048576.0 * 10.0).round() / 10.0;
+        let mut fams: HashMap<&String, usize> = HashMap::new();
+        for v in txd_of.values() {
+            *fams.entry(v).or_default() += 1;
+        }
+        super::regionlog::set("txd_per_family", json!({"dictionaries": dicts.len(), "textures": total, "shared": shared.len(), "models_per_txd_max": fams.values().max().copied().unwrap_or(0),
+            "largest": by.iter().take(5).map(|d| json!({"txd": d.0, "textures": d.1, "mb": mb(d.2), "models": fams.get(d.0).copied().unwrap_or(0)})).collect::<Vec<_>>()}));
+    }
     let alpha_tex: HashSet<&String> = done.values().flat_map(|a| &a.alpha).collect();
     drop(p);
     let p = super::Phase::new(ctx, "  textures (ytd)");
@@ -1812,6 +1760,8 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         .iter()
         .map(|(n, a)| {
             let r = ((0..3).map(|k| (a.hi[k] - a.lo[k]).powi(2)).sum::<f32>().sqrt() / 2.0).max(1.0);
+            let src = if alod.get(n).is_some_and(|d| *d > 0.0) { "6m" } else if small(a) { "fallback (clutter 30x radius)" } else { "fallback (10x radius floor)" };
+            super::regionlog::bump("lod_dist_source", src, &a.an);
             serde_json::from_value(json!({"name": a.an, "lod_dist": lod(n, a), "bb_min": a.lo, "bb_max": a.hi, "bs_radius": r, "hd_texture_dist": 100.0,
                 "texture_dictionary": txd_of[&a.an]}))
             .unwrap()
@@ -1996,6 +1946,9 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         eprintln!("buildings: {} flat ground tiles recorded for terrain", ground.len());
     }
     let links_n = (0..kept.len()).filter(|&i| alive[i] && parent[i].is_some()).count();
+    for i in (0..kept.len()).filter(|&i| alive[i] && kept[i].level == 0 && parent[i].is_none()) {
+        super::regionlog::bump("orphan_hd", "ORPHANHD entities", &done[&kept[i].name].an);
+    }
     eprintln!("buildings: {} entities, {links_n} LOD links, {top} LOD levels", alive.iter().filter(|x| **x).count());
     for ((near, cx, cy), ids) in cells {
         let name = if near { format!("t6m_bn_{:03}_{:03}", cx + 200, cy + 200) } else { format!("t6m_bld_{:02}_{:02}", cx + 50, cy + 50) };
