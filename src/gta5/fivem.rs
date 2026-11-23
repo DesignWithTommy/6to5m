@@ -34,7 +34,7 @@ mod vehicles;
 mod weapons;
 mod frags;
 mod vlog;
-mod progress;
+pub mod progress;
 mod texmem;
 mod texslot;
 mod quality;

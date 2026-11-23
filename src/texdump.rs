@@ -114,12 +114,13 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
     let seen: Mutex<HashSet<u64>> = Mutex::new(HashSet::from([ENGINE_WHITE]));
     let (written, rgba_n, skipped_data, missing, failed) = (AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0));
     let small = AtomicUsize::new(0);
-    let quiet: sixng_core::export::Progress = sixng_core::export::no_progress();
-    for a in ws.archives().into_iter().filter(|a| a.container == "rpf9") {
-        if !only.is_empty() && !only.iter().any(|o| a.id.contains(o.as_str())) {
-            continue;
-        }
-        let ix = match ws.ensure_index(&a, false, true, quiet.clone()) {
+    use rpf9::gta5::fivem::progress::{sixng as index_progress, Bar};
+    let archives: Vec<_> = ws.archives().into_iter().filter(|a| a.container == "rpf9")
+        .filter(|a| only.is_empty() || only.iter().any(|o| a.id.contains(o.as_str()))).collect();
+    let n_arch = archives.len();
+    for (ai, a) in archives.into_iter().enumerate() {
+        eprintln!("[colour-textures] archive {}/{n_arch}: {} (indexing)", ai + 1, a.id);
+        let ix = match ws.ensure_index(&a, false, true, index_progress(&format!("index {}", a.id))) {
             Ok(ix) => ix,
             Err(e) => {
                 eprintln!("[colour-textures] {}: index: {e}", a.id);
@@ -129,7 +130,10 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
         let entries: Vec<_> = ix.entries.iter().filter(|e| e.kind == Kind::RageObj && matches!(e.rtype.as_deref(), Some("dr" | "ft" | "dd"))).collect();
         let before = written.load(Ordering::Relaxed);
         let adir = out.join(a.id.trim_end_matches(".rpf").split('/').map(sanitize).collect::<PathBuf>());
+        eprintln!("[colour-textures] archive {}/{n_arch}: {} ({} drawables)", ai + 1, a.id, entries.len());
+        let bar = Bar::new(&format!("textures {}/{n_arch} {}", ai + 1, a.id), entries.len());
         entries.par_iter().for_each(|e| {
+            bar.tick();
             let Ok(r) = sixng_core::resource::Resource::load_sys(&a.path, e) else { return };
             let model = sanitize(&e.name.clone().unwrap_or_else(|| e.id.rsplit('@').next().unwrap_or(&e.id).to_string()));
             for s in sixng_core::drawable::find_shaders(&r) {
