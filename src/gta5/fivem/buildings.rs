@@ -344,6 +344,8 @@ struct Place {
     level: u8,
     elod: f32,
     child_lod: f32,
+    /// the 6m entity has a LOD parent (lod.parent_index or parent_instance)
+    src_parent: bool,
 }
 
 fn level_of(s: &str) -> u8 {
@@ -1129,6 +1131,7 @@ fn load_places(ctx: &Ctx, dirs: &[(PathBuf, String)], index: &ArchiveIndex) -> R
             level: level_of(l["level"].as_str().unwrap_or("HD")),
             elod: l["lod_dist"].as_f64().unwrap_or(-1.0) as f32,
             child_lod: l["child_lod_dist"].as_f64().unwrap_or(0.0) as f32,
+            src_parent: l["parent_index"].is_i64() || l["parent_instance"].is_i64(),
         });
     };
     for (map, ents) in &per {
@@ -2436,6 +2439,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         eprintln!("buildings: {} flat ground tiles recorded for terrain", ground.len());
     }
     let links_n = (0..kept.len()).filter(|&i| alive[i] && parent[i].is_some()).count();
+    let bplaced: HashSet<&str> = places.iter().filter_map(|q| q.key.as_ref().map(|k| k.0.as_str())).filter(|m| m.starts_with("batch:")).collect();
     let bkeys: HashSet<&str> = kept.iter().filter_map(|q| q.key.as_ref().map(|k| k.0.as_str())).filter(|m| m.starts_with("batch:")).collect();
     for i in (0..kept.len()).filter(|&i| alive[i] && kept[i].level == 0 && parent[i].is_none()) {
         // why the 6m link did not survive (lod_parents.jsonl, per entity)
@@ -2443,7 +2447,13 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         let why = if ctx.o.no_lod {
             "--no-lod"
         } else if let Some(b) = k.and_then(|k| blinks.get(k)) {
-            if bkeys.contains(b.as_str()) { "batch parent dropped" } else { "batch parent not converted" }
+            if bkeys.contains(b.as_str()) {
+                "batch parent dropped"
+            } else if bplaced.contains(b.as_str()) {
+                "batch parent model not built (see skips)"
+            } else {
+                "batch parent not exported (see batch_skip)"
+            }
         } else if let Some(t) = k.and_then(|k| links.get(k)) {
             match by_key.get(t) {
                 None => "entity parent not converted",
@@ -2452,8 +2462,10 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
             }
         } else if k.is_none() {
             "no source key"
+        } else if kept[i].src_parent {
+            "6m parent not resolved by lod-links"
         } else {
-            "no 6m link"
+            "6m has no LOD parent"
         };
         super::regionlog::bump("orphan_hd", why, &done[&kept[i].name].an);
     }

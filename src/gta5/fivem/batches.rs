@@ -221,7 +221,12 @@ pub fn props(ctx: &Ctx, index: &sixng_core::scan::ArchiveIndex) -> Vec<(Value, [
                 continue;
             }
             let off = b["model_id"].as_str().and_then(|m| ctx.voff_of(m));
-            let (Some(model), Some(_)) = (b["name"].as_str(), off) else { continue };
+            let (Some(model), Some(_)) = (b["name"].as_str(), off) else {
+                // these batches are LOD parents of HD props (lod_parents kind "batch")
+                let why = if b["name"].is_null() { "batch archetype has no name" } else { "batch model drawable not found" };
+                super::regionlog::bump("batch_skip", why, b["name"].as_str().or(b["archetype"].as_str()).unwrap_or(""));
+                continue;
+            };
             let c: [f32; 3] = std::array::from_fn(|k| (lo[k] + hi[k]) * 0.5);
             let (first, count) = (b["first"].as_u64().unwrap_or(0) as usize, b["count"].as_u64().unwrap_or(0) as usize);
             let mut inst = Vec::with_capacity(count);
@@ -232,6 +237,7 @@ pub fn props(ctx: &Ctx, index: &sixng_core::scan::ArchiveIndex) -> Vec<(Value, [
                 inst.push(([f(0) - c[0], f(1) - c[1], f(2) - c[2]], [f(3), f(4), f(5), f(6)], [f(7), f(8), f(9)], t));
             }
             if inst.is_empty() {
+                super::regionlog::bump("batch_skip", "no decodable instances", model);
                 continue;
             }
             let name = format!("b6m_{}", &super::sha(&format!("{}|{}|{:?}", b["map"], model, b["bbox"]))[..12]);
