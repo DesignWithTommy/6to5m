@@ -25,7 +25,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// Bump when the batch tables or their use change.
-pub const BATCH_V: &str = "batch4";
+pub const BATCH_V: &str = "batch5";
 const CELL: f32 = 512.0;
 
 type Bbox = [[f32; 3]; 2];

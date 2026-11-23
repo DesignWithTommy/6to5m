@@ -12,6 +12,34 @@ pub struct Resource {
     pub gfx_base: usize,
 }
 
+/// How far past the last indexed stream `load_meta` looks for a graphics
+/// page compressed as a stream of its own.
+const PAGE_SEARCH: usize = 256 << 10;
+
+/// The first zlib stream at a 16-byte aligned offset in `buf` (within
+/// `PAGE_SEARCH`) that ends after inflating to between `need` bytes and
+/// `need` rounded up to 64 KiB (pages are padded to whole 64 KiB chunks).
+pub fn find_page_stream(buf: &[u8], need: usize) -> Option<Vec<u8>> {
+    let max = (need + 0xFFFF) & !0xFFFF;
+    let mut at = 0;
+    while at + 2 <= buf.len().min(PAGE_SEARCH + 2) {
+        let (a, b) = (buf[at], buf[at + 1]);
+        if a == 0x78 && (u16::from(a) << 8 | u16::from(b)) % 31 == 0 {
+            let mut d = flate2::Decompress::new(true);
+            let mut out = vec![0u8; max + 1];
+            if let Ok(flate2::Status::StreamEnd) = d.decompress(&buf[at..], &mut out, flate2::FlushDecompress::Finish) {
+                let n = d.total_out() as usize;
+                if (need..=max).contains(&n) {
+                    out.truncate(n);
+                    return Some(out);
+                }
+            }
+        }
+        at += 16;
+    }
+    None
+}
+
 pub const SYS_BASE: u64 = 0x5000_0000;
 pub const GFX_BASE: u64 = 0x6000_0000;
 
@@ -38,10 +66,32 @@ impl Resource {
                     let pos = (last[0] + last[1] + 15) & !15;
                     let mut f = File::open(archive)?;
                     f.seek(SeekFrom::Start(pos))?;
-                    let mut buf = vec![0u8; need - r.gfx.len()];
-                    let n = f.read(&mut buf)?;
+                    // No graphics stream at all and a system stream that fills
+                    // whole 64 KiB chunks: the page is not stored raw there but
+                    // compressed on its own a few KiB further on (SixNG
+                    // d986342), inflating to the block extent or that rounded
+                    // up to 64 KiB. Only searched then: small pages (64 bytes)
+                    // can match unrelated streams.
+                    let own = r.gfx.is_empty() && last[2] > 0 && last[2] % 0x10000 == 0;
+                    let want = need - r.gfx.len();
+                    let window = if own { PAGE_SEARCH + need + need / 8 + 1024 } else { want };
+                    let mut buf = vec![0u8; window];
+                    let mut n = 0;
+                    while n < buf.len() {
+                        let k = f.read(&mut buf[n..])?;
+                        if k == 0 {
+                            break;
+                        }
+                        n += k;
+                    }
                     buf.truncate(n);
-                    r.gfx.extend_from_slice(&buf);
+                    match own.then(|| find_page_stream(&buf, need)).flatten() {
+                        Some(page) => r.gfx = page,
+                        None => {
+                            buf.truncate(want);
+                            r.gfx.extend_from_slice(&buf);
+                        }
+                    }
                 }
             }
         }

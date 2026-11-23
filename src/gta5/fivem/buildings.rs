@@ -707,7 +707,7 @@ fn f3(v: &Value) -> V3 {
 /// index, LOD links, archetype LODs): with the sixng index version and
 /// crate version it forms the stamp in <work>/index/derived_tables.json.
 /// Tables made under another stamp are rebuilt. Bump on producer changes.
-const DERIVED_V: &str = "derived2";
+const DERIVED_V: &str = "derived3";
 
 fn derived_stamp() -> String {
     format!("{}|{}|{DERIVED_V}", sixng_core::INDEX_VERSION, env!("CARGO_PKG_VERSION"))
