@@ -34,6 +34,7 @@ mod vehicles;
 mod weapons;
 mod frags;
 mod vlog;
+mod progress;
 mod texmem;
 mod texslot;
 mod quality;
@@ -889,12 +890,15 @@ pub struct Phase<'a> {
 
 impl<'a> Phase<'a> {
     pub fn new(ctx: &'a Ctx, name: &str) -> Self {
+        // phase start / end as progress events (stage = phase name)
+        progress::report(name.trim(), 0, 1, &std::sync::Mutex::new(None));
         Phase { ctx, name: name.to_string(), t0: std::time::Instant::now(), c0: cpu_secs() }
     }
 }
 
 impl Drop for Phase<'_> {
     fn drop(&mut self) {
+        progress::report(self.name.trim(), 1, 1, &std::sync::Mutex::new(None));
         let wall = self.t0.elapsed().as_secs_f64();
         let cpu = cpu_secs() - self.c0;
         let cores = if wall > 0.0 { cpu / wall } else { 0.0 };

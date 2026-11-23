@@ -718,6 +718,15 @@ fn mark_derived(ctx: &Ctx) {
     let _ = fs::write(ctx.o.work.join("index").join("derived_tables.json"), derived_stamp());
 }
 
+/// Ticks a progress bar when dropped (every exit of a closure).
+struct Tick<'a>(&'a super::progress::Bar);
+
+impl Drop for Tick<'_> {
+    fn drop(&mut self) {
+        self.0.tick();
+    }
+}
+
 fn placements_dir(ctx: &Ctx, index: &ArchiveIndex) -> Result<PathBuf, Box<dyn Error>> {
     if let Some(d) = &ctx.o.placements {
         if sixng_core::vfs::exists(&d.join("index.jsonl")) {
@@ -739,12 +748,12 @@ fn placements_dir(ctx: &Ctx, index: &ArchiveIndex) -> Result<PathBuf, Box<dyn Er
     let ie = ix.join("interior_entities.jsonl");
     if stale(&ie, &[]) || !sixng_core::vfs::exists(&ix.join(sixng_core::interiorents::LIGHT_INDEX)) {
         let _p = super::Phase::new(ctx, "  prep interior-ents");
-        sixng_core::interiorents::build(&ws, &a, &metas, sixng_core::export::no_progress())?;
+        sixng_core::interiorents::build(&ws, &a, &metas, super::progress::sixng("prep interior-ents"))?;
     }
     let lp = ix.join("lod_parents.jsonl");
     if stale(&lp, &[mtime(&ie)]) || stale(&ix.join("archetype_lod.jsonl"), &[]) {
         let _p = super::Phase::new(ctx, "  prep lod-links");
-        sixng_core::lodlinks::build(&ws, &a, &metas, sixng_core::export::no_progress())?;
+        sixng_core::lodlinks::build(&ws, &a, &metas, super::progress::sixng("prep lod-links"))?;
     }
     export_region(ctx, &ws, &a.path, &a.id, &metas, &dir, &[mtime(&ie), mtime(&lp)])?;
     Ok(dir)
@@ -818,7 +827,7 @@ fn pack_placements(ctx: &Ctx) -> Result<Vec<(PathBuf, String)>, Box<dyn Error>> 
         let old = |p: &Path| mtime(p).map_or(true, |t| src.is_some_and(|s| t < s));
         if !fresh_code || old(&lp) || old(&al) {
             let _p = super::Phase::new(ctx, "  prep lod-links (pack)");
-            sixng_core::lodlinks::build(&ws, &a, &metas, sixng_core::export::no_progress())?;
+            sixng_core::lodlinks::build(&ws, &a, &metas, super::progress::sixng("prep lod-links"))?;
         }
         export_region(ctx, &ws, &pk.path, &pk.id, &metas, &dir, &[mtime(&lp)])?;
         // MLO instances of the pack (interiors.jsonl next to its placements)
@@ -828,12 +837,12 @@ fn pack_placements(ctx: &Ctx) -> Result<Vec<(PathBuf, String)>, Box<dyn Error>> 
         if old(&ci) {
             let _p = super::Phase::new(ctx, "  prep collision (pack)");
             let objs: Vec<&Entry> = pk.index.entries.iter().filter(|e| e.kind == sixng_core::classify::Kind::RageObj && e.name.is_none()).collect();
-            sixng_core::export::export_collision(&a, &objs, &ctx.o.work, sixng_core::export::no_progress())?;
+            sixng_core::export::export_collision(&a, &objs, &ctx.o.work, super::progress::sixng("prep collision"))?;
         }
         let ij = dir.join("interiors.jsonl");
         if old(&ij) || mtime(&ci).zip(mtime(&ij)).is_some_and(|(c, i)| c > i) {
             let _p = super::Phase::new(ctx, "  prep interiors (pack)");
-            sixng_core::export::export_interiors(&a, &metas, &pk.index.entries, &ctx.o.work, sixng_core::export::no_progress())?;
+            sixng_core::export::export_interiors(&a, &metas, &pk.index.entries, &ctx.o.work, super::progress::sixng("prep interiors"))?;
         }
         out.push((dir, pk.id.clone()));
     }
@@ -1883,8 +1892,15 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     }
     drop(p);
     let p = super::Phase::new(ctx, "  models (ydr)");
-    let res: Vec<(String, Result<Option<Arch>, String>)> =
-        arch.par_iter().map(|&(n, off)| (n.to_string(), convert(ctx, &pools, n, off, by_off.get(&off).copied()))).collect();
+    let bar = super::progress::Bar::new("buildings", arch.len());
+    let res: Vec<(String, Result<Option<Arch>, String>)> = arch
+        .par_iter()
+        .map(|&(n, off)| {
+            let r = (n.to_string(), convert(ctx, &pools, n, off, by_off.get(&off).copied()));
+            bar.tick();
+            r
+        })
+        .collect();
     let mut done: BTreeMap<String, Arch> = BTreeMap::new();
     let mut names: HashMap<String, String> = HashMap::new();
     for (n, r) in res {
@@ -2041,9 +2057,11 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     let alpha_tex: HashSet<&String> = done.values().flat_map(|a| &a.alpha).collect();
     drop(p);
     let p = super::Phase::new(ctx, "  textures (ytd)");
+    let bar = super::progress::Bar::new("textures", dicts.len());
     let results: Vec<Result<String, String>> = dicts
         .par_iter()
         .map(|(stem, list, _)| {
+            let _tick = Tick(&bar);
             let file = format!("{stem}.ytd");
             let mut sorted = list.clone();
             sorted.sort();
