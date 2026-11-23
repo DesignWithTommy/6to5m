@@ -44,6 +44,12 @@ extern "system" fn InitializeApiImplEx(_build: u32, _revision: u32, _flags: u64)
     OK
 }
 
+/// Newer GDK loader stub entry (GTA VI calls it); arguments are unused like Ex.
+#[unsafe(no_mangle)]
+extern "system" fn InitializeApiImplEx2(build: u32, revision: u32, flags: u64, _extra: usize) -> i32 {
+    InitializeApiImplEx(build, revision, flags)
+}
+
 #[unsafe(no_mangle)]
 extern "system" fn UninitializeApiImpl() {
     let _ = INITIALIZATIONS.try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));

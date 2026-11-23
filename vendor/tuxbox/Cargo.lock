@@ -97,13 +97,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tuxbox-pipeline-prep"
-version = "0.1.0"
-dependencies = [
- "windows",
-]
-
-[[package]]
 name = "tuxbox-xapu"
 version = "0.1.0"
 dependencies = [

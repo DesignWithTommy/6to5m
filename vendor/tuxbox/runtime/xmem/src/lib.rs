@@ -2,6 +2,7 @@
 mod diagnostics;
 mod heap;
 mod history;
+mod loader;
 mod options;
 mod partitions;
 mod physical_pages;

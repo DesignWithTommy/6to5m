@@ -319,15 +319,22 @@ fn start(game: &Path, exe: &Path, args: &[OsString], log: Option<PathBuf>, debug
         // as they happen; at the fatal event print it, registers, stack and modules.
         // Commands go in a script file: Sandboxie's Start.exe re-splits a quoted -c argument.
         let script = log.with_extension("cdb.cmd");
-        fs::write(&script, ".lastevent
+        // Trace every C++ (e06d7363), msxml/app (e0000001) and WinRT-originate (40080201)
+        // exception with its record and stack, then dump the fatal event.
+        fs::write(&script, "sxe -c \".exr -1;kn 25;gn\" e06d7363
+sxe -c \".exr -1;kn 25;gn\" e0000001
+sxe -c \".exr -1;kn 25;gn\" 40080201
+sxe -c \".exr -1;kn 25;gn\" av
+g
+.lastevent
 r
-kn 40
+kn 60
 .ecxr
-kn 40
+kn 60
 lm o
 q
 ")?;
-        let mut d: Vec<OsString> = vec![cdb.into(), "-g".into(), "-G".into(), "-logo".into(), cdb_log.clone().into(), "-cf".into(), script.into()];
+        let mut d: Vec<OsString> = vec![cdb.into(), "-G".into(), "-logo".into(), cdb_log.clone().into(), "-cf".into(), script.into()];
         d.extend(argv);
         argv = d;
     }
