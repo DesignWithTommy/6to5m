@@ -279,28 +279,41 @@ fn stage(game: &Path, dlls: &[PathBuf]) -> Result<(), Box<dyn Error>> {
     for d in dlls {
         let name = d.file_name().unwrap();
         let dst = game.join(name);
-        let saved = backup.join(name);
-        if dst.is_file() && !saved.exists() && !was_staged(game, &name.to_string_lossy()) {
+        // A file we staged has the recorded size; anything else (an original put
+        // back by hand) is kept, never overwritten.
+        let ours = staged_size(game, &name.to_string_lossy()).is_some_and(|n| fs::metadata(&dst).is_ok_and(|m| m.len() == n));
+        if dst.is_file() && !ours {
             fs::create_dir_all(&backup)?;
+            let mut saved = backup.join(name);
+            let mut i = 1;
+            while saved.exists() {
+                saved = backup.join(format!("{}.{i}", name.to_string_lossy()));
+                i += 1;
+            }
             fs::rename(&dst, &saved)?;
-            eprintln!("[launch] kept original {} in {BACKUP}/", name.to_string_lossy());
+            eprintln!("[launch] kept original {} as {}", name.to_string_lossy(), saved.display());
         }
         fs::copy(d, &dst)?;
-        staged.push(name.to_string_lossy().into_owned());
+        staged.push(format!("{}\t{}", name.to_string_lossy(), fs::metadata(&dst)?.len()));
     }
     fs::write(game.join(STAGED), staged.join("\n") + "\n")?;
     Ok(())
 }
 
-fn was_staged(game: &Path, name: &str) -> bool {
-    fs::read_to_string(game.join(STAGED)).is_ok_and(|s| s.lines().any(|l| l.eq_ignore_ascii_case(name)))
+/// Size recorded when `name` was staged (older lists without sizes: unknown size, treated as foreign).
+fn staged_size(game: &Path, name: &str) -> Option<u64> {
+    let list = fs::read_to_string(game.join(STAGED)).ok()?;
+    list.lines().find_map(|l| {
+        let (n, size) = l.split_once('\t')?;
+        n.eq_ignore_ascii_case(name).then(|| size.parse().ok()).flatten()
+    })
 }
 
 fn restore(game: &Path) -> Result<(), Box<dyn Error>> {
     let list = fs::read_to_string(game.join(STAGED)).map_err(|_| format!("nothing staged in {}", game.display()))?;
     let backup = game.join(BACKUP);
     let (mut removed, mut put_back) = (0, 0);
-    for name in list.lines().filter(|l| !l.is_empty()) {
+    for name in list.lines().filter(|l| !l.is_empty()).map(|l| l.split('\t').next().unwrap_or(l)) {
         if fs::remove_file(game.join(name)).is_ok() {
             removed += 1;
         }
