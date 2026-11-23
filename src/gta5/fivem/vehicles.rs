@@ -156,22 +156,22 @@ fn parse(args: &[String]) -> Result<Opts, String> {
 
 // ------------------------------------------------------------- textures
 
-/// Keyed textures from the ttdb pools / TTPF stores, cached as DDS under
-/// <work>/fivem_tex_cache_v{N}/<hash>.dds (same cache and checks as buildings).
+/// Keyed textures from the ttdb pools / TTPF stores, decoded in memory for
+/// this run (fivem/texmem.rs; same checks as buildings). `dir` is only the
+/// virtual base of the `<id>.dds` names.
 pub(super) struct Pools {
     game: PathBuf,
     catalog: Option<crate::texture::Catalog>,
     maps: HashMap<PathBuf, Mmap>,
     pub(super) dir: PathBuf,
+    pub(super) store: super::texmem::Store,
 }
 
 impl Pools {
-    /// Pools over <game>/data/ttdb + TTPF stores, cache under <work>.
-    pub(super) fn new(game: &Path, work: &Path) -> Result<Pools, String> {
-        let dir = work.join(format!("fivem_tex_cache_v{}i", sixng_core::bcpack::BCPACK_DECODER_VERSION));
-        fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    /// Pools over <game>/data/ttdb + TTPF stores, textures in memory.
+    pub(super) fn new(game: &Path, _work: &Path) -> Result<Pools, String> {
         let ttdb = game.join("data").join("ttdb");
-        Ok(Pools { game: game.to_path_buf(), catalog: crate::texture::Catalog::build(&ttdb).map_err(|e| eprintln!("{}: {e}", ttdb.display())).ok(), maps: HashMap::new(), dir })
+        Ok(Pools { game: game.to_path_buf(), catalog: crate::texture::Catalog::build(&ttdb).map_err(|e| eprintln!("{}: {e}", ttdb.display())).ok(), maps: HashMap::new(), dir: PathBuf::from("texmem"), store: super::texmem::Store::temp() })
     }
     fn path(&self, hash: u32) -> PathBuf {
         self.dir.join(format!("{hash:08x}.dds"))
@@ -179,7 +179,7 @@ impl Pools {
     /// Cache slot of a texture (fivem/texslot.rs): its 32-bit hash unless
     /// another texture owns that file.
     fn slot(&self, suffix: &str, hash: u32, key: u64, h64: u64) -> u32 {
-        super::texslot::slot(&self.dir, suffix, hash, key, h64, &|| self.dims(key, h64))
+        super::texslot::slot(&self.store, suffix, hash, key, h64, &|| self.dims(key, h64))
     }
 
     /// Stored size of a texture: TTPF by 64-bit hash, else its pool entry.
@@ -201,11 +201,11 @@ impl Pools {
 
     fn get(&mut self, hash: u32, key: u64, h64: u64) -> Result<PathBuf, String> {
         let hash = self.slot("", hash, key, h64);
-        let e1 = match self.from_pools(hash, key).and_then(|p| check_dds(&p).map(|_| p)) {
+        let e1 = match self.from_pools(hash, key).and_then(|p| check_dds(&self.store, &p).map(|_| p)) {
             Ok(p) => return Ok(p),
             Err(e) => e,
         };
-        self.from_ttpf(hash, h64).and_then(|p| check_dds(&p).map(|_| p)).map_err(|e2| format!("{e1}; ttpf: {e2}"))
+        self.from_ttpf(hash, h64).and_then(|p| check_dds(&self.store, &p).map(|_| p)).map_err(|e2| format!("{e1}; ttpf: {e2}"))
     }
     fn from_ttpf(&self, hash: u32, h64: u64) -> Result<PathBuf, String> {
         if h64 == 0 {
@@ -225,7 +225,7 @@ impl Pools {
         let dds = rgba_dds(&rgba, w, h);
         ytd::from_dds("check", &dds)?;
         let p = self.path(hash);
-        write_atomic(&p, &dds).map_err(|e| e.to_string())?;
+        self.store.put(&p, dds, super::texmem::Src::Mem);
         Ok(p)
     }
     /// Decoded RGBA of any texture (no colour-map check): pools, else TTPF.
@@ -260,7 +260,7 @@ impl Pools {
     /// is used as occlusion). Cached as `<packed ^ SYNTH>.dds`.
     fn synth(&mut self, packed: u32, key: u64, h64: u64) -> Result<u32, String> {
         let id = packed ^ SYNTH;
-        if self.path(id).exists() {
+        if self.store.exists(&self.path(id)) {
             return Ok(id);
         }
         let (rgba, w, h) = self.raw(packed, key, h64)?;
@@ -285,13 +285,13 @@ impl Pools {
             })
             .collect();
         let dds = rgba_dds(&out, w, h);
-        write_atomic(&self.path(id), &dds).map_err(|e| e.to_string())?;
+        self.store.put(&self.path(id), dds, super::texmem::Src::Mem);
         Ok(id)
     }
 
     fn from_pools(&mut self, hash: u32, key: u64) -> Result<PathBuf, String> {
         let p = self.path(hash);
-        if p.exists() {
+        if self.store.exists(&p) {
             return Ok(p);
         }
         if key == 0 {
@@ -309,18 +309,18 @@ impl Pools {
         let t = pool.textures.get(li).ok_or("pool index out of range")?;
         let dds = pool.create_dds(t).map_err(|e| e.to_string())?;
         ytd::from_dds("check", &dds)?;
-        write_atomic(&p, &dds).map_err(|e| e.to_string())?;
+        self.store.put(&p, dds, super::texmem::Src::Mem);
         Ok(p)
     }
 }
 
-fn check_dds(p: &Path) -> Result<(), String> {
-    let bytes = fs::read(p).map_err(|e| e.to_string())?;
+fn check_dds(store: &super::texmem::Store, p: &Path) -> Result<(), String> {
+    let bytes = store.cached(p).ok_or_else(|| format!("{}: not decoded", p.display()))?;
     let (_, _, rgba) = crate::texture::dds_preview(&bytes).map_err(|e| e.to_string())?;
     match bad_colour(&rgba) {
         None => Ok(()),
         Some(why) => {
-            let _ = fs::remove_file(p);
+            store.remove(p);
             Err(why.into())
         }
     }
@@ -621,10 +621,8 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     if e_base.is_none() && e_mid.is_none() && e_hi.is_none() {
         return Err(format!("no fragment named {0}, {0}_mid or {0}_hi in {1} (try --list)", o.name, ip.display()).into());
     }
-    let cache = o.work.join(format!("fivem_tex_cache_v{}i", sixng_core::bcpack::BCPACK_DECODER_VERSION));
-    fs::create_dir_all(&cache)?;
-    let ttdb = o.game.join("data").join("ttdb");
-    let mut pools = Pools { game: o.game.clone(), catalog: crate::texture::Catalog::build(&ttdb).map_err(|e| eprintln!("{}: {e}", ttdb.display())).ok(), maps: HashMap::new(), dir: cache.clone() };
+    let mut pools = Pools::new(&o.game, &o.work)?;
+    let cache = pools.dir.clone();
     let (mut texs, mut missing) = (Vec::new(), Vec::new());
     let mut load = |e: Option<&Entry>| -> Result<Option<Source>, String> {
         e.map(|e| {
@@ -813,7 +811,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
             continue;
         }
         let p = cache.join(format!("{}.dds", &t[4..]));
-        let bytes = fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+        let bytes = pools.store.cached(&p).ok_or_else(|| format!("{}: not decoded", p.display()))?;
         let mut x = ytd::from_dds(t, &bytes)?;
         if let Some(m) = o.max_tex {
             x.limit_size(m);

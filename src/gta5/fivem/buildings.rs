@@ -257,26 +257,22 @@ fn promote_base_layer(mesh: &mut Mesh) {
     }
 }
 
-/// True when a cached DDS is (near) grayscale: mean per-pixel channel spread
+/// True when a texture is (near) grayscale: mean per-pixel channel spread
 /// under 4 levels.
-fn near_gray(p: &std::path::Path) -> bool {
-    let Some((_, _, rgba)) = fs::read(p).ok().and_then(|b| crate::texture::dds_preview(&b).ok()) else { return false };
+fn near_gray(pools: &Pools, p: &std::path::Path) -> bool {
+    let Some((_, _, rgba)) = pools.load(p).ok().and_then(|b| crate::texture::dds_preview(&b).ok()) else { return false };
     let n = (rgba.len() / 4).max(1) as f64;
     let spread: f64 = rgba.chunks_exact(4).map(|px| (px[0].max(px[1]).max(px[2]) - px[0].min(px[1]).min(px[2])) as f64).sum();
     spread / n < 4.0
 }
 
-/// Rejects (and deletes) a cached DDS that is not a usable colour map.
-fn check_dds(p: &std::path::Path) -> Result<(), String> {
-    let bytes = fs::read(p).map_err(|e| e.to_string())?;
-    let (w, h, rgba) = crate::texture::dds_preview(&bytes).map_err(|e| e.to_string())?;
+/// Rejects a DDS that is not a usable colour map.
+fn check_dds(bytes: &[u8]) -> Result<(), String> {
+    let (w, h, rgba) = crate::texture::dds_preview(bytes).map_err(|e| e.to_string())?;
     let why = if w <= 8 && h <= 8 { Some("placeholder (8 px or less)") } else { bad_colour(&rgba) };
     match why {
         None => Ok(()),
-        Some(why) => {
-            let _ = fs::remove_file(p);
-            Err(why.into())
-        }
+        Some(why) => Err(why.into()),
     }
 }
 
@@ -289,8 +285,8 @@ fn is_glass(shader_hash: u32) -> bool {
 /// Shared flat normal map (glass_env when the 6m bump slot is a placeholder).
 fn flat_bump(pools: &Pools) -> Result<String, String> {
     let p = pools.dir.join(format!("{}.dds", &ydr::FLAT_BUMP[4..]));
-    if !p.exists() {
-        write_atomic(&p, &rgba_dds(&[128u8, 128, 255, 255].repeat(16 * 16), 16, 16)).map_err(|e| e.to_string())?;
+    if !pools.store.exists(&p) {
+        pools.store.put(&p, rgba_dds(&[128u8, 128, 255, 255].repeat(16 * 16), 16, 16), super::texmem::Src::FlatBump);
     }
     Ok(ydr::FLAT_BUMP.into())
 }
@@ -363,23 +359,25 @@ fn q4(v: &Value) -> Option<[f32; 4]> {
     (a.len() == 4).then(|| std::array::from_fn(|k| a[k].as_f64().unwrap_or(0.0) as f32))
 }
 
-/// Keyed textures from the ttdb streaming pools, cached as DDS under
-/// <work>/fivem_tex_cache_v{N}/<hash>.dds.
+/// Keyed textures from the ttdb streaming pools and TTPF stores, decoded in
+/// memory (fivem/texmem.rs); `dir` is only the virtual base of their
+/// `<id>.dds` names.
 struct Pools {
     game: PathBuf,
     catalog: Option<crate::texture::Catalog>,
     maps: Mutex<HashMap<PathBuf, Arc<Mmap>>>,
     dir: PathBuf,
+    store: super::texmem::Store,
 }
 
 impl Pools {
     fn path(&self, hash: u32) -> PathBuf {
         self.dir.join(format!("{hash:08x}.dds"))
     }
-    /// Cache slot of a texture (fivem/texslot.rs): its 32-bit hash unless
-    /// another texture owns that file.
+    /// Slot of a texture (fivem/texslot.rs): its 32-bit hash unless another
+    /// texture owns it.
     fn slot(&self, suffix: &str, hash: u32, key: u64, h64: u64) -> u32 {
-        super::texslot::slot(&self.dir, suffix, hash, key, h64, &|| self.dims(key, h64))
+        super::texslot::slot(&self.store, suffix, hash, key, h64, &|| self.dims(key, h64))
     }
 
     /// Stored size of a texture: TTPF by 64-bit hash, else its pool entry.
@@ -399,25 +397,67 @@ impl Pools {
         Some((t.width, t.height))
     }
 
-    /// Cached DDS path for a texture, fetching it from the pools if needed.
-    /// Cached DDS for a texture: ttdb pools by asset key, then the TTPF
-    /// stores (sixng) by 64-bit hash.
+    /// DDS of a recorded texture: from memory, else decoded again from its
+    /// source in the game files.
+    fn load(&self, p: &Path) -> Result<Arc<Vec<u8>>, String> {
+        if let Some(b) = self.store.cached(p) {
+            return Ok(b);
+        }
+        let rec = self.store.rec(p).ok_or_else(|| format!("{}: not a recorded texture", p.display()))?;
+        use super::texmem::Src;
+        let b = match &rec.src {
+            Src::Pool { key } => self.pool_dds(*key)?,
+            Src::Ttpf { h64 } => self.ttpf_dds(*h64)?,
+            Src::Normal { hash, key, h64 } => {
+                let (w, h, rgba) = self.raw_rgba(*hash, *key, *h64)?;
+                rgba_dds(&rgba, w, h)
+            }
+            Src::Tint { base, rgb } => self.tint_dds(base, *rgb)?,
+            Src::FlatBump => rgba_dds(&[128u8, 128, 255, 255].repeat(16 * 16), 16, 16),
+            Src::FlatSpec => flat_spec_dds(),
+            Src::Mem => return Err(format!("{}: memory-only texture gone", p.display())),
+        };
+        let b = Arc::new(b);
+        self.store.hold(p, b.clone());
+        Ok(b)
+    }
+
+    /// Texture (slot) for a colour map: ttdb pools by asset key, then the
+    /// TTPF stores (sixng) by 64-bit hash. Pool textures can be BCPack-flat
+    /// or a normal map too: the decoded image is checked first.
     fn get(&self, hash: u32, key: u64, h64: u64) -> Result<PathBuf, String> {
         let hash = self.slot("", hash, key, h64);
-        // Pool textures can be BCPack-flat or a normal map too: check the
-        // decoded image and fall back to the TTPF stores, then give up.
-        let e1 = match self.from_pools(hash, key).and_then(|p| check_dds(&p).map(|_| p)) {
-            Ok(p) => return Ok(p),
+        let p = self.path(hash);
+        if self.store.exists(&p) {
+            return Ok(p);
+        }
+        let e1 = match self.pool_dds(key).and_then(|d| check_dds(&d).map(|_| d)) {
+            Ok(d) => {
+                self.store.put(&p, d, super::texmem::Src::Pool { key });
+                return Ok(p);
+            }
             Err(e) => e,
         };
-        self.from_ttpf(hash, h64).and_then(|p| check_dds(&p).map(|_| p)).map_err(|e2| format!("{e1}; ttpf: {e2}"))
+        let d = self.ttpf_dds(h64).and_then(|d| check_dds(&d).map(|_| d)).map_err(|e2| format!("{e1}; ttpf: {e2}"))?;
+        self.store.put(&p, d, super::texmem::Src::Ttpf { h64 });
+        Ok(p)
+    }
+
+    /// Pool DDS of the slot's texture when recorded, else straight from the
+    /// pools (not recorded: data textures skip the colour-map check).
+    fn pool_or_slot(&self, hash: u32, key: u64) -> Result<Arc<Vec<u8>>, String> {
+        let p = self.path(hash);
+        if self.store.exists(&p) {
+            return self.load(&p);
+        }
+        self.pool_dds(key).map(Arc::new)
     }
 
     /// Decoded RGBA of a data texture (no colour-map check), for maps that
     /// are sampled at build time (4-layer lookup weights).
     fn rgba(&self, hash: u32, key: u64, h64: u64) -> Result<(u32, u32, Vec<u8>), String> {
         let hash = self.slot("", hash, key, h64);
-        let e1 = match self.from_pools(hash, key).and_then(|p| fs::read(&p).map_err(|e| e.to_string())).and_then(|b| crate::texture::dds_preview(&b).map_err(|e| e.to_string())) {
+        let e1 = match self.pool_or_slot(hash, key).and_then(|b| crate::texture::dds_preview(&b).map_err(|e| e.to_string())) {
             Ok(x) => return Ok(x),
             Err(e) => e,
         };
@@ -435,22 +475,21 @@ impl Pools {
         Ok((w, h, rgba))
     }
 
-    /// Cached tangent-space normal map `<hash>_n.dds` (texture
-    /// `r6m_<hash>_n`), decoded once and reused by every later build; also
+    /// Tangent-space normal map `<hash>_n` (texture `r6m_<hash>_n`); also
     /// makes sure the shared flat spec map exists. Flat decodes (undecoded
     /// BCPack) are rejected so they never bend the lighting.
     fn get_normal(&self, hash: u32, key: u64, h64: u64) -> Result<String, String> {
         let id = self.slot("_n", hash, key, h64);
         let name = format!("r6m_{id:08x}_n");
         let p = self.dir.join(format!("{id:08x}_n.dds"));
-        if !p.exists() {
+        if !self.store.exists(&p) {
             let (w, h, rgba) = self.raw_rgba(hash, key, h64)?;
             if bad_colour(&rgba) == Some("flat decode (undecoded BCPack data)") {
                 return Err("flat normal decode".into());
             }
             let dds = rgba_dds(&rgba, w, h);
             ytd::from_dds("check", &dds)?;
-            write_atomic(&p, &dds).or_else(|e| if p.exists() { Ok(()) } else { Err(e.to_string()) })?;
+            self.store.put(&p, dds, super::texmem::Src::Normal { hash, key, h64 });
         }
         self.flat_spec()?;
         Ok(name)
@@ -459,9 +498,8 @@ impl Pools {
     /// Makes sure the shared flat spec map exists.
     fn flat_spec(&self) -> Result<(), String> {
         let sp = self.dir.join(format!("{}.dds", &ydr::FLAT_SPEC[4..]));
-        if !sp.exists() {
-            let px: Vec<u8> = (0..16 * 16).flat_map(|_| [32u8, 32, 32, 255]).collect();
-            write_atomic(&sp, &rgba_dds(&px, 16, 16)).or_else(|e| if sp.exists() { Ok(()) } else { Err(e.to_string()) })?;
+        if !self.store.exists(&sp) {
+            self.store.put(&sp, flat_spec_dds(), super::texmem::Src::FlatSpec);
         }
         Ok(())
     }
@@ -469,7 +507,7 @@ impl Pools {
     /// Decoded RGBA without the colour-map check: ttdb pools, then TTPF.
     fn raw_rgba(&self, hash: u32, key: u64, h64: u64) -> Result<(u32, u32, Vec<u8>), String> {
         let hash = self.slot("", hash, key, h64);
-        let e1 = match self.from_pools(hash, key).and_then(|p| fs::read(&p).map_err(|e| e.to_string())).and_then(|b| crate::texture::dds_preview(&b).map_err(|e| e.to_string())) {
+        let e1 = match self.pool_or_slot(hash, key).and_then(|b| crate::texture::dds_preview(&b).map_err(|e| e.to_string())) {
             Ok(x) => return Ok(x),
             Err(e) => e,
         };
@@ -490,7 +528,8 @@ impl Pools {
         ttpf().map_err(|e2| format!("{e1}; ttpf: {e2}"))
     }
 
-    fn from_ttpf(&self, hash: u32, h64: u64) -> Result<PathBuf, String> {
+    /// DDS of a TTPF texture (checked: placeholder / flat decodes rejected).
+    fn ttpf_dds(&self, h64: u64) -> Result<Vec<u8>, String> {
         if h64 == 0 {
             return Err("no 64-bit hash".into());
         }
@@ -518,16 +557,11 @@ impl Pools {
         let native = if skipped == 0 { native_dds(t, &data) } else { None };
         let dds = native.unwrap_or_else(|| rgba_dds(&rgba, w, h));
         ytd::from_dds("check", &dds)?;
-        let p = self.path(hash);
-        write_atomic(&p, &dds).or_else(|e| if p.exists() { Ok(()) } else { Err(e.to_string()) })?;
-        Ok(p)
+        Ok(dds)
     }
 
-    fn from_pools(&self, hash: u32, key: u64) -> Result<PathBuf, String> {
-        let p = self.path(hash);
-        if p.exists() {
-            return Ok(p);
-        }
+    /// DDS of a ttdb pool texture by asset key.
+    fn pool_dds(&self, key: u64) -> Result<Vec<u8>, String> {
         if key == 0 {
             return Err("no asset key".into());
         }
@@ -550,9 +584,45 @@ impl Pools {
         let t = pool.textures.get(loc.index).ok_or("pool index out of range")?;
         let dds = pool.create_dds(t).map_err(|e| e.to_string())?;
         ytd::from_dds("check", &dds)?;
-        write_atomic(&p, &dds).or_else(|e| if p.exists() { Ok(()) } else { Err(e.to_string()) })?;
-        Ok(p)
+        Ok(dds)
     }
+
+    /// Colour texture `stem` ("w" = none: solid) multiplied by `c` (sRGB).
+    fn tint_dds(&self, stem: &str, c: [u8; 3]) -> Result<Vec<u8>, String> {
+        let (rgba, w, h) = if stem == "w" {
+            ([255u8; 4].repeat(16), 4, 4)
+        } else {
+            let b = self.load(&self.dir.join(format!("{stem}.dds")))?;
+            let (mut w, mut h, mut rgba) = crate::texture::dds_preview(&b).map_err(|e| e.to_string())?;
+            // Tinted copies are many; halve them down to 512 px to keep the ytds small.
+            while w.max(h) > 512 && w >= 2 && h >= 2 {
+                let (nw, nh) = (w / 2, h / 2);
+                let mut d = vec![0u8; (nw * nh * 4) as usize];
+                for y in 0..nh as usize {
+                    for x in 0..nw as usize {
+                        for k in 0..4 {
+                            let at = |xx: usize, yy: usize| rgba[(yy * w as usize + xx) * 4 + k] as u32;
+                            d[(y * nw as usize + x) * 4 + k] = ((at(2 * x, 2 * y) + at(2 * x + 1, 2 * y) + at(2 * x, 2 * y + 1) + at(2 * x + 1, 2 * y + 1) + 2) / 4) as u8;
+                        }
+                    }
+                }
+                (w, h, rgba) = (nw, nh, d);
+            }
+            (rgba, w, h)
+        };
+        let mut out = rgba;
+        for px in out.chunks_exact_mut(4) {
+            for k in 0..3 {
+                px[k] = ((px[k] as u32 * c[k] as u32 + 127) / 255) as u8;
+            }
+        }
+        Ok(rgba_dds(&out, w, h))
+    }
+}
+
+fn flat_spec_dds() -> Vec<u8> {
+    let px: Vec<u8> = (0..16 * 16).flat_map(|_| [32u8, 32, 32, 255]).collect();
+    rgba_dds(&px, 16, 16)
 }
 
 /// Texture name of a cached source texture: `r6m_<cache id>`.
@@ -577,44 +647,17 @@ const TINT_PALETTE: u32 = 0x2c8d_7182;
 /// baking it made glass, walls and decals magenta/navy.
 const PALETTE_FILL: [u8; 3] = [255, 187, 255];
 
-/// Cached copy of colour texture `tex` multiplied by `c` (sRGB), or a
-/// solid `c` when the model has no usable colour texture (the palette then
-/// gives the whole colour). Returns its texture name.
+/// Copy of colour texture `tex` multiplied by `c` (sRGB), or a solid `c`
+/// when the model has no usable colour texture (the palette then gives the
+/// whole colour). Returns its texture name.
 fn tinted(pools: &Pools, tex: &str, c: [u8; 3]) -> Result<String, String> {
     let stem = if tex == MISSING { "w".to_string() } else { tex[4..].to_string() };
     let name = format!("r6m_{stem}_t{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
     let p = pools.dir.join(format!("{}.dds", &name[4..]));
-    if p.exists() {
-        return Ok(name);
+    if !pools.store.exists(&p) {
+        let d = pools.tint_dds(&stem, c)?;
+        pools.store.put(&p, d, super::texmem::Src::Tint { base: stem, rgb: c });
     }
-    let (rgba, w, h) = if tex == MISSING {
-        ([255u8; 4].repeat(16), 4, 4)
-    } else {
-        let b = fs::read(pools.dir.join(format!("{stem}.dds"))).map_err(|e| e.to_string())?;
-        let (mut w, mut h, mut rgba) = crate::texture::dds_preview(&b).map_err(|e| e.to_string())?;
-        // Tinted copies are many; halve them down to 512 px to keep the ytds small.
-        while w.max(h) > 512 && w >= 2 && h >= 2 {
-            let (nw, nh) = (w / 2, h / 2);
-            let mut d = vec![0u8; (nw * nh * 4) as usize];
-            for y in 0..nh as usize {
-                for x in 0..nw as usize {
-                    for k in 0..4 {
-                        let at = |xx: usize, yy: usize| rgba[(yy * w as usize + xx) * 4 + k] as u32;
-                        d[(y * nw as usize + x) * 4 + k] = ((at(2 * x, 2 * y) + at(2 * x + 1, 2 * y) + at(2 * x, 2 * y + 1) + at(2 * x + 1, 2 * y + 1) + 2) / 4) as u8;
-                    }
-                }
-            }
-            (w, h, rgba) = (nw, nh, d);
-        }
-        (rgba, w, h)
-    };
-    let mut out = rgba;
-    for px in out.chunks_exact_mut(4) {
-        for k in 0..3 {
-            px[k] = ((px[k] as u32 * c[k] as u32 + 127) / 255) as u8;
-        }
-    }
-    write_atomic(&p, &rgba_dds(&out, w, h)).or_else(|e| if p.exists() { Ok(()) } else { Err(e.to_string()) })?;
     Ok(name)
 }
 
@@ -1463,7 +1506,7 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: us
                     match pools.get(t.hash, key, t.h64) {
                         // fallback (non-colour slot): AO/roughness maps are
                         // grayscale and pass bad_colour; never use them as diffuse
-                        Ok(p) if !COLOR_SLOTS.contains(&t.param) && near_gray(&p) => errs.push(format!("{:08x}: grayscale map in non-colour slot", t.hash)),
+                        Ok(p) if !COLOR_SLOTS.contains(&t.param) && near_gray(pools, &p) => errs.push(format!("{:08x}: grayscale map in non-colour slot", t.hash)),
                         Ok(p) => {
                             super::quality::hit("colour_pick", 1, || format!("{name} mat {:08x} slot {:08x} -> {:08x}", mat.shader_hash, t.param, t.hash));
                             return tex_name(&p);
@@ -1650,7 +1693,7 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
     let trusted = |i: &Value| i.get("alpha").is_some() && i["writer"].as_str() == Some(writer.as_str()) && (!frag || i.get("t6m_vehicles").is_some());
     if let Some(info) = ctx.up_to_date(&file, &fp).filter(trusted) {
         let a = from_info(&info);
-        if a.texs.iter().all(|t| pools.dir.join(format!("{}.dds", &t[4..])).exists()) {
+        if a.texs.iter().all(|t| pools.store.exists(&pools.dir.join(format!("{}.dds", &t[4..])))) {
             // per-file stats stored with the cache entry (older entries: unknown)
             let lods = info["lods"].as_u64().map_or("unknown (cached before stats)".to_string(), |n| n.to_string());
             super::regionlog::bump_n("ydr_lod_levels", &format!("{lods} (cached)"), &an, info["bytes"].as_u64().unwrap_or(0));
@@ -1783,10 +1826,11 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     if arch.is_empty() {
         return Ok(());
     }
-    let cache = ctx.o.work.join(format!("fivem_tex_cache_v{}i", sixng_core::bcpack::BCPACK_DECODER_VERSION));
-    fs::create_dir_all(&cache)?;
+    // source textures: decoded in memory (4 GB held), records in the index
+    let cache = PathBuf::from("texmem");
+    let store = super::texmem::Store::open(ctx.o.work.join("index").join(format!("fivem_textures_v{}.json", sixng_core::bcpack::BCPACK_DECODER_VERSION)), 4 << 30);
     let ttdb = ctx.o.game.join("data").join("ttdb");
-    let pools = Pools { game: ctx.o.game.clone(), catalog: crate::texture::Catalog::build(&ttdb).map_err(|e| eprintln!("{}: {e}", ttdb.display())).ok(), maps: Mutex::new(HashMap::new()), dir: cache.clone() };
+    let pools = Pools { game: ctx.o.game.clone(), catalog: crate::texture::Catalog::build(&ttdb).map_err(|e| eprintln!("{}: {e}", ttdb.display())).ok(), maps: Mutex::new(HashMap::new()), dir: cache.clone(), store };
     let mut by_off: HashMap<usize, &Entry> = index.entries.iter().map(|e| (e.off as usize, e)).collect();
     for (s, pk) in ctx.packs.iter().enumerate() {
         by_off.extend(pk.index.entries.iter().map(|e| (e.off as usize | ((s + 1) << super::PACK_SHIFT), e)));
@@ -1814,7 +1858,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     // Every texture ships at its full 6m size, mips and format; only an
     // explicit --max-tex drops top mips (the txd split handles size limits).
     let cap_of = |_: &str| -> u16 { ctx.o.max_tex.unwrap_or(u16::MAX) };
-    let tsize = |t: &str| fs::metadata(cache.join(format!("{}.dds", &t[4..]))).map(|m| m.len()).unwrap_or(0);
+    let tsize = |t: &str| pools.store.len(&cache.join(format!("{}.dds", &t[4..])));
     let mut fam: BTreeMap<String, Vec<&Arch>> = BTreeMap::new();
     for a in done.values() {
         fam.entry(a.an[4..].split('_').take(2).collect::<Vec<_>>().join("_")).or_default().push(a);
@@ -1967,15 +2011,15 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
                 .par_iter()
                 .map(|t| {
                     let p = cache.join(format!("{}.dds", &t[4..]));
-                    if !p.exists() {
-                        // recorded by a cached model but gone from the texture cache
-                        // (cache dir version bump, concurrent cleanup): placeholder
-                        ctx.skip(t, "texture missing from texture cache (placeholder used)", json!({"dds": p}));
+                    let Ok(b) = pools.load(&p) else {
+                        // named by a cached model but not recorded / not
+                        // decodable any more (decoder version bump): placeholder
+                        ctx.skip(t, "texture not in the texture records (placeholder used)", json!({"dds": p}));
                         let mut ph = placeholder();
                         ph.name = t.clone();
                         return Ok(ph);
-                    }
-                    let mut tex = texopt::load(t, &p, alpha_tex.contains(t))?;
+                    };
+                    let mut tex = ytd::from_dds(t, &b)?;
                     tex.limit_size(cap_of(t));
                     Ok(tex)
                 })
@@ -1987,6 +2031,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
             ctx.emit(&file, &fp, json!({"textures": sorted.len()}), Some(bytes))
         })
         .collect();
+    pools.store.save()?;
     for r in results {
         r?;
     }

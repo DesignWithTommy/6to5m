@@ -4,8 +4,8 @@
 //! writers in this crate.
 //!
 //! Output: <out>/stream/*.{ydr,ybn,ytd,ytyp,ymap}, <out>/fxmanifest.lua,
-//! <out>/water.xml, <out>/.fivem-manifest.json (incremental state) and
-//! <work>/fivem_tex_cache/*.dds (resolved source textures).
+//! <out>/water.xml; incremental state in <work>/index (fingerprint manifest,
+//! source-texture records: textures are decoded in memory, fivem/texmem.rs).
 //!
 //! Fragments are written as static ydr (main drawable, bind pose, no
 //! breakage/physics). Interior (MLO) entities are moved into world space as
@@ -34,6 +34,7 @@ mod vehicles;
 mod weapons;
 mod frags;
 mod vlog;
+mod texmem;
 mod texslot;
 mod quality;
 pub mod verify;
@@ -71,7 +72,7 @@ usage: 6ixpack fivem build --game <dir> --out <resource dir> [options]
   --work <dir>         sixng work dir with index/levels.json (default $SIXNG_WORK or ./work)
   --placements <dir>   sixng placement JSON dir with index.jsonl, or its parent
                        (default <work>/placements/levels; generated when missing)
-  Source-texture cache: <work>/fivem_tex_cache (kept out of the resource).
+  Source textures: decoded in memory; records in <work>/index/fivem_textures_v*.json.
   --max-tex <px>       drop top mips so building textures are at most this size (e.g. 512, 1024)
   --interiors         also place interior (MLO) contents in world space; off by
                        default because the MLO shell itself is not converted,

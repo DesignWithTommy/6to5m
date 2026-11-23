@@ -313,7 +313,7 @@ fn convert(o: &Opts, rpf: &std::path::Path, by_name: &HashMap<&str, &Entry>, poo
             continue;
         }
         let p = pools.dir.join(format!("{}.dds", &t[4..]));
-        let Ok(bytes) = fs::read(&p) else { continue };
+        let Some(bytes) = pools.store.cached(&p) else { continue };
         let mut x = ytd::from_dds(t, &bytes)?;
         if let Some(m) = o.max_tex {
             x.limit_size(m);
