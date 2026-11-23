@@ -25,21 +25,23 @@ impl Resource {
     /// live in the graphics pages.
     pub fn load_meta(archive: &Path, e: &Entry) -> Result<Self> {
         let mut r = Self::load_parts(archive, e, true)?;
-        // Small graphics pages are stored uncompressed right after the last
-        // zlib stream (16-byte aligned), so the stream index does not see
-        // them. Read as much as the meta block table needs from there.
-        if r.gfx.is_empty() && r.sys.get(0x10..0x15) == Some(b"0DRPz") {
+        // Graphics bytes past the last zlib stream are stored uncompressed
+        // right after it (16-byte aligned: a whole small page, or the raw
+        // tail of a page whose zlib part ends on a 64 KiB chunk), so the
+        // stream index does not see them. Read as much as the meta block
+        // table needs from there.
+        if r.sys.get(0x10..0x15) == Some(b"0DRPz") {
             let need = r.meta_gfx_extent();
-            if need > 0 && need <= 64 << 20 {
+            if need > r.gfx.len() && need <= 64 << 20 {
                 if let Some(last) = e.streams.last() {
                     use std::io::{Read, Seek, SeekFrom};
                     let pos = (last[0] + last[1] + 15) & !15;
                     let mut f = File::open(archive)?;
                     f.seek(SeekFrom::Start(pos))?;
-                    let mut buf = vec![0u8; need];
+                    let mut buf = vec![0u8; need - r.gfx.len()];
                     let n = f.read(&mut buf)?;
                     buf.truncate(n);
-                    r.gfx = buf;
+                    r.gfx.extend_from_slice(&buf);
                 }
             }
         }
@@ -201,10 +203,32 @@ pub fn memfind(h: &[u8], n: &[u8]) -> Option<usize> {
 pub fn read_sys(f: &mut File, e: &Entry) -> Result<(Vec<u8>, usize)> {
     let mut sys = read_stream(f, &e.streams[0])?;
     let mut n = 1;
+    // Raw system tail (rpf9-explorer, verified over the whole archive set):
+    // a system page whose zlib part ends on a whole 64 KiB chunk keeps its
+    // last 16 bytes uncompressed at the next 16-byte boundary, and the
+    // graphics streams start right after. The stream index only sees zlib
+    // streams, so without these bytes the system page is 16 short and every
+    // graphics offset after it lands 16 bytes early. True = the page ended.
+    let raw_tail = |f: &mut File, sys: &mut Vec<u8>, n: usize| -> Result<bool> {
+        let prev = e.streams[n - 1];
+        let raw = (prev[0] + prev[1] + 15) & !15;
+        if n >= e.streams.len() || prev[2] % 65536 != 0 || e.streams[n][0] != raw + 16 {
+            return Ok(false);
+        }
+        use std::io::{Read, Seek, SeekFrom};
+        let mut t = [0u8; 16];
+        f.seek(SeekFrom::Start(raw))?;
+        f.read_exact(&mut t)?;
+        sys.extend_from_slice(&t);
+        Ok(true)
+    };
     let pm = sys.get(8..16).map(|b| u64::from_le_bytes(b.try_into().unwrap())).unwrap_or(0);
     if pm >> 28 == 5 {
         let need = (pm & 0x0FFF_FFFF) as usize + 8;
         while sys.len() < need && n < e.streams.len() {
+            if raw_tail(f, &mut sys, n)? {
+                return Ok((sys, n));
+            }
             sys.extend(read_stream(f, &e.streams[n])?);
             n += 1;
         }
@@ -217,6 +241,9 @@ pub fn read_sys(f: &mut File, e: &Entry) -> Result<(Vec<u8>, usize)> {
     // Research toggle: SIXNG_SYS_ANY_ALIGN=1 restores the pre-2026-11-20 rule.
     let any_align = std::env::var_os("SIXNG_SYS_ANY_ALIGN").is_some();
     while n < e.streams.len() {
+        if raw_tail(f, &mut sys, n)? {
+            break;
+        }
         let len = sys.len();
         let next = e.streams[n][2] as usize;
         // Count 8-aligned targets only: an unaligned value repeated three
