@@ -15,6 +15,7 @@ const GFX: u64 = 0x6000_0000;
 
 pub type V3 = [f32; 3];
 
+#[derive(Clone)]
 pub struct Mesh {
     pub name: String,
     pub positions: Vec<V3>,
@@ -27,6 +28,9 @@ pub struct Mesh {
     pub palette: Option<Vec<u32>>,
     /// Source vertex normals (octahedral stream), when they fit the faces.
     pub normals: Option<Vec<V3>>,
+    /// Per triangle: index into `palette` (the cluster's bone), for
+    /// bone-palette geometry.
+    pub tri_bones: Option<Vec<u16>>,
 }
 
 pub struct TexRef {
@@ -69,6 +73,8 @@ pub struct Model {
     pub lower: [Vec<Mesh>; 3],
     /// LodGroup distances High..VLow (+0x70..+0x7C).
     pub lod_dist: [f32; 4],
+    /// Skeleton of the drawable (+0x18), when it has one.
+    pub joints: Option<Vec<super::skeleton::Joint>>,
 }
 
 pub struct Extent {
@@ -650,6 +656,7 @@ impl<'a> ModelReader<'a> {
             embedded,
             lower,
             lod_dist,
+            joints: super::skeleton::read_for_drawable(self.sys, drawable),
         })
     }
 
@@ -914,6 +921,7 @@ impl<'a> ModelReader<'a> {
             references.push(r as u32);
         }
         let mut indices = vec![0u32; triangles * 3];
+        let mut tri_bones = if bone_palette { Some(vec![0u16; triangles]) } else { None };
         let (mut acc_refs, mut acc_tris) = (0, 0);
         let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
         for cluster in 0..clusters {
@@ -923,6 +931,10 @@ impl<'a> ModelReader<'a> {
             let count = ((packed >> 7) & 255) as usize + 1;
             let (vstart, tstart) = ((offsets & 65535) as usize, (offsets >> 16) as usize);
             req(vstart == acc_refs && tstart == acc_tris && vertices <= refs - vstart && count <= triangles - tstart)?;
+            if let Some(tb) = tri_bones.as_mut() {
+                let bone = r16(index, palette_at + cluster * 2)?;
+                tb[tstart..tstart + count].fill(bone);
+            }
             for i in tstart..tstart + count {
                 let word = r32(index, triangle_at + i * 4)?;
                 req((word >> 21) as usize == cluster)?;
@@ -954,7 +966,7 @@ impl<'a> ModelReader<'a> {
         let uvs = self.read_uvs(fvf, vertex_count, vertex);
         let colors = self.read_colors(fvf, vertex_count, vertex);
         let normals = read_normals(vertex, &positions, &indices, axis_used);
-        Ok(Mesh { name, positions, indices, uvs, colors, shader: None, palette: None, normals })
+        Ok(Mesh { name, positions, indices, uvs, colors, shader: None, palette: None, normals, tri_bones })
     }
 }
 

@@ -12,7 +12,8 @@ mod structured;
 mod texture;
 
 use crate::zlib::Inflater;
-use decode::{MAX_GRAPHICS, MAX_SYSTEM, Model};
+pub use decode::Model;
+use decode::{MAX_GRAPHICS, MAX_SYSTEM};
 use flate2::{Decompress, FlushDecompress, Status};
 use memmap2::Mmap;
 use std::{

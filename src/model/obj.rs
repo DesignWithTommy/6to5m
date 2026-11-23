@@ -218,6 +218,7 @@ pub fn parse(text: &str, name: &str) -> Result<Model, String> {
             shader: None,
             palette: None,
             normals: None,
+            tri_bones: None,
         })
         .collect();
     Ok(Model {
@@ -236,6 +237,7 @@ pub fn parse(text: &str, name: &str) -> Result<Model, String> {
         palettes: Vec::new(),
         lower: Default::default(),
         lod_dist: [9998.0; 4],
+        joints: None,
     })
 }
 

@@ -1134,6 +1134,61 @@ fn four_layer_geoms(an: &str, pools: &Pools, mat: &crate::model::Material, key_o
     Some((out, texs))
 }
 
+/// Bone hash of each triangle of `sm` (its cluster's palette bone).
+fn tri_bone_hashes(sm: &crate::model::Mesh) -> Option<Vec<u32>> {
+    let (tb, pal) = (sm.tri_bones.as_ref()?, sm.palette.as_ref()?);
+    Some(tb.iter().map(|&b| pal.get(b as usize).copied().unwrap_or(0)).collect())
+}
+
+/// Per-instance decal variants: sibling leaf bones whose triangles are all
+/// in the decal bucket (6m prop_am_uld_02a: bones AirEmu, Caipira, FlyUs,
+/// GoPostal, Sahara, Yankee under rsBone, each holding one airline logo
+/// quad over the same spot of one decal geometry). The game shows one of
+/// them per placed instance; drawing every bone stacked all logos. Returns
+/// the hashes of all such bones.
+fn variant_bones(m: &crate::model::Model) -> Vec<Vec<u32>> {
+    let Some(joints) = m.joints.as_ref() else { return Vec::new() };
+    let mut decal: HashMap<u32, bool> = HashMap::new();
+    for sm in m.meshes.iter() {
+        let Some(hs) = tri_bone_hashes(sm) else { continue };
+        let is_decal = sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).is_some_and(|mt| kind_of(mt.bucket) == 2);
+        for h in hs {
+            let e = decal.entry(h).or_insert(true);
+            *e &= is_decal;
+        }
+    }
+    let leaf = |i: usize| !joints.iter().any(|j| j.parent == Some(i));
+    let mut sets: BTreeMap<usize, Vec<u32>> = BTreeMap::new();
+    for (i, j) in joints.iter().enumerate() {
+        if let (Some(p), Some(true)) = (j.parent, decal.get(&j.hash)) {
+            if leaf(i) {
+                sets.entry(p).or_default().push(j.hash);
+            }
+        }
+    }
+    sets.into_values().filter(|v| v.len() >= 2).collect()
+}
+
+/// The variant bone kept for palette row `row` (placement tint value):
+/// `(set size, kept bone hash)`. Which 6m entity field picks the variant is
+/// not decoded yet; the tint value is the per-instance value that exists,
+/// so variant = row mod set size (skeleton order), one per instance.
+fn decal_variants(m: &crate::model::Model, row: usize) -> Option<(usize, u32)> {
+    let sets = variant_bones(m);
+    let set = sets.first()?;
+    Some((set.len(), set[row % set.len()]))
+}
+
+/// `sm` without the triangles of variant bones other than `kept`.
+fn keep_variant(sm: &crate::model::Mesh, set: &[u32], kept: u32) -> crate::model::Mesh {
+    let mut out = sm.clone();
+    let Some(hs) = tri_bone_hashes(sm) else { return out };
+    let drop = |h: u32| h != kept && set.contains(&h);
+    out.indices = sm.indices.chunks_exact(3).zip(hs).filter(|(_, h)| !drop(*h)).flat_map(|(t, _)| t.iter().copied()).collect();
+    out.tri_bones = None;
+    out
+}
+
 /// rpf9 decoder path; None when the model does not decode (or is skinned).
 /// Also returns the model's lower LOD levels (Med/Low/VLow, empty when
 /// absent) and its LodGroup distances.
@@ -1158,7 +1213,19 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: us
     let mut levels: Vec<Mesh> = (0..4).map(|_| Mesh { name: an.clone(), geoms: Vec::new() }).collect();
     let (mut texs, mut missing) = (Vec::new(), Vec::new());
     let key_of = |t: &crate::model::TexRef| m.embedded.as_ref().and_then(|e| e.by_hash(t.hash)).and_then(|x| x.asset_key).unwrap_or(t.key);
-    let srcs = [&m.meshes, &m.lower[0], &m.lower[1], &m.lower[2]];
+    let picked = decal_variants(m, row);
+    if let Some((n, kept)) = &picked {
+        super::quality::hit("decal_variant", 1, || format!("{name}: {n} variant bones, row {row} keeps bone {kept:08x}"));
+    }
+    let owned: Vec<Vec<crate::model::Mesh>>;
+    let srcs: [&Vec<crate::model::Mesh>; 4] = match &picked {
+        Some((_, kept)) => {
+            let drop = variant_bones(m).swap_remove(0);
+            owned = [&m.meshes, &m.lower[0], &m.lower[1], &m.lower[2]].iter().map(|l| l.iter().map(|sm| keep_variant(sm, &drop, *kept)).collect()).collect();
+            [&owned[0], &owned[1], &owned[2], &owned[3]]
+        }
+        None => [&m.meshes, &m.lower[0], &m.lower[1], &m.lower[2]],
+    };
     for (mesh, sms) in levels.iter_mut().zip(srcs) {
     for sm in sms.iter() {
         if let Some(mat) = sm.shader.and_then(|s| m.materials.as_ref()?.get(s)).filter(|mt| FOUR_LAYER.contains(&mt.shader_hash)) {
