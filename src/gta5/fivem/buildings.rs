@@ -309,10 +309,34 @@ impl Pools {
     fn path(&self, hash: u32) -> PathBuf {
         self.dir.join(format!("{hash:08x}.dds"))
     }
+    /// Cache slot of a texture (fivem/texslot.rs): its 32-bit hash unless
+    /// another texture owns that file.
+    fn slot(&self, suffix: &str, hash: u32, key: u64, h64: u64) -> u32 {
+        super::texslot::slot(&self.dir, suffix, hash, key, h64, &|| self.dims(key, h64))
+    }
+
+    /// Stored size of a texture: TTPF by 64-bit hash, else its pool entry.
+    fn dims(&self, key: u64, h64: u64) -> Option<(u32, u32)> {
+        if h64 != 0 {
+            if let Some((_, t)) = sixng_core::ttpf::global(&self.game).get(h64) {
+                return Some((t.width, t.height));
+            }
+        }
+        let cat = self.catalog.as_ref()?;
+        let loc = cat.find(key).iter().find(|l| l.extractable)?;
+        let f = fs::File::open(&loc.path).ok()?;
+        // SAFETY: read-only map of a game file.
+        let map = unsafe { Mmap::map(&f) }.ok()?;
+        let pool = crate::texture::Pool::open(&map).ok()?;
+        let t = pool.textures.get(loc.index)?;
+        Some((t.width, t.height))
+    }
+
     /// Cached DDS path for a texture, fetching it from the pools if needed.
     /// Cached DDS for a texture: ttdb pools by asset key, then the TTPF
     /// stores (sixng) by 64-bit hash.
     fn get(&self, hash: u32, key: u64, h64: u64) -> Result<PathBuf, String> {
+        let hash = self.slot("", hash, key, h64);
         // Pool textures can be BCPack-flat or a normal map too: check the
         // decoded image and fall back to the TTPF stores, then give up.
         let e1 = match self.from_pools(hash, key).and_then(|p| check_dds(&p).map(|_| p)) {
@@ -325,6 +349,7 @@ impl Pools {
     /// Decoded RGBA of a data texture (no colour-map check), for maps that
     /// are sampled at build time (4-layer lookup weights).
     fn rgba(&self, hash: u32, key: u64, h64: u64) -> Result<(u32, u32, Vec<u8>), String> {
+        let hash = self.slot("", hash, key, h64);
         let e1 = match self.from_pools(hash, key).and_then(|p| fs::read(&p).map_err(|e| e.to_string())).and_then(|b| crate::texture::dds_preview(&b).map_err(|e| e.to_string())) {
             Ok(x) => return Ok(x),
             Err(e) => e,
@@ -348,8 +373,9 @@ impl Pools {
     /// makes sure the shared flat spec map exists. Flat decodes (undecoded
     /// BCPack) are rejected so they never bend the lighting.
     fn get_normal(&self, hash: u32, key: u64, h64: u64) -> Result<String, String> {
-        let name = format!("r6m_{hash:08x}_n");
-        let p = self.dir.join(format!("{hash:08x}_n.dds"));
+        let id = self.slot("_n", hash, key, h64);
+        let name = format!("r6m_{id:08x}_n");
+        let p = self.dir.join(format!("{id:08x}_n.dds"));
         if !p.exists() {
             let (w, h, rgba) = self.raw_rgba(hash, key, h64)?;
             if bad_colour(&rgba) == Some("flat decode (undecoded BCPack data)") {
@@ -375,6 +401,7 @@ impl Pools {
 
     /// Decoded RGBA without the colour-map check: ttdb pools, then TTPF.
     fn raw_rgba(&self, hash: u32, key: u64, h64: u64) -> Result<(u32, u32, Vec<u8>), String> {
+        let hash = self.slot("", hash, key, h64);
         let e1 = match self.from_pools(hash, key).and_then(|p| fs::read(&p).map_err(|e| e.to_string())).and_then(|b| crate::texture::dds_preview(&b).map_err(|e| e.to_string())) {
             Ok(x) => return Ok(x),
             Err(e) => e,
@@ -451,6 +478,11 @@ impl Pools {
         write_atomic(&p, &dds).or_else(|e| if p.exists() { Ok(()) } else { Err(e.to_string()) })?;
         Ok(p)
     }
+}
+
+/// Texture name of a cached source texture: `r6m_<cache id>`.
+fn tex_name(p: &Path) -> String {
+    format!("r6m_{}", p.file_stem().map_or(String::new(), |s| s.to_string_lossy().into_owned()))
 }
 
 /// Archetype-name suffix of a tinted placement variant: `<name>__tint<row>`.
@@ -1050,7 +1082,7 @@ type Built = (Mesh, Vec<String>, Vec<String>, bool);
 const FOUR_LAYER: [u32; 4] = [0x61e0_9df7, 0xb21f_1ba5, 0x360e_396b, 0x27e5_c49d];
 const DETAIL_TILE: f32 = 64.0;
 /// Writer version of four-layer ground ydrs (in their cache key only).
-const LYR4_V: &str = "lyr4_2";
+const LYR4_V: &str = "lyr4_1";
 
 /// Four-layer ground submesh as terrain_cb_w_4lyr geometries: the layer
 /// diffuses become the shader's four samplers, the section `lookuptexture`
@@ -1064,18 +1096,12 @@ fn four_layer_geoms(pools: &Pools, mat: &crate::model::Material, key_of: &dyn Fn
     let names: Vec<Option<String>> = (0..4)
         .map(|i| {
             let t = slot(&format!("diffusetexture_layer{i}"))?;
-            pools.get(t.hash, key_of(t), t.h64).ok().map(|_| format!("r6m_{:08x}", t.hash))
+            pools.get(t.hash, key_of(t), t.h64).ok().map(|p| tex_name(&p))
         })
         .collect();
     let first = names.iter().flatten().next()?.clone();
     if names.iter().flatten().count() < 2 {
         return None;
-    // 6m layer normal maps (bumptexture_layerN); the flat normal where one
-    // does not decode.
-    let flat = flat_bump(pools).ok()?;
-    let bumps: [String; 4] = std::array::from_fn(|i| {
-        slot(&format!("bumptexture_layer{i}")).and_then(|t| pools.get_normal(t.hash, key_of(t), t.h64).ok()).unwrap_or_else(|| flat.clone())
-    });
     }
     let layers: [String; 4] = std::array::from_fn(|i| names[i].clone().unwrap_or_else(|| first.clone()));
     let lt = slot("lookuptexture")?;
@@ -1084,9 +1110,9 @@ fn four_layer_geoms(pools: &Pools, mat: &crate::model::Material, key_of: &dyn Fn
         return None;
     }
     let sample = |uv: [f32; 2]| -> [f32; 3] {
-        // bilinear; wraps like the game's sampler (set pieces run past 0..1)
-        let x = (uv[0].rem_euclid(1.0) * lw as f32 - 0.5).clamp(0.0, (lw - 1) as f32);
-        let y = (uv[1].rem_euclid(1.0) * lh as f32 - 0.5).clamp(0.0, (lh - 1) as f32);
+        // bilinear, clamped to the section
+        let x = (uv[0].clamp(0.0, 1.0) * lw as f32 - 0.5).clamp(0.0, (lw - 1) as f32);
+        let y = (uv[1].clamp(0.0, 1.0) * lh as f32 - 0.5).clamp(0.0, (lh - 1) as f32);
         let (x0, y0) = (x.floor() as u32, y.floor() as u32);
         let (x1, y1) = ((x0 + 1).min(lw - 1), (y0 + 1).min(lh - 1));
         let (fx, fy) = (x - x0 as f32, y - y0 as f32);
@@ -1108,25 +1134,16 @@ fn four_layer_geoms(pools: &Pools, mat: &crate::model::Material, key_of: &dyn Fn
                 let s = (r + gg + b).max(1.0);
                 let (w1, w2, w3) = (gg / s, b / s, (1.0 - (r + gg + b) / s).max(0.0));
                 let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
-                (q(w2 + w3) << 8) | (q(w1 + w3) << 16)
-        // Detail layers tile at TEXCOORD_0 x 64 (SixNG 6046d19: one repeat
-        // per 8 m on map section tiles). Per-layer tiling (c35e27af) is not
-        // decoded yet (SixNG a225c66).
+                (q(w2 + w3) << 8) | (q(w1 + w3) << 16) | 0xFF00_0000
             })
             .collect();
         for uv in &mut g.uvs {
-        // Vertex colours as in GTA V's own terrain drawables: Colour0 =
-        // (ambient, 0, 0, 255), Colour1 = (0, G, B, 0).
-        for c in &mut g.colours {
-            *c = (*c & 0xFF) | 0xFF00_0000;
-        }
             *uv = [uv[0] * DETAIL_TILE, uv[1] * DETAIL_TILE];
-        g.layer_bumps = bumps.clone();
         }
         g.layers = Some(layers.clone());
     }
     let mut texs: Vec<String> = Vec::new();
-    for l in layers.iter().chain(&bumps).chain([&ydr::FLAT_SPEC.to_string()]) {
+    for l in &layers {
         if !texs.contains(l) {
             texs.push(l.clone());
         }
@@ -1186,7 +1203,7 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: us
                         // fallback (non-colour slot): AO/roughness maps are
                         // grayscale and pass bad_colour; never use them as diffuse
                         Ok(p) if !COLOR_SLOTS.contains(&t.param) && near_gray(&p) => errs.push(format!("{:08x}: grayscale map in non-colour slot", t.hash)),
-                        Ok(_) => return format!("r6m_{:08x}", t.hash),
+                        Ok(p) => return tex_name(&p),
                         Err(e) => errs.push(format!("{:08x}: {e}", t.hash)),
                     }
                 }
@@ -1308,7 +1325,7 @@ fn sixng_mesh(ctx: &Ctx, pools: &Pools, an: &str, e: &Entry) -> Result<Built, St
                         let hash = u32::from_str_radix(&t.hash32, 16).unwrap_or(0);
                         let key = emb.as_ref().and_then(|e| e.by_hash(hash)).and_then(|x| x.asset_key).unwrap_or_else(|| key_of(sh, t.param));
                         match pools.get(hash, key, u64::from_str_radix(&t.hash64, 16).unwrap_or(0)) {
-                            Ok(_) => return format!("r6m_{hash:08x}"),
+                            Ok(p) => return tex_name(&p),
                             Err(e) => errs.push(format!("{hash:08x}: {e}")),
                         }
                     }
@@ -1451,7 +1468,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     if arch.is_empty() {
         return Ok(());
     }
-    let cache = ctx.o.work.join(format!("fivem_tex_cache_v{}", sixng_core::bcpack::BCPACK_DECODER_VERSION));
+    let cache = ctx.o.work.join(format!("fivem_tex_cache_v{}i", sixng_core::bcpack::BCPACK_DECODER_VERSION));
     fs::create_dir_all(&cache)?;
     let ttdb = ctx.o.game.join("data").join("ttdb");
     let pools = Pools { game: ctx.o.game.clone(), catalog: crate::texture::Catalog::build(&ttdb).map_err(|e| eprintln!("{}: {e}", ttdb.display())).ok(), maps: Mutex::new(HashMap::new()), dir: cache.clone() };

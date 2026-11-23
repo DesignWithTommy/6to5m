@@ -34,7 +34,7 @@ pub struct TexRef {
     pub hash: u32,
     /// 64-bit asset key of the keyed texture descriptor (resolves through the ttdb pools).
     pub key: u64,
-    /// 64-bit texture hash (TTPF store key), 24 bytes before the asset.
+    /// 64-bit texture hash (TTPF store key): the same value as `key`.
     pub h64: u64,
 }
 
@@ -736,17 +736,22 @@ impl<'a> ModelReader<'a> {
                 {
                     continue;
                 }
-                let asset = self.s(texture + 48, 16)?;
-                if asset < 16
-                    || r32(sys, asset - 16)? != 6
-                    || r32(sys, asset - 12)? != 0
-                    || r32(sys, asset - 4)? != 0
+                // Texture record (0x20 bytes, chained): +0x00 self - 11 marker,
+                // +0x08 64-bit hash (the ttdb asset key and TTPF key), +0x10 u32
+                // type 6, +0x18 u32 hash. The fields before +0x00 belong to the
+                // previous record of the chain (reading them gave every texture
+                // its neighbour's hash: shared names and cache files).
+                let asset = self.s(texture + 48, 32)?;
+                if r32(sys, asset + 16)? != 6
+                    || r32(sys, asset + 20)? != 0
+                    || r32(sys, asset + 28)? != 0
                     || r64(sys, asset)? != SYS + asset as u64 - 11
                     || r64(sys, asset + 8)? == 0
                 {
                     continue;
                 }
-                refs.push(TexRef { param: r32(sys, at)?, hash: r32(sys, asset - 8)?, key: r64(sys, asset + 8)?, h64: r64(sys, asset - 24).unwrap_or(0) });
+                let key = r64(sys, asset + 8)?;
+                refs.push(TexRef { param: r32(sys, at)?, hash: r32(sys, asset + 24)?, key, h64: key });
             }
             result.push(Material { shader_hash: hash, bucket: sys.get(shader + 0x3C).copied().unwrap_or(0), textures: refs });
         }

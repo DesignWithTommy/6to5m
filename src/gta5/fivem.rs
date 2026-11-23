@@ -32,6 +32,7 @@ mod terrain;
 mod vehicles;
 mod weapons;
 mod frags;
+mod texslot;
 pub mod verify;
 
 use memmap2::Mmap;
@@ -86,11 +87,11 @@ also: 6ixpack fivem vehicle <name> --game <dir> --out <dir>   (one 6m vehicle ->
 
 /// Per-stage output versions: bump only the one whose writer changed, so
 /// other outputs stay cached (each goes into its own outputs' fingerprints).
-pub const TEX_V: &str = "tex1";
-pub const YDR_V: &str = "ydr12";
+pub const TEX_V: &str = "tex2";
+pub const YDR_V: &str = "ydr13";
 /// Fragment props as dynamic .yft (fivem/frags.rs).
 pub const FRAG_V: &str = "frag3";
-pub const YBN_V: &str = "ybn3";
+pub const YBN_V: &str = "ybn2";
 pub const TERRAIN_V: &str = "terrain2";
 /// Meta files (ymap/ytyp) and water.xml are rebuilt every run and compared
 /// byte for byte, so they need no version. MANIFEST_V is the manifest layout.
@@ -528,6 +529,10 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
         t0.elapsed().as_secs_f32(),
         ctx.o.out.display()
     );
+    let moved = texslot::MOVED.load(std::sync::atomic::Ordering::Relaxed);
+    if moved > 0 {
+        println!("fivem: {moved} texture lookups moved off a 32-bit hash slot owned by another texture");
+    }
     if let Some(p) = &ctx.o.report {
         fs::write(p, serde_json::to_vec_pretty(&*r)?).map_err(|e| format!("{}: {e}", p.display()))?;
     }

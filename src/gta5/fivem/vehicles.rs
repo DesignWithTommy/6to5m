@@ -158,7 +158,7 @@ pub(super) struct Pools {
 impl Pools {
     /// Pools over <game>/data/ttdb + TTPF stores, cache under <work>.
     pub(super) fn new(game: &Path, work: &Path) -> Result<Pools, String> {
-        let dir = work.join(format!("fivem_tex_cache_v{}", sixng_core::bcpack::BCPACK_DECODER_VERSION));
+        let dir = work.join(format!("fivem_tex_cache_v{}i", sixng_core::bcpack::BCPACK_DECODER_VERSION));
         fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let ttdb = game.join("data").join("ttdb");
         Ok(Pools { game: game.to_path_buf(), catalog: crate::texture::Catalog::build(&ttdb).map_err(|e| eprintln!("{}: {e}", ttdb.display())).ok(), maps: HashMap::new(), dir })
@@ -166,7 +166,31 @@ impl Pools {
     fn path(&self, hash: u32) -> PathBuf {
         self.dir.join(format!("{hash:08x}.dds"))
     }
+    /// Cache slot of a texture (fivem/texslot.rs): its 32-bit hash unless
+    /// another texture owns that file.
+    fn slot(&self, suffix: &str, hash: u32, key: u64, h64: u64) -> u32 {
+        super::texslot::slot(&self.dir, suffix, hash, key, h64, &|| self.dims(key, h64))
+    }
+
+    /// Stored size of a texture: TTPF by 64-bit hash, else its pool entry.
+    fn dims(&self, key: u64, h64: u64) -> Option<(u32, u32)> {
+        if h64 != 0 {
+            if let Some((_, t)) = sixng_core::ttpf::global(&self.game).get(h64) {
+                return Some((t.width, t.height));
+            }
+        }
+        let cat = self.catalog.as_ref()?;
+        let loc = cat.find(key).iter().find(|l| l.extractable)?;
+        let f = fs::File::open(&loc.path).ok()?;
+        // SAFETY: read-only map of a game file.
+        let map = unsafe { Mmap::map(&f) }.ok()?;
+        let pool = crate::texture::Pool::open(&map).ok()?;
+        let t = pool.textures.get(loc.index)?;
+        Some((t.width, t.height))
+    }
+
     fn get(&mut self, hash: u32, key: u64, h64: u64) -> Result<PathBuf, String> {
+        let hash = self.slot("", hash, key, h64);
         let e1 = match self.from_pools(hash, key).and_then(|p| check_dds(&p).map(|_| p)) {
             Ok(p) => return Ok(p),
             Err(e) => e,
@@ -493,7 +517,7 @@ pub(super) fn load_source(rpf: &Path, e: &Entry, pools: &mut Pools, texs: &mut V
                                 let hash = u32::from_str_radix(&t.hash32, 16).unwrap_or(0);
                                 let key = emb.as_ref().and_then(|e| e.by_hash(hash)).and_then(|x| x.asset_key).unwrap_or_else(|| key_of(sh, t.param));
                                 match pools.get(hash, key, u64::from_str_radix(&t.hash64, 16).unwrap_or(0)) {
-                                    Ok(_) => return format!("r6m_{hash:08x}"),
+                                    Ok(p) => return format!("r6m_{}", p.file_stem().map_or(String::new(), |s| s.to_string_lossy().into_owned())),
                                     // the paint slot's white is in no store: the body colour
                                     Err(_) if ph(&t) == Some(PAINT_SLOT) || sixng_core::material::is_paint(&sh.name_hash) => return PAINT.to_string(),
                                     Err(e) => errs.push(format!("{hash:08x}: {e}")),
@@ -574,7 +598,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     if e_base.is_none() && e_mid.is_none() && e_hi.is_none() {
         return Err(format!("no fragment named {0}, {0}_mid or {0}_hi in {1} (try --list)", o.name, ip.display()).into());
     }
-    let cache = o.work.join(format!("fivem_tex_cache_v{}", sixng_core::bcpack::BCPACK_DECODER_VERSION));
+    let cache = o.work.join(format!("fivem_tex_cache_v{}i", sixng_core::bcpack::BCPACK_DECODER_VERSION));
     fs::create_dir_all(&cache)?;
     let ttdb = o.game.join("data").join("ttdb");
     let mut pools = Pools { game: o.game.clone(), catalog: crate::texture::Catalog::build(&ttdb).map_err(|e| eprintln!("{}: {e}", ttdb.display())).ok(), maps: HashMap::new(), dir: cache.clone() };
