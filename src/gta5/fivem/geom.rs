@@ -63,17 +63,16 @@ pub fn push_geoms_n(out: &mut Vec<Geom>, pos: &[V3], idx: &[u32], normals: Optio
                 let s = i as usize;
                 let nn = normals.filter(|v| v.len() == n).map_or_else(|| unit(nrm[s]), |v| unit(v[s]));
                 let p = [pos[s][0] + nn[0] * lift, pos[s][1] + nn[1] * lift, pos[s][2] + nn[2] * lift];
-                // 6m COLOR0: r = baked occlusion, g ~0.05 (unknown), b = tint
-                // palette index, a = layer-2 weight. GTA V reads r/g as natural
-                // and artificial ambient scale, so raw g made every building
-                // black under artificial light. Keep r as both, b/a = 255.
-                let col = colours.map_or(0xFFFF_FFFF, |c| {
-                    let r = c[s] & 0xFF;
-                    // decals keep a: GTA V decal.sps multiplies alpha by Colour0.a,
-                    // where 6m decals fade their edges (0..255, mean ~130)
-                    let a = if kind == 2 { c[s] & 0xFF00_0000 } else { 0xFF00_0000 };
-                    r | r << 8 | 0x00FF_0000 | a
-                });
+                // 6m COLOR0.r is not ambient occlusion: it floors at exactly
+                // 0.20 and sits at ~0.2 over whole flat-wall materials
+                // (ap_09_side_w: mean 0.21 over 1,786 vertices) while
+                // multilayer walls swing 0.2..1.0 mid-wall. GTA V reads
+                // Colour0.r/g as natural/artificial ambient scale, so writing
+                // it there painted dark bands interpolated across large
+                // triangles (the blurry facade smears). Ambient stays full;
+                // decals keep a (decal.sps multiplies alpha by Colour0.a,
+                // where 6m decals fade their edges).
+                let col = colours.map_or(0xFFFF_FFFF, |c| if kind == 2 { 0x00FF_FFFF | (c[s] & 0xFF00_0000) } else { 0xFFFF_FFFF });
                 // 6m UVs are DirectX top-left like GTA V: no flip (the old
                 // obj2ydrxml 1-v flip assumed OBJ bottom-left input).
                 let uv = uvs.map_or([0.0, 0.0], |u| u[s]);
