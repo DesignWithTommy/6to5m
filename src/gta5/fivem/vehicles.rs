@@ -80,13 +80,14 @@ const VEH_PALETTE_SLOT: u32 = 0x19df_25d7;
 /// lyr0/lyr1diffusetex: linear data maps on the vehicle two-layer shaders.
 const VEH_DATA_SLOTS: [u32; 2] = [0x3463_94ea, 0x7d4f_12e2];
 const PAINT: &str = "r6m_paint";
+/// Prefix of part-colour stand-ins (`r6m_pc_RRGGBB`, sRGB), see `load_source`.
+const PART: &str = "r6m_pc_";
 /// `diffusetex` on 6m vehicle shaders: an engine-default white that the
 /// runtime paint colour tints (GTA VI format notes, vehicle paint).
 const PAINT_SLOT: u32 = 0xc8e8_c282;
 /// Packed material slot (roughness/metal/AO) and the synthesized-map id salt.
 const PACKED_SLOT: u32 = 0x739e_3d0d;
 const SYNTH: u32 = 0x5e17_0001;
-const WHEELS: [&str; 4] = ["wheel_lf", "wheel_rf", "wheel_lr", "wheel_rr"];
 
 /// Diffuse/colour parameter hashes in priority order (buildings.rs).
 const COLOR_SLOTS: [u32; 16] = [
@@ -173,13 +174,16 @@ pub(super) struct Pools {
     maps: HashMap<PathBuf, Mmap>,
     pub(super) dir: PathBuf,
     pub(super) store: super::texmem::Store,
+    /// The vehicle's part set (SixNG vehcolour): set before its own
+    /// fragments load, so their two-layer materials take per-part colours.
+    pub(super) part_set: Option<Vec<sixng_core::vehcolour::Part>>,
 }
 
 impl Pools {
     /// Pools over <game>/data/ttdb + TTPF stores, textures in memory.
     pub(super) fn new(game: &Path, _work: &Path) -> Result<Pools, String> {
         let ttdb = game.join("data").join("ttdb");
-        Ok(Pools { game: game.to_path_buf(), catalog: crate::texture::Catalog::build(&ttdb).map_err(|e| eprintln!("{}: {e}", ttdb.display())).ok(), maps: HashMap::new(), dir: PathBuf::from("texmem"), store: super::texmem::Store::temp() })
+        Ok(Pools { game: game.to_path_buf(), catalog: crate::texture::Catalog::build(&ttdb).map_err(|e| eprintln!("{}: {e}", ttdb.display())).ok(), maps: HashMap::new(), dir: PathBuf::from("texmem"), store: super::texmem::Store::temp(), part_set: None })
     }
     fn path(&self, hash: u32) -> PathBuf {
         self.dir.join(format!("{hash:08x}.dds"))
@@ -442,6 +446,8 @@ pub(super) struct Source {
     pub(super) bones: Vec<drawable::Bone>,
     pub(super) lods: Vec<Vec<(usize, Geom)>>,
     groups: Vec<PGroup>,
+    /// Wheel and brake collision discs of the fragment (SixNG bounds.rs).
+    discs: Vec<sixng_core::bounds::WheelDisc>,
 }
 
 /// One 6m fragment physics group (GTA6-Asset-Info 13.4): first bone name,
@@ -499,6 +505,7 @@ pub(super) fn load_source(rpf: &Path, e: &Entry, pools: &mut Pools, texs: &mut V
     let maxlod = info.models.iter().filter(|m| !m.part).map(|m| m.lod).max().unwrap_or(0);
     let mut lods: Vec<Vec<(usize, Geom)>> = vec![Vec::new(); maxlod + 1];
     let mut tex_cache: HashMap<usize, String> = HashMap::new();
+    let mut palettes: HashMap<usize, Option<Vec<[u8; 4]>>> = HashMap::new();
     for md in info.models.iter().filter(|m| !m.part) {
         for (k, &gi) in md.geometries.iter().enumerate() {
             let g = &info.geometries[gi];
@@ -595,24 +602,65 @@ pub(super) fn load_source(rpf: &Path, e: &Entry, pools: &mut Pools, texs: &mut V
                     if b < nb { b } else { 0 }
                 })
                 .collect();
-            let mut by_bone: BTreeMap<usize, Vec<u32>> = BTreeMap::new();
+            // Part colours (SixNG f1f0ec6, GTA6-Asset-Info 236cee8): the
+            // two-layer vehicle materials (paint / trim stand-ins) carry a part
+            // id in the vertex colour alpha; the vehicle's part set names a
+            // colour record per id. Fixed materials take their material
+            // palette row, paints their own colour, the primary paint the body
+            // colour.
+            let looks: Option<Vec<String>> = (|| {
+                pools.part_set.as_ref()?;
+                let (sh, s) = (sh?, si?);
+                if tex != PAINT && tex != TRIM {
+                    return None;
+                }
+                let cols = m.colors.as_ref()?;
+                let pal = palettes
+                    .entry(s)
+                    .or_insert_with(|| {
+                        let t = sh.textures.iter().find(|t| u32::from_str_radix(&t.param_hash, 16).ok() == Some(VEH_PALETTE_SLOT))?;
+                        let hash = u32::from_str_radix(&t.hash32, 16).unwrap_or(0);
+                        let key = emb.as_ref().and_then(|e| e.by_hash(hash)).and_then(|x| x.asset_key).unwrap_or_else(|| key_of(sh, t.param));
+                        let (rgba, w, h) = pools.raw(hash, key, u64::from_str_radix(&t.hash64, 16).unwrap_or(0)).ok()?;
+                        (w == 128 && h == 256).then(|| rgba.chunks_exact(4).map(|p| [p[0], p[1], p[2], p[3]]).collect())
+                    })
+                    .as_ref()?;
+                let parts = pools.part_set.as_ref()?;
+                let look: Vec<String> = (0..256)
+                    .map(|i| {
+                        let p = &parts[i];
+                        if p.is_primary() {
+                            return PAINT.to_string();
+                        }
+                        let rgb = if !p.is_paint() && p.row >= 0 { sixng_core::vehcolour::ramp(pal, p.row as usize) } else { p.rgb };
+                        format!("{PART}{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2])
+                    })
+                    .collect();
+                Some(cols.iter().map(|c| look[c[3] as usize].clone()).collect())
+            })();
+            let mut by_bone: BTreeMap<(usize, String), Vec<u32>> = BTreeMap::new();
             for t in m.indices.chunks_exact(3) {
                 if t.iter().any(|&i| i as usize >= nv) {
                     continue;
                 }
                 let d = [dom[t[0] as usize], dom[t[1] as usize], dom[t[2] as usize]];
                 let b = if d[1] == d[2] { d[1] } else { d[0] };
-                by_bone.entry(b).or_default().extend_from_slice(t);
+                let tx = looks.as_ref().and_then(|l| l.get(t[0] as usize)).unwrap_or(&tex);
+                by_bone.entry((b, tx.clone())).or_default().extend_from_slice(t);
             }
-            for (b, idx) in by_bone {
+            for ((b, tx), idx) in by_bone {
+                if !texs.contains(&tx) {
+                    texs.push(tx.clone());
+                }
                 let mut out = Vec::new();
-                push_geoms(&mut out, &m.positions, &idx, uv, col.as_deref(), &tex, kind);
+                push_geoms(&mut out, &m.positions, &idx, uv, col.as_deref(), &tx, kind);
                 lods[md.lod].extend(out.into_iter().map(|g| (b, g)));
             }
         }
     }
     let groups = phys_groups(&r, &info.skeleton);
-    Ok(Source { bones: info.skeleton, lods, groups })
+    let discs = sixng_core::bounds::wheel_discs(&r);
+    Ok(Source { bones: info.skeleton, lods, groups, discs })
 }
 
 // ---------------------------------------------------------------- build
@@ -639,9 +687,17 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     let mut pools = Pools::new(&o.game, &o.work)?;
     let cache = pools.dir.clone();
     let (mut texs, mut missing) = (Vec::new(), Vec::new());
+    // part sets (vehicle bodies and mod part models such as rims), read from
+    // packs.rpf / data.rpf through the work index
+    let part_tables = sixng_core::vehcolour::tables(&o.game, &o.work).map_err(|e| eprintln!("vehicle: part colours not available ({e:#}); two-layer materials keep the paint / trim stand-ins")).ok();
+    let part_set = |model: &str| part_tables.as_ref().and_then(|t| t.for_model(model)).map(|(_, p)| p.to_vec());
+    if part_tables.is_some() && part_set(&o.name).is_none() {
+        eprintln!("vehicle: no part set links to {}: two-layer materials keep the paint / trim stand-ins", o.name);
+    }
     let mut load = |e: Option<&Entry>| -> Result<Option<Source>, String> {
         e.map(|e| {
             eprintln!("vehicle: decoding {} ({})", e.name.as_deref().unwrap_or("?"), e.id);
+            pools.part_set = part_set(e.name.as_deref().unwrap_or(""));
             load_source(&o.game.join("levels.rpf"), e, &mut pools, &mut texs, &mut missing)
         })
         .transpose()
@@ -650,28 +706,29 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     let s_base = load(e_base)?;
     let s_hi = load(e_hi)?;
     let vd = vehicle_data(&o);
-    // real rim + tyre drawables, vertices in wheel space scaled to the car
-    let mut wheel_geoms = |front: bool| -> Result<(Vec<Geom>, f32), String> {
-        let Some(vd) = &vd else { return Ok((Vec::new(), 0.0)) };
-        let s = 1.625 * if front { vd.wheel_scale } else { vd.wheel_scale_rear };
-        let (mut gs, mut radius) = (Vec::new(), 0.0f32);
-        for part in [&vd.tyre, &vd.rim].into_iter().flatten() {
+    // Shared part models (rim, tyre, brake disc, caliper) at their own unit
+    // scale, wheel space (X = axle).
+    let mut part_geoms = |parts: &[&Option<String>]| -> Result<Vec<Geom>, String> {
+        let mut gs = Vec::new();
+        for part in parts.iter().copied().flatten() {
             let Some(e) = drawables.get(format!("{part}_mid").as_str()).or(drawables.get(part.as_str())).copied() else {
-                eprintln!("vehicle: wheel part {part} not in the index");
+                eprintln!("vehicle: part model {part} not in the index");
                 continue;
             };
-            let src = load(Some(e))?.unwrap();
-            for (_, mut g) in src.lods.into_iter().next().unwrap_or_default() {
-                for p in g.positions.iter_mut() {
-                    *p = [p[0] * s, p[1] * s, p[2] * s];
-                    radius = radius.max((p[1] * p[1] + p[2] * p[2]).sqrt());
-                }
-                gs.push(g);
-            }
+            gs.extend(load(Some(e))?.unwrap().lods.into_iter().next().unwrap_or_default().into_iter().map(|(_, g)| g));
         }
-        Ok((gs, radius))
+        Ok(gs)
     };
-    let (wf, wr) = (wheel_geoms(true)?, wheel_geoms(false)?);
+    let (wheel_unit, disc_unit, caliper_unit) = match &vd {
+        Some(v) => (part_geoms(&[&v.tyre, &v.rim])?, part_geoms(&[&v.brake_disc])?, part_geoms(&[&v.caliper])?),
+        None => Default::default(),
+    };
+    // unit wheel size: outer radius and width (the tyre's, else the rim's)
+    let (unit_r, unit_w) = {
+        let r = wheel_unit.iter().flat_map(|g| g.positions.iter()).map(|p| (p[1] * p[1] + p[2] * p[2]).sqrt()).fold(0.0f32, f32::max);
+        let (lo, hi) = wheel_unit.iter().flat_map(|g| g.positions.iter()).fold((f32::MAX, f32::MIN), |(a, b), p| (a.min(p[0]), b.max(p[0])));
+        (r, if hi > lo { hi - lo } else { 0.0 })
+    };
 
     // shared skeleton: from the richest source
     let skel = [&s_hi, &s_mid, &s_base].into_iter().flatten().map(|s| &s.bones).max_by_key(|b| b.len()).ok_or("no source")?;
@@ -740,17 +797,84 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     let mut groups = vec![Group { name: "chassis".into(), parent: None }];
     let mut children = vec![Child { bone: 0, group: 0, min: cmin, max: cmax, mass: o.mass, drawable: Vec::new() }];
     let generated = |r: f32| vec![yft::tyre(r, r * 0.65, TYRE, 24)];
+    // Wheels by tyre size (SixNG 7670dc5): each wheel bone's collision disc
+    // (the largest on its axle line) is the tyre's outer radius and half
+    // width; the shared rim and tyre models are scaled to it. The thinner
+    // disc there is the brake disc. Dual pairs (`wheel_lr_inr`) put their
+    // inner wheel, mirrored, into the outer wheel's drawable. Without discs:
+    // wheelScale as the rim radius (rim models are 0.5; SixNG WHEEL_FACTOR).
+    let discs: &[sixng_core::bounds::WheelDisc] = [&s_mid, &s_base, &s_hi].into_iter().flatten().map(|s| s.discs.as_slice()).find(|d| !d.is_empty()).unwrap_or(&[]);
+    let skel_pivot = |name: &str| skel.iter().position(|b| b.name.eq_ignore_ascii_case(name)).map(|i| bone_pivot(skel, i));
+    let disc_at = |p: V3| -> (Option<(f32, f32)>, Option<(f32, V3)>) {
+        let near: Vec<&sixng_core::bounds::WheelDisc> = discs.iter().filter(|d| (d.centre[0] - p[0]).abs() < 0.15 && (d.centre[1] - p[1]).abs() < 0.03 && (d.centre[2] - p[2]).abs() < 0.03).collect();
+        let big = near.iter().map(|d| d.radius).fold(0.0f32, f32::max);
+        let tyre = near.iter().filter(|d| d.radius > big - 1e-3).min_by(|a, b| (a.centre[0] - p[0]).abs().total_cmp(&(b.centre[0] - p[0]).abs())).map(|d| (d.radius, d.half_width));
+        let brake = near.iter().filter(|x| x.radius < 0.75 * big).max_by(|a, b| a.radius.total_cmp(&b.radius)).map(|d| (d.radius, d.centre));
+        (tyre, brake)
+    };
+    let scaled = |gs: &[Geom], s: V3, mirror: bool, off: V3| -> Vec<Geom> {
+        gs.iter()
+            .map(|gm| {
+                let mut gm = gm.clone();
+                let m = if mirror { -1.0 } else { 1.0 };
+                for p in gm.positions.iter_mut() {
+                    *p = [m * p[0] * s[0] + off[0], p[1] * s[1] + off[1], p[2] * s[2] + off[2]];
+                }
+                for n in gm.normals.iter_mut() {
+                    n[0] *= m;
+                }
+                if mirror {
+                    for t in gm.indices.chunks_exact_mut(3) {
+                        t.swap(1, 2);
+                    }
+                }
+                gm
+            })
+            .collect()
+    };
     let mut wheels = Vec::new();
-    for w in WHEELS {
-        if let Some(bi) = bones.iter().position(|b| b.name == w) {
-            groups.push(Group { name: w.into(), parent: Some(0) });
-            let (gs, r) = if w.ends_with('f') { &wf } else { &wr };
-            let (drawable, r) = if gs.is_empty() { (generated(o.wheel_r), o.wheel_r) } else { (gs.clone(), *r) };
-            let wd = r * 0.65;
-            let mass = pgroups.iter().find(|g| g.name == w).map_or(20.0, |g| g.mass.max(1.0));
-            children.push(Child { bone: bi, group: groups.len() - 1, min: [-wd / 2.0, -r, -r], max: [wd / 2.0, r, r], mass, drawable });
-            wheels.push(w);
+    let mut calipers: Vec<Vec<Geom>> = Vec::new();
+    for (bi, b) in bones.iter().enumerate() {
+        let w = b.name.as_str();
+        if !is_wheel_mount(w) || w.ends_with("_inr") {
+            continue;
         }
+        let lw = w.to_ascii_lowercase();
+        let right = lw.as_bytes()[6] == b'r';
+        let rear = lw.as_bytes()[7] != b'f';
+        let pivot = skel_pivot(w).unwrap_or_default();
+        let (tyre, brake) = disc_at(pivot);
+        let ws = vd.as_ref().map_or(0.25, |v| if rear { v.wheel_scale_rear } else { v.wheel_scale });
+        // scale of the unit models: the disc's radius, else wheelScale as the rim radius
+        let (sr, sw) = match tyre {
+            Some((r, hw)) if unit_r > 0.0 => {
+                let s = r / unit_r;
+                (s, if unit_w > 0.0 { (2.0 * hw / unit_w).clamp(0.05 * s, 2.0 * s) } else { s })
+            }
+            _ => (ws * 2.0, ws * 2.0),
+        };
+        let (mut drawable, r) = if wheel_unit.is_empty() { (generated(o.wheel_r), o.wheel_r) } else { (scaled(&wheel_unit, [sw, sr, sr], right, [0.0; 3]), unit_r * sr) };
+        if !wheel_unit.is_empty() {
+            if let Some(inner) = skel_pivot(&format!("{w}_inr")) {
+                // the inner wheel faces the other way; offset along the axle in wheel space
+                let off = yft::to_local(g[bi], inner);
+                drawable.extend(scaled(&wheel_unit, [sw, sr, sr], !right, off));
+            }
+        }
+        // brake disc (turns with the wheel) and caliper (fixed, on the
+        // chassis): both modelled around a disc of radius 0.5
+        if let Some((br, bc)) = brake {
+            let s = br / 0.5;
+            drawable.extend(scaled(&disc_unit, [s; 3], right, yft::to_local(g[bi], bc)));
+            if !caliper_unit.is_empty() {
+                calipers.push(scaled(&caliper_unit, [s; 3], right, bc));
+            }
+        }
+        groups.push(Group { name: w.into(), parent: Some(0) });
+        let wd = 2.0 * tyre.map_or(r * 0.325, |t| t.1);
+        let mass = pgroups.iter().find(|g| g.name == w).map_or(20.0, |g| g.mass.max(1.0));
+        children.push(Child { bone: bi, group: groups.len() - 1, min: [-wd / 2.0, -r, -r], max: [wd / 2.0, r, r], mass, drawable });
+        wheels.push(w.to_string());
     }
     // the exterior 6m physics groups (doors, bonnet, boot, bumpers, windows ...):
     // one box child per group on its bone, so GTA V can open / detach them by
@@ -796,6 +920,23 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     for (k, (slot, s, l)) in main_plan.iter().enumerate() {
         frag.lods[*slot] = if k == 0 { high.clone() } else { to_models(&s.lods[*l]) };
     }
+    // calipers: model space, on the root bone of the main LOD
+    for gs in &calipers {
+        let gs: Vec<Geom> = gs
+            .iter()
+            .map(|gm| {
+                let mut gm = gm.clone();
+                for p in gm.positions.iter_mut() {
+                    *p = yft::to_local(g[0], *p);
+                }
+                gm
+            })
+            .collect();
+        match frag.lods[0].iter_mut().find(|m| m.bone == 0) {
+            Some(m) => m.geoms.extend(gs),
+            None => frag.lods[0].push(Model { bone: 0, geoms: gs }),
+        }
+    }
     let stream = o.out.join("stream");
     let data = o.out.join("data");
     fs::create_dir_all(&stream)?;
@@ -825,6 +966,11 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
         if t == MISSING || t == PAINT || t == TYRE || t == CHROME || t == TRIM {
             continue;
         }
+        if let Some(h) = t.strip_prefix(PART) {
+            let v = u32::from_str_radix(h, 16).unwrap_or(0x80_8080);
+            tx.push(solid(t, [v as u8, (v >> 8) as u8, (v >> 16) as u8, 0xFF], 16));
+            continue;
+        }
         let p = cache.join(format!("{}.dds", &t[4..]));
         let bytes = pools.store.cached(&p).ok_or_else(|| format!("{}: not decoded", p.display()))?;
         let mut x = ytd::from_dds(t, &bytes)?;
@@ -833,7 +979,7 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
         }
         tx.push(x);
     }
-    if wf.0.is_empty() || wr.0.is_empty() || texs.iter().any(|t| t == TYRE) {
+    if wheel_unit.is_empty() || texs.iter().any(|t| t == TYRE) {
         tx.push(solid(TYRE, [0x20, 0x20, 0x20, 0xFF], 16));
     }
     if texs.iter().any(|t| t == TRIM) {
@@ -1213,8 +1359,13 @@ struct VData {
     wheel_scale_rear: f32,
     rim: Option<String>,
     tyre: Option<String>,
-    /// sRGB, reading the stored ARGB as linear (format notes; unverified)
+    /// sRGB, reading the stored colour (red in the low byte) as linear
+    /// (format notes; unverified)
     colour: [u8; 3],
+    /// `brakedisc_*` / `caliper_*` part models of the configuration (else
+    /// of another configuration of the vehicle).
+    brake_disc: Option<String>,
+    caliper: Option<String>,
 }
 
 fn vehicle_data(o: &Opts) -> Option<VData> {
@@ -1234,8 +1385,20 @@ fn vehicle_data(o: &Opts) -> Option<VData> {
     let cfgs = m["configurations"].as_array().cloned().unwrap_or_default();
     let c = cfgs.get(o.config).or(cfgs.first());
     let s = |k: &str| c.and_then(|c| c[k].as_str()).map(String::from);
-    let hex = c.and_then(|c| c["colour"]["srgb_if_linear"].as_str()).and_then(|h| u32::from_str_radix(h.trim_start_matches('#'), 16).ok()).unwrap_or(0x808080);
-    Some(VData { wheel_scale: wsf, wheel_scale_rear: wsr, rim: s("rim"), tyre: s("tyre"), colour: [(hex >> 16) as u8, (hex >> 8) as u8, hex as u8] })
+    // The value as stored: `stored` (format 4), or `argb` in older files,
+    // which held the stored value unchanged. Red is in the low byte
+    // (GTA6-Asset-Info 236cee8); channels read as linear.
+    let stored = c.and_then(|c| c["colour"]["stored"].as_str().or(c["colour"]["argb"].as_str())).and_then(|h| u32::from_str_radix(h, 16).ok());
+    let srgb = |x: u32| {
+        let l = (x & 0xFF) as f32 / 255.0;
+        ((if l <= 0.003_130_8 { 12.92 * l } else { 1.055 * l.powf(1.0 / 2.4) - 0.055 }) * 255.0).round().clamp(0.0, 255.0) as u8
+    };
+    let colour = stored.map_or([0x80; 3], |v| [srgb(v), srgb(v >> 8), srgb(v >> 16)]);
+    let part = |pre: &str| -> Option<String> {
+        let find = |c: &serde_json::Value| c["parts"].as_array()?.iter().filter_map(|p| p.as_str()).find(|p| p.starts_with(pre)).map(String::from);
+        c.and_then(find).or_else(|| cfgs.iter().find_map(find))
+    };
+    Some(VData { wheel_scale: wsf, wheel_scale_rear: wsr, rim: s("rim"), tyre: s("tyre"), colour, brake_disc: part("brakedisc_"), caliper: part("caliper_") })
 }
 
 /// Lamps, neon, screens: emissive shaders by recovered name or material
@@ -1251,4 +1414,31 @@ fn parse_paint(s: &str) -> Option<[u8; 3]> {
     let h = s.trim().trim_start_matches('#').trim_start_matches("0x");
     let v = u32::from_str_radix(h, 16).ok().filter(|_| h.len() == 6 || h.len() == 8)?;
     Some([(v >> 16) as u8, (v >> 8) as u8, v as u8])
+}
+
+/// A wheel bone that carries a wheel: `wheel_lf`, `wheel_rm1`, and the inner
+/// wheel of a dual pair, `wheel_lr_inr`; not the helpers (`wheel_turn_lf`,
+/// `wheel_lr_drive`, `wheel_parent_lr`). SixNG fbaf9ee.
+fn is_wheel_mount(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    let Some(r) = n.strip_prefix("wheel_") else { return false };
+    let r = r.strip_suffix("_inr").unwrap_or(r);
+    let b = r.as_bytes();
+    b.len() >= 2 && matches!(b[0], b'l' | b'r') && matches!(b[1], b'f' | b'm' | b'r') && b[2..].iter().all(|c| c.is_ascii_digit())
+}
+
+/// Model-space pivot of skeleton bone `i` (translations composed up the
+/// parent chain).
+fn bone_pivot(skel: &[drawable::Bone], i: usize) -> V3 {
+    let mut chain = vec![i];
+    while let Some(p) = skel[*chain.last().unwrap()].parent.map(|p| p as usize).filter(|&p| p < skel.len() && !chain.contains(&p)) {
+        chain.push(p);
+    }
+    let (mut pos, mut rot) = ([0f32; 3], [0f32, 0.0, 0.0, 1.0]);
+    for &b in chain.iter().rev() {
+        let t = yft::qrot(rot, skel[b].translation);
+        pos = [pos[0] + t[0], pos[1] + t[1], pos[2] + t[2]];
+        rot = yft::qmul(rot, skel[b].rotation);
+    }
+    pos
 }

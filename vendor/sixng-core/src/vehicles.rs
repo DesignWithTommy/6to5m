@@ -8,7 +8,7 @@
 //!   `wheelScale` / `wheelScaleRear`, `wheelType`, `layout`,
 //!   `HDTextureDist`, `lodDistances`, … (about 50 names resolve).
 //! - `51019114` configurations (3,879, about 300 models): `fb1f80ff` model,
-//!   `5bdc13e3` body colour (ARGB u32), `e89b8540` the part models of that
+//!   `5bdc13e3` body colour (u32, red in the low byte), `e89b8540` the part models of that
 //!   configuration (joaat names: frame, bumpers, exhaust, brake disc,
 //!   caliper, **one `rim_*` and one `tyre_*`** in 3,197 of them).
 //! - `fc1c7000` variation sets (4,772): `fb1f80ff` model, `8c866829` an
@@ -29,6 +29,10 @@ use std::collections::{BTreeMap, HashMap};
 pub const MODEL_INFO: u32 = 0xe59a_a857;
 pub const CONFIG: u32 = 0x5101_9114;
 pub const VARIATION: u32 = 0xfc1c_7000;
+/// One model of a mod part: `name`, `079baba7` the bone it is modelled
+/// around, `2b490ab7` the stock bones it replaces; on one element per
+/// vehicle `8605bf0e` names the vehicle's part set (`vehcolour`).
+pub const MOD_ELEMENT: u32 = 0x77f2_b89e;
 const GAME_NAME: u32 = 0x120e_5836;
 const OWNER: u32 = 0xfb1f_80ff;
 const COLOUR: u32 = 0x5bdc_13e3;
@@ -40,17 +44,26 @@ const GROUP_ITEMS: u32 = 0xa12f_f3a2;
 const ITEM_PART: u32 = 0x8e66_12bf;
 const ITEM_WEIGHT: u32 = 0xdc73_2774;
 
-/// Colour as stored (ARGB) plus an sRGB reading that assumes the stored
-/// channels are linear (all stored colours are dark, as linear values of
-/// ordinary paints would be; not verified in game).
-fn argb(c: u32) -> Value {
+/// Layout version of vehicles.json (4: colours carry `stored`, the value
+/// as it is in the file; `argb` / `rgb` / `srgb_if_linear` read it with red
+/// in the low byte).
+pub const FORMAT: u32 = 4;
+
+/// A stored colour (red in the low byte, alpha in the high one: the
+/// library's named colours `4ce375e6` begin with GTA IV's car colour list
+/// only when read that way; GTA6-Asset-Info 236cee8, SixNG f1f0ec6) as
+/// ARGB, plus an sRGB reading that assumes the stored channels are linear
+/// (all stored body colours are dark, as linear values of ordinary paints
+/// would be; not verified in game). `stored` is the value as in the file.
+fn argb(stored: u32) -> Value {
+    let c = (stored & 0xFF00_FF00) | ((stored & 0xFF) << 16) | ((stored >> 16) & 0xFF);
     let s = |x: u32| {
         let l = x as f32 / 255.0;
         let v = if l <= 0.003_130_8 { 12.92 * l } else { 1.055 * l.powf(1.0 / 2.4) - 0.055 };
         (v * 255.0).round().clamp(0.0, 255.0) as u32
     };
     let (r, g, b) = ((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF);
-    json!({"argb": format!("{c:08x}"), "rgb": format!("#{:06x}", c & 0xFF_FFFF), "srgb_if_linear": format!("#{:02x}{:02x}{:02x}", s(r), s(g), s(b))})
+    json!({"stored": format!("{stored:08x}"), "argb": format!("{c:08x}"), "rgb": format!("#{:06x}", c & 0xFF_FFFF), "srgb_if_linear": format!("#{:02x}{:02x}{:02x}", s(r), s(g), s(b))})
 }
 
 fn get<'v>(v: &'v Value, h: u32) -> Option<&'v Value> {
@@ -185,7 +198,8 @@ pub fn export(a: &ArchiveInfo, metas: &[&Entry], names: &HashMap<u32, String>, o
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("vehicles.json");
     std::fs::write(&path, serde_json::to_vec_pretty(&json!({
-        "note": "Per vehicle model: model_info (vehicles.meta-like; wheelScale / wheelScaleRear size the wheels; the shared rim_* models have radius 0.5 and the tyres 0.875, and the model viewer scales both by 1.625 x wheelScale, a factor fitted by eye, not the game's verified rule), configurations (body colour ARGB + the part models incl. rim and tyre), palettes (ARGB paint-colour lists; colours repeat, so repetition reads as the draw weight), part_groups (weighted part choices). Names resolve where known; others are joaat hex.",
+        "format": FORMAT,
+        "note": "Per vehicle model: model_info (vehicles.meta-like; wheelScale / wheelScaleRear size the wheels; the shared rim_* models have radius 0.5 and the tyres 0.875, and the model viewer scales both by 1.625 x wheelScale, a factor fitted by eye, not the game's verified rule), configurations (body colour, red in the low byte as stored, + the part models incl. rim and tyre), palettes (ARGB paint-colour lists; colours repeat, so repetition reads as the draw weight), part_groups (weighted part choices). Names resolve where known; others are joaat hex.",
         "sources": sources,
         "vehicles": list,
     }))?)?;

@@ -36,6 +36,7 @@ pub mod bink;
 pub mod interiorents;
 pub mod pso;
 pub mod vehicles;
+pub mod vehcolour;
 pub mod rpf9;
 pub mod scan;
 pub mod surface;

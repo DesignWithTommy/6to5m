@@ -109,7 +109,7 @@ fn sub(a: V3, b: V3) -> V3 {
 fn len(a: V3) -> f32 {
     (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
 }
-fn qmul(a: Q, b: Q) -> Q {
+pub fn qmul(a: Q, b: Q) -> Q {
     [
         a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
         a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
