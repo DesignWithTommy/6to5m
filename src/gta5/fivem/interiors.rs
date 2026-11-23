@@ -136,7 +136,7 @@ pub fn load(ctx: &Ctx, dir: &Path, index: &ArchiveIndex, archive_id: &str) -> Ve
     let limbo = std::env::var_os("T6M_MLO_LIMBO").is_some();
     let mut meta: HashMap<String, HashMap<u32, Vec<Portal>>> = HashMap::new();
     let by_id: HashMap<&str, &Entry> = index.entries.iter().map(|e| (e.id.as_str(), e)).collect();
-    let Ok(text) = fs::read_to_string(dir.join("interiors.jsonl")) else { return Vec::new() };
+    let Ok(text) = sixng_core::vfs::read_to_string(dir.join("interiors.jsonl")) else { return Vec::new() };
     let mut files: HashMap<String, Option<Arc<Value>>> = HashMap::new();
     let mut by_hash: BTreeMap<u32, Interior> = BTreeMap::new();
     let mut missing = 0;
@@ -157,7 +157,7 @@ pub fn load(ctx: &Ctx, dir: &Path, index: &ArchiveIndex, archive_id: &str) -> Ve
             missing += 1;
             continue;
         };
-        let src = files.entry(file.to_string()).or_insert_with(|| fs::read(dir.join(format!("{file}.json"))).ok().and_then(|b| serde_json::from_slice(&b).ok()).map(Arc::new)).clone();
+        let src = files.entry(file.to_string()).or_insert_with(|| sixng_core::vfs::read(dir.join(format!("{file}.json"))).ok().and_then(|b| serde_json::from_slice(&b).ok()).map(Arc::new)).clone();
         let Some(src) = src else {
             missing += 1;
             continue;

@@ -701,7 +701,7 @@ fn f3(v: &Value) -> V3 {
 /// (recorded in .fivem_region.json).
 fn placements_dir(ctx: &Ctx, index: &ArchiveIndex) -> Result<PathBuf, Box<dyn Error>> {
     if let Some(d) = &ctx.o.placements {
-        if d.join("index.jsonl").exists() {
+        if sixng_core::vfs::exists(&d.join("index.jsonl")) {
             return Ok(d.clone());
         }
         return Err(format!("{}: no index.jsonl", d.display()).into());
@@ -711,13 +711,13 @@ fn placements_dir(ctx: &Ctx, index: &ArchiveIndex) -> Result<PathBuf, Box<dyn Er
     let a = ws.resolve("levels.rpf")?;
     let metas: Vec<&Entry> = index.entries.iter().filter(|e| e.kind == sixng_core::classify::Kind::Resource && e.sub == "7a").collect();
     let ix = ctx.o.work.join("index");
-    let mtime = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
+    let mtime = |p: &Path| sixng_core::vfs::modified(p);
     let stale = |p: &Path, deps: &[Option<std::time::SystemTime>]| match mtime(p) {
         None => true,
         Some(t) => t < ctx.input_time || deps.iter().flatten().any(|d| *d > t),
     };
     let ie = ix.join("interior_entities.jsonl");
-    if stale(&ie, &[]) || !ix.join(sixng_core::interiorents::LIGHT_INDEX).exists() {
+    if stale(&ie, &[]) || !sixng_core::vfs::exists(&ix.join(sixng_core::interiorents::LIGHT_INDEX)) {
         let _p = super::Phase::new(ctx, "  prep interior-ents");
         sixng_core::interiorents::build(&ws, &a, &metas, sixng_core::export::no_progress())?;
     }
@@ -735,14 +735,14 @@ fn placements_dir(ctx: &Ctx, index: &ArchiveIndex) -> Result<PathBuf, Box<dyn Er
 /// recorded region does not cover --bbox or the output is older than the
 /// archive or `deps`.
 fn export_region(ctx: &Ctx, ws: &sixng_core::export::Workspace, archive: &Path, id: &str, metas: &[&Entry], dir: &Path, deps: &[Option<std::time::SystemTime>]) -> Result<(), Box<dyn Error>> {
-    let mtime = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
+    let mtime = |p: &Path| sixng_core::vfs::modified(p);
     let input = mtime(archive).map_or(ctx.input_time, |t| t.max(ctx.input_time));
     let stale = |p: &Path, deps: &[Option<std::time::SystemTime>]| match mtime(p) {
         None => true,
         Some(t) => t < input || deps.iter().flatten().any(|d| *d > t),
     };
     let region_f = dir.join(".fivem_region.json");
-    let made_for: Option<Option<[f32; 4]>> = fs::read(&region_f).ok().and_then(|b| serde_json::from_slice(&b).ok());
+    let made_for: Option<Option<[f32; 4]>> = sixng_core::vfs::read(&region_f).ok().and_then(|b| serde_json::from_slice(&b).ok());
     let covers = match (made_for, ctx.o.bbox) {
         (Some(None), _) => true,
         (Some(Some(m)), Some(b)) => m[0] <= b[0] && m[1] <= b[1] && m[2] >= b[2] && m[3] >= b[3],
@@ -770,8 +770,8 @@ fn export_region(ctx: &Ctx, ws: &sixng_core::export::Workspace, archive: &Path, 
             .collect();
         eprintln!("buildings: exporting {} of {} map files of {id}", want.len(), metas.len());
         fast_export(ws, archive, &want, dir)?;
-        fs::create_dir_all(dir)?;
-        fs::write(&region_f, serde_json::to_vec(&reg)?)?;
+        sixng_core::vfs::create_dir_all(dir)?;
+        sixng_core::vfs::write(&region_f, serde_json::to_vec(&reg)?)?;
     }
     Ok(())
 }
@@ -790,7 +790,7 @@ fn pack_placements(ctx: &Ctx) -> Result<Vec<(PathBuf, String)>, Box<dyn Error>> 
         let dir = ctx.o.work.join("placements").join(pk.id.trim_end_matches(".rpf"));
         let metas: Vec<&Entry> = pk.index.entries.iter().filter(|e| e.kind == sixng_core::classify::Kind::Resource && e.sub == "7a").collect();
         let ix = ctx.o.work.join("index");
-        let mtime = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
+        let mtime = |p: &Path| sixng_core::vfs::modified(p);
         let lp = ix.join(sixng_core::game::per_archive_name("lod_parents", "jsonl", &pk.id));
         let al = ix.join(sixng_core::game::per_archive_name("archetype_lod", "jsonl", &pk.id));
         let src = mtime(&pk.path);
@@ -835,7 +835,7 @@ fn meta_spatial(ctx: &Ctx, archive: &Path, id: &str, metas: &[&Entry]) -> HashMa
     // stamp is that archive's size:mtime (levels.rpf: same as ctx.input_stamp)
     let p = ctx.o.work.join(sixng_core::game::per_archive_name("fivem_meta_xy", "json", id));
     let stamp = fs::metadata(archive).ok().map(|m| format!("{}:{}", m.len(), m.modified().ok().and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0))).unwrap_or_default();
-    let mut c: C = fs::read(&p).ok().and_then(|b| serde_json::from_slice(&b).ok()).filter(|c: &C| c.stamp == stamp).unwrap_or_default();
+    let mut c: C = sixng_core::vfs::read(&p).ok().and_then(|b| serde_json::from_slice(&b).ok()).filter(|c: &C| c.stamp == stamp).unwrap_or_default();
     c.stamp = stamp;
     let have: HashSet<u64> = c.rows.iter().map(|r| r.0).collect();
     let todo: Vec<&&Entry> = metas.iter().filter(|e| !have.contains(&e.off)).collect();
@@ -862,7 +862,7 @@ fn meta_spatial(ctx: &Ctx, archive: &Path, id: &str, metas: &[&Entry]) -> HashMa
             })
             .collect();
         c.rows.extend(new);
-        let _ = write_atomic(&p, &serde_json::to_vec(&c).unwrap());
+        let _ = sixng_core::vfs::write(&p, &serde_json::to_vec(&c).unwrap());
     }
     c.rows.into_iter().filter(|r| r.1 != 2).map(|r| (r.0, (r.1 == 1, r.2))).collect()
 }
@@ -873,13 +873,13 @@ fn meta_spatial(ctx: &Ctx, archive: &Path, id: &str, metas: &[&Entry]) -> HashMa
 /// map id first). Writes the same <offset>.json files and index.jsonl.
 fn fast_export(ws: &sixng_core::export::Workspace, archive: &Path, entries: &[&Entry], dir: &Path) -> Result<(), Box<dyn Error>> {
     use sixng_core::{interiorents, meta7a};
-    fs::create_dir_all(dir)?;
+    sixng_core::vfs::create_dir_all(dir)?;
     let map = unsafe { Mmap::map(&fs::File::open(archive)?)? };
     let names = sixng_core::export::model_names(ws);
     let ix = ws.index_dir();
     let ids: HashSet<&str> = entries.iter().map(|e| e.id.as_str()).collect();
     // every archive's side file (map ids carry their archive)
-    let par_lines = |f: &str| sixng_core::game::per_archive_files(&ix, f, "jsonl").iter().filter_map(|p| fs::read_to_string(p).ok()).collect::<Vec<_>>().join("\n");
+    let par_lines = |f: &str| sixng_core::game::per_archive_files(&ix, f, "jsonl").iter().filter_map(|p| sixng_core::vfs::read_to_string(p).ok()).collect::<Vec<_>>().join("\n");
     let ptxt = par_lines("lod_parents");
     let parents: HashMap<String, HashMap<u64, Value>> = ptxt
         .par_lines()
@@ -954,7 +954,7 @@ fn fast_export(ws: &sixng_core::export::Workspace, archive: &Path, entries: &[&E
                     }
                 }
             }
-            fs::write(dir.join(&fname), serde_json::to_vec(&doc).ok()?).ok()?;
+            sixng_core::vfs::write(dir.join(&fname), serde_json::to_vec(&doc).ok()?).ok()?;
             let mut lo = [f32::MAX; 3];
             let mut hi = [f32::MIN; 3];
             for en in &mf.entities {
@@ -976,7 +976,7 @@ fn fast_export(ws: &sixng_core::export::Workspace, archive: &Path, entries: &[&E
         out += &x.to_string();
         out.push('\n');
     }
-    fs::write(dir.join("index.jsonl"), out)?;
+    sixng_core::vfs::write(dir.join("index.jsonl"), out)?;
     Ok(())
 }
 
@@ -1024,7 +1024,7 @@ pub(crate) fn sys_from_map(map: &[u8], e: &Entry) -> Option<sixng_core::resource
 fn load_places(ctx: &Ctx, dirs: &[(PathBuf, String)], index: &ArchiveIndex) -> Result<Vec<Place>, Box<dyn Error>> {
     let mut files: Vec<PathBuf> = Vec::new();
     for (k, (d, _)) in dirs.iter().enumerate() {
-        let idx = match fs::read_to_string(d.join("index.jsonl")) {
+        let idx = match sixng_core::vfs::read_to_string(d.join("index.jsonl")) {
             Ok(t) => t,
             Err(e) if k == 0 => return Err(e.into()),
             Err(_) => continue,
@@ -1037,7 +1037,7 @@ fn load_places(ctx: &Ctx, dirs: &[(PathBuf, String)], index: &ArchiveIndex) -> R
         );
     }
     eprintln!("buildings: {} world placement files in region", files.len());
-    let load = |f: &Path| fs::read(f).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+    let load = |f: &Path| sixng_core::vfs::read(f).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
     let per: Vec<(String, Vec<Value>)> = files
         .par_iter()
         .filter_map(|f| {
@@ -1108,7 +1108,7 @@ fn load_places(ctx: &Ctx, dirs: &[(PathBuf, String)], index: &ArchiveIndex) -> R
     // Interiors (MLO instances): interior-space entities moved into world space.
     let (mut n_int, mut n_ent) = (0, 0);
     for (dir, aid) in dirs.iter().filter(|_| ctx.o.interiors) {
-        let Ok(text) = fs::read_to_string(dir.join("interiors.jsonl")) else { continue };
+        let Ok(text) = sixng_core::vfs::read_to_string(dir.join("interiors.jsonl")) else { continue };
         let prefix = format!("{aid}@");
         let mut cache: HashMap<String, Option<Arc<Value>>> = HashMap::new();
         for l in text.lines() {
@@ -1190,7 +1190,7 @@ fn lod_parents(ctx: &Ctx, maps: &HashSet<&str>) -> (HashMap<(String, usize), (St
 /// All per-archive copies of a sixng index side file (levels.rpf's first),
 /// concatenated; None when there is none.
 fn index_text(ctx: &Ctx, base: &str, ext: &str) -> Option<String> {
-    let v: Vec<String> = sixng_core::game::per_archive_files(&ctx.o.work.join("index"), base, ext).iter().filter_map(|p| fs::read_to_string(p).ok()).collect();
+    let v: Vec<String> = sixng_core::game::per_archive_files(&ctx.o.work.join("index"), base, ext).iter().filter_map(|p| sixng_core::vfs::read_to_string(p).ok()).collect();
     (!v.is_empty()).then(|| v.join("\n"))
 }
 
@@ -2264,7 +2264,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
             }
         }
         let gp = ctx.o.work.join("fivem_ground.json");
-        fs::write(&gp, serde_json::to_string(&ground)?)?;
+        sixng_core::vfs::write(&gp, serde_json::to_string(&ground)?)?;
         eprintln!("buildings: {} flat ground tiles recorded for terrain", ground.len());
     }
     let links_n = (0..kept.len()).filter(|&i| alive[i] && parent[i].is_some()).count();

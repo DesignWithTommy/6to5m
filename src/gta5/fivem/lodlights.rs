@@ -31,7 +31,7 @@ const T_UBYTE: u32 = 0x11;
 /// (one parallel read of every meta, shared), cached in <work>/index.
 pub fn light_index(ctx: &Ctx) -> HashMap<u32, String> {
     let p = ctx.o.work.join("index").join(sixng_core::interiorents::LIGHT_INDEX);
-    let m: HashMap<String, String> = fs::read(&p).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let m: HashMap<String, String> = sixng_core::vfs::read(&p).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     m.into_iter().filter_map(|(k, v)| Some((u32::from_str_radix(&k, 16).ok()?, v))).collect()
 }
 
@@ -93,7 +93,7 @@ pub fn emit(ctx: &Ctx, dir: &Path, index: &ArchiveIndex) -> Result<(), String> {
     if std::env::var_os("T6M_NO_LIGHTS").is_some() {
         return Ok(());
     }
-    let Ok(idx) = fs::read_to_string(dir.join("index.jsonl")) else { return Ok(()) };
+    let Ok(idx) = sixng_core::vfs::read_to_string(dir.join("index.jsonl")) else { return Ok(()) };
     // world entities in the region: (file offset, entity index, archetype, pos, world rotation, scale)
     let mut ents: Vec<(String, usize, u32, V3, [f32; 4], V3)> = Vec::new();
     for l in idx.lines() {
@@ -107,7 +107,7 @@ pub fn emit(ctx: &Ctx, dir: &Path, index: &ArchiveIndex) -> Result<(), String> {
         }
         let (Some(id), Some(file)) = (v["id"].as_str().and_then(|s| s.strip_prefix("levels.rpf@")), v["file"].as_str()) else { continue };
         let name = Path::new(file).file_name().map(|f| f.to_owned()).unwrap_or_default();
-        let Some(doc) = fs::read(dir.join(name)).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) else { continue };
+        let Some(doc) = sixng_core::vfs::read(dir.join(name)).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) else { continue };
         for (i, e) in doc["entities"].as_array().into_iter().flatten().enumerate() {
             let p = f3(&e["position"]);
             if !ctx.o.in_bbox(p, p) {

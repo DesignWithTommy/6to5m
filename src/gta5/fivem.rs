@@ -456,6 +456,9 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
     }
     let mut o = parse(&args[1..])?;
     crate::gta5::meta::set_world_offset(o.offset);
+    // derived work data (placements, collision, LOD / interior tables,
+    // batches, side tables) lives in memory: nothing extracted on disk
+    sixng_core::vfs::set_memory(&o.work);
     let t0 = std::time::Instant::now();
     // `--out <dir>/[name]` (a FiveM resource category, e.g.
     // server-data/resources/[t6m]): resources are written straight into it,
@@ -751,7 +754,7 @@ fn water(ctx: &Ctx) -> Result<(), Box<dyn Error>> {
         None => (-9607, -7957, 2442, 9474, 4000),
     };
     let lp = ctx.o.work.join("fivem_water_low.json");
-    let low: std::collections::HashMap<(i64, i64), f32> = match fs::read_to_string(&lp).ok().and_then(|t| serde_json::from_str::<BTreeMap<String, f32>>(&t).ok()) {
+    let low: std::collections::HashMap<(i64, i64), f32> = match sixng_core::vfs::read_to_string(&lp).ok().and_then(|t| serde_json::from_str::<BTreeMap<String, f32>>(&t).ok()) {
         Some(m) => m.into_iter().filter_map(|(k, v)| { let (a, b) = k.split_once(',')?; Some(((a.parse().ok()?, b.parse().ok()?), v)) }).collect(),
         None => {
             ctx.skip("water.xml", "no terrain heights (run the terrain part); ocean everywhere", json!({}));

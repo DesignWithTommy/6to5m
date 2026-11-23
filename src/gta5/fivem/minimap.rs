@@ -113,7 +113,7 @@ pub fn build(ctx: &Ctx, tiles: &[(&[V3], &[[u32; 3]])]) -> Result<(), String> {
 /// Zone names from the building layout (see module docs); writes
 /// `<out>/t6m_zones.lua` (compared byte for byte).
 pub fn zones(ctx: &Ctx) -> Result<(), String> {
-    let names: HashMap<String, String> = std::fs::read(ctx.o.work.join("zone_names.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let names: HashMap<String, String> = sixng_core::vfs::read(ctx.o.work.join("zone_names.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     let layout = ctx.layout.lock().unwrap();
     let mut cells: BTreeMap<(i64, i64), HashMap<String, usize>> = BTreeMap::new();
     for (ym, arcs) in &layout.ymaps {

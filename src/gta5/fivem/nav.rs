@@ -42,7 +42,7 @@ fn path_sources<'a>(ctx: &Ctx, index: &'a ArchiveIndex) -> Option<(&'a Entry, &'
     let metas: Vec<&Entry> = index.entries.iter().filter(|e| e.kind == Kind::Resource && e.sub == "7a").collect();
     let cp = ctx.o.work.join("fivem_paths_src.json");
     let by_id: HashMap<&str, &Entry> = metas.iter().map(|e| (e.id.as_str(), *e)).collect();
-    if let Some(v) = fs::read(&cp).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) {
+    if let Some(v) = sixng_core::vfs::read(&cp).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) {
         if v["entries"].as_u64() == Some(metas.len() as u64) {
             if let (Some(n), Some(l)) = (v["nodes"].as_str().and_then(|s| by_id.get(s)), v["links"].as_str().and_then(|s| by_id.get(s))) {
                 return Some((n, l));
@@ -65,7 +65,7 @@ fn path_sources<'a>(ctx: &Ctx, index: &'a ArchiveIndex) -> Option<(&'a Entry, &'
         .collect();
     let n = found.iter().filter(|x| x.1 > 0).max_by_key(|x| x.1)?.0;
     let l = found.iter().filter(|x| x.2 > 0).max_by_key(|x| x.2)?.0;
-    let _ = fs::write(&cp, json!({"entries": metas.len(), "nodes": n.id, "links": l.id}).to_string());
+    let _ = sixng_core::vfs::write(&cp, json!({"entries": metas.len(), "nodes": n.id, "links": l.id}).to_string());
     Some((n, l))
 }
 
@@ -225,7 +225,7 @@ pub fn build_navmesh(ctx: &Ctx) -> Result<(), Box<dyn Error>> {
     let cands: Vec<&Entry> = index.entries.iter().filter(|e| e.kind == Kind::RageObj).collect();
     let ip = ctx.o.work.join("fivem_navmesh_index.jsonl");
     let mut boxes: BTreeMap<String, [[f32; 3]; 2]> = BTreeMap::new();
-    let cached = fs::read_to_string(&ip).ok().filter(|t| t.lines().next().is_some_and(|l| l.contains(&format!("\"entries\":{}", cands.len()))));
+    let cached = sixng_core::vfs::read_to_string(&ip).ok().filter(|t| t.lines().next().is_some_and(|l| l.contains(&format!("\"entries\":{}", cands.len()))));
     if let Some(t) = cached {
         for l in t.lines().skip(1) {
             if let Ok(v) = serde_json::from_str::<Value>(l) {
@@ -237,7 +237,7 @@ pub fn build_navmesh(ctx: &Ctx) -> Result<(), Box<dyn Error>> {
     } else {
         eprintln!("navmesh: indexing {} tiles (once; cached in {})", cands.len(), ip.display());
         let found: Vec<(String, [[f32; 3]; 2])> = cands.par_iter().filter_map(|e| tiles(&rpf, e).map(|n| (e.id.clone(), n.bbox))).collect();
-        let mut f = fs::File::create(&ip)?;
+        let mut f = sixng_core::vfs::File::create(&ip)?;
         writeln!(f, "{}", json!({"tool": YNV_V, "entries": cands.len()}))?;
         for (id, b) in &found {
             writeln!(f, "{}", json!({"id": id, "bbox": b}))?;

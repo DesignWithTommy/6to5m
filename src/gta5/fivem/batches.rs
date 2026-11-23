@@ -46,7 +46,7 @@ fn map_index(ctx: &Ctx, a: &sixng_core::game::ArchiveInfo, index: &sixng_core::s
     use rayon::prelude::*;
     let t = tag(a);
     let p = ctx.o.work.join("fivem_batches").join(if t.is_empty() { format!("maps_{}.json", key(ctx)) } else { format!("maps_{}_{t}.json", key(ctx)) });
-    if let Some(v) = fs::read(&p).ok().and_then(|b| serde_json::from_slice::<Vec<(String, Bbox)>>(&b).ok()) {
+    if let Some(v) = sixng_core::vfs::read(&p).ok().and_then(|b| serde_json::from_slice::<Vec<(String, Bbox)>>(&b).ok()) {
         eprintln!("[t6m:batches] map-file index: cached ({} map files with batches)", v.len());
         return Ok(v);
     }
@@ -73,8 +73,8 @@ fn map_index(ctx: &Ctx, a: &sixng_core::game::ArchiveInfo, index: &sixng_core::s
         })
         .collect();
     eprintln!("[t6m:batches] indexed {} map files with batches in {:.1}s", v.len(), t.elapsed().as_secs_f32());
-    let _ = fs::create_dir_all(p.parent().unwrap());
-    fs::write(&p, serde_json::to_vec(&v).unwrap_or_default()).map_err(|e| e.to_string())?;
+    let _ = sixng_core::vfs::create_dir_all(p.parent().unwrap());
+    sixng_core::vfs::write(&p, serde_json::to_vec(&v).unwrap_or_default()).map_err(|e| e.to_string())?;
     Ok(v)
 }
 
@@ -118,7 +118,7 @@ fn tables_of(ctx: &Ctx, ws: &sixng_core::export::Workspace, a: &sixng_core::game
             continue;
         }
         let dir = root.join(format!("c_{x}_{y}")).join("placements").join("levels");
-        if !dir.join("done").exists() {
+        if !sixng_core::vfs::exists(&dir.join("done")) {
             for id in ids {
                 cell_of.insert(id, todo.len());
             }
@@ -136,10 +136,10 @@ fn tables_of(ctx: &Ctx, ws: &sixng_core::export::Workspace, a: &sixng_core::game
         let sel: Vec<&sixng_core::scan::Entry> = index.entries.iter().filter(|e| cell_of.contains_key(e.id.as_str())).collect();
         sixng_core::export::export_batches(ws, &a, &sel, &tmp, sixng_core::export::no_progress()).map_err(|e| e.to_string())?;
         let src = tmp.join("placements").join(a.id.trim_end_matches(".rpf"));
-        let pbin = fs::read(src.join("batch_props.bin")).unwrap_or_default();
-        let gbin = fs::read(src.join("batch_grass.bin")).unwrap_or_default();
+        let pbin = sixng_core::vfs::read(src.join("batch_props.bin")).unwrap_or_default();
+        let gbin = sixng_core::vfs::read(src.join("batch_grass.bin")).unwrap_or_default();
         let mut parts: Vec<(String, Vec<u8>, Vec<u8>, usize, usize)> = vec![(String::new(), Vec::new(), Vec::new(), 0, 0); todo.len()];
-        for l in fs::read_to_string(src.join("batches.jsonl")).unwrap_or_default().lines() {
+        for l in sixng_core::vfs::read_to_string(src.join("batches.jsonl")).unwrap_or_default().lines() {
             let Ok(mut v) = serde_json::from_str::<Value>(l) else { continue };
             let Some(&ci) = v["map"].as_str().and_then(|m| cell_of.get(m)) else { continue };
             let (first, count) = (v["first"].as_u64().unwrap_or(0) as usize, v["count"].as_u64().unwrap_or(0) as usize);
@@ -157,13 +157,13 @@ fn tables_of(ctx: &Ctx, ws: &sixng_core::export::Workspace, a: &sixng_core::game
             c.0.push('\n');
         }
         for ((_, dir), (j, pb, gb, _, _)) in todo.iter().zip(parts) {
-            fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-            fs::write(dir.join("batches.jsonl"), j).map_err(|e| e.to_string())?;
-            fs::write(dir.join("batch_props.bin"), pb).map_err(|e| e.to_string())?;
-            fs::write(dir.join("batch_grass.bin"), gb).map_err(|e| e.to_string())?;
-            fs::write(dir.join("done"), b"").map_err(|e| e.to_string())?;
+            sixng_core::vfs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            sixng_core::vfs::write(dir.join("batches.jsonl"), j).map_err(|e| e.to_string())?;
+            sixng_core::vfs::write(dir.join("batch_props.bin"), pb).map_err(|e| e.to_string())?;
+            sixng_core::vfs::write(dir.join("batch_grass.bin"), gb).map_err(|e| e.to_string())?;
+            sixng_core::vfs::write(dir.join("done"), b"").map_err(|e| e.to_string())?;
         }
-        let _ = fs::remove_dir_all(&tmp);
+        let _ = sixng_core::vfs::remove_dir_all(&tmp);
         eprintln!("[t6m:batches] exported {} cells ({} map files) in {:.1}s", todo.len(), sel.len(), t.elapsed().as_secs_f32());
     }
     Ok(out)
@@ -174,7 +174,7 @@ fn f3(v: &Value) -> [f32; 3] {
 }
 
 fn rows(dir: &std::path::Path, kind: &str) -> Vec<Value> {
-    fs::read_to_string(dir.join("batches.jsonl"))
+    sixng_core::vfs::read_to_string(dir.join("batches.jsonl"))
         .unwrap_or_default()
         .lines()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
@@ -182,10 +182,8 @@ fn rows(dir: &std::path::Path, kind: &str) -> Vec<Value> {
         .collect()
 }
 
-fn map_bin(dir: &std::path::Path, f: &str) -> Option<memmap2::Mmap> {
-    let file = fs::File::open(dir.join(f)).ok()?;
-    // SAFETY: read-only map of our own cache file, written once.
-    unsafe { memmap2::Mmap::map(&file) }.ok()
+fn map_bin(dir: &std::path::Path, f: &str) -> Option<std::sync::Arc<Vec<u8>>> {
+    sixng_core::vfs::read_arc(dir.join(f)).ok()
 }
 
 /// One prop batch baked into a single drawable (`b6m_<hash>`): GTA VI

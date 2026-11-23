@@ -8,7 +8,7 @@ use anyhow::{anyhow, Context, Result};
 use rayon::prelude::*;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::fs;
+use crate::vfs as fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -83,7 +83,7 @@ pub fn recover_names(archive: &Path, ix: &mut ArchiveIndex, progress: Progress) 
     let results: Vec<(usize, Option<String>, Option<String>, Vec<String>)> = idx
         .par_chunks(256)
         .flat_map_iter(|chunk| {
-            let mut f = fs::File::open(archive).ok();
+            let mut f = std::fs::File::open(archive).ok();
             let mut out = Vec::new();
             for &i in chunk {
                 let e = &ix.entries[i];
@@ -435,7 +435,7 @@ fn link_textures(a: &ArchiveInfo, shaders: &[crate::drawable::Shader], r: &Resou
                                     e["status"] = "ok (embedded in the model)".into();
                                     if o.png {
                                         let p = model_dir.join("textures").join(format!("{}.png", t.hash64));
-                                        let w = p.exists() || fs::create_dir_all(model_dir.join("textures")).map_err(anyhow::Error::from).and_then(|_| texture::save_png(&p, &rgba, et.width, et.height)).is_ok();
+                                        let w = fs::exists(&p) || fs::create_dir_all(model_dir.join("textures")).map_err(anyhow::Error::from).and_then(|_| texture::save_png(&p, &rgba, et.width, et.height)).is_ok();
                                         if w {
                                             e["png"] = rel(&o.out, &p).into();
                                         }
@@ -678,7 +678,7 @@ pub fn export_entry(a: &ArchiveInfo, e: &Entry, o: &ExportOptions) -> Result<Exp
         (Kind::RageObj | Kind::Resource, Some("txd")) => {
             let dir = o.out.join("textures").join(&astem).join(&base_name);
             let marker = dir.join("dictionary.json");
-            if marker.exists() && !o.force {
+            if fs::exists(&marker) && !o.force {
                 item.status = "skipped".into();
                 return Ok(item);
             }
@@ -708,10 +708,10 @@ pub fn export_entry(a: &ArchiveInfo, e: &Entry, o: &ExportOptions) -> Result<Exp
             let marker = dir.join("model.json");
             // Old exports could leave the primary mesh in model_lodN.glb.
             // Repair those caches, while keeping resources without meshes cached.
-            let missing_model = !dir.join("model.glb").exists() && (requested_member.is_some()
+            let missing_model = !fs::exists(dir.join("model.glb")) && (requested_member.is_some()
                 || fs::read(&marker).ok().and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
                     .and_then(|meta| meta["meshes"].as_array().map(|meshes| !meshes.is_empty())).unwrap_or(false));
-            if marker.exists() && !o.force && !missing_model {
+            if fs::exists(&marker) && !o.force && !missing_model {
                 item.status = "skipped".into();
                 return Ok(item);
             }
@@ -984,7 +984,7 @@ pub fn export_entry(a: &ArchiveInfo, e: &Entry, o: &ExportOptions) -> Result<Exp
         _ => {
             let dir = o.out.join("raw").join(&astem);
             let p = dir.join(format!("{}.{}", base_name, e.ext));
-            if p.exists() && !o.force {
+            if fs::exists(&p) && !o.force {
                 item.status = "skipped".into();
                 return Ok(item);
             }
@@ -998,7 +998,7 @@ pub fn export_entry(a: &ArchiveInfo, e: &Entry, o: &ExportOptions) -> Result<Exp
         let dir = o.out.join("raw").join(&astem);
         fs::create_dir_all(&dir)?;
         let p = dir.join(format!("{base_name}.{}", e.ext));
-        if !p.exists() || o.force {
+        if !fs::exists(&p) || o.force {
             fs::write(&p, scan::read_entry(&a.path, e)?)?;
         }
         item.files.push(rel(&o.out, &p));
@@ -1160,7 +1160,7 @@ fn export_texture(r: &Resource, t: &texture::TexInfo, dir: &Path, o: &ExportOpti
 pub fn export_many(a: &ArchiveInfo, entries: &[&Entry], o: &ExportOptions, progress: Progress) -> Result<Vec<ExportedItem>> {
     fs::create_dir_all(&o.out)?;
     let manifest = Mutex::new(
-        fs::OpenOptions::new().create(true).append(true).open(o.out.join("manifest.jsonl"))?,
+        std::fs::OpenOptions::new().create(true).append(true).open(o.out.join("manifest.jsonl"))?,
     );
     let total = entries.len() as u64;
     let done = AtomicU64::new(0);

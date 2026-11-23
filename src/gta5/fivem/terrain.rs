@@ -164,7 +164,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
             let e = low.entry(k).or_insert(f32::MAX);
             *e = e.min(v[2]);
         }
-        std::fs::write(ctx.o.work.join("fivem_water_low.json"), serde_json::to_string(&low)?)?;
+        sixng_core::vfs::write(ctx.o.work.join("fivem_water_low.json"), serde_json::to_string(&low)?)?;
     }
 
     let sel: Vec<(usize, &Tile)> = tiles
@@ -177,7 +177,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         .collect();
     eprintln!("terrain: {} tiles, {} in region", tiles.len(), sel.len());
     // sink terrain under flat ground tiles recorded by the buildings stage
-    let ground: Vec<[f32; 5]> = std::fs::read_to_string(ctx.o.work.join("fivem_ground.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    let ground: Vec<[f32; 5]> = sixng_core::vfs::read_to_string(ctx.o.work.join("fivem_ground.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
     let sunk: Vec<(usize, Vec<V3>, u64)> = sel.iter().map(|&(i, t)| { let (v, n) = sink(&t.verts, &ground); (i, v, n) }).collect();
     let sunk_n: u64 = sunk.iter().map(|x| x.2).sum();
     if sunk_n > 0 {

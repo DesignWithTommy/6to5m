@@ -74,7 +74,7 @@ pub fn per_archive_files(dir: &Path, base: &str, ext: &str) -> Vec<PathBuf> {
     let mut v: Vec<PathBuf> = vec![dir.join(format!("{base}.{ext}"))];
     let pre = format!("{base}__");
     let suf = format!(".{ext}");
-    let mut rest: Vec<PathBuf> = std::fs::read_dir(dir)
+    let mut rest: Vec<PathBuf> = crate::vfs::read_dir(dir)
         .into_iter()
         .flatten()
         .flatten()
@@ -83,7 +83,7 @@ pub fn per_archive_files(dir: &Path, base: &str, ext: &str) -> Vec<PathBuf> {
         .collect();
     rest.sort();
     v.extend(rest);
-    v.retain(|p| p.is_file());
+    v.retain(|p| crate::vfs::len(p).is_some());
     v
 }
 

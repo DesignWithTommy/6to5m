@@ -30,7 +30,7 @@ use anyhow::Result;
 use rayon::prelude::*;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::fs;
+use crate::vfs as fs;
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 

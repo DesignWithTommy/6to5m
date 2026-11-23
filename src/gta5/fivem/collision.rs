@@ -86,7 +86,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     // id -> world bbox of entries that hold collision
     let ip = ctx.o.work.join("fivem_collision_index.jsonl");
     let mut boxes: BTreeMap<String, [[f32; 3]; 2]> = BTreeMap::new();
-    let cached = fs::read_to_string(&ip).ok().filter(|t| t.lines().next().is_some_and(|l| l.contains(&format!("\"entries\":{}", cands.len()))));
+    let cached = sixng_core::vfs::read_to_string(&ip).ok().filter(|t| t.lines().next().is_some_and(|l| l.contains(&format!("\"entries\":{}", cands.len()))));
     if let Some(t) = cached {
         for l in t.lines().skip(1) {
             if let Ok(v) = serde_json::from_str::<Value>(l) {
@@ -98,7 +98,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     } else {
         eprintln!("collision: indexing {} resources (once; cached in {})", cands.len(), ip.display());
         let found: Vec<(String, [[f32; 3]; 2])> = cands.par_iter().filter_map(|e| decode(&rpf, e, true).map(|c| (e.id.clone(), c.bbox))).collect();
-        let mut f = fs::File::create(&ip)?;
+        let mut f = sixng_core::vfs::File::create(&ip)?;
         writeln!(f, "{}", json!({"tool": YBN_V, "entries": cands.len()}))?;
         for (id, b) in &found {
             writeln!(f, "{}", json!({"id": id, "bbox": b}))?;

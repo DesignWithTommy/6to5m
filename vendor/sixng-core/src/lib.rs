@@ -37,6 +37,7 @@ pub mod vehicles;
 pub mod rpf9;
 pub mod scan;
 pub mod surface;
+pub mod vfs;
 pub mod world;
 
 pub const INDEX_VERSION: &str = "5";
