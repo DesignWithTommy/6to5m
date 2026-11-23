@@ -9,6 +9,7 @@ const EXAMPLES: usize = 5;
 #[derive(Default)]
 struct Bucket {
     count: u64,
+    bytes: u64,
     examples: Vec<String>,
 }
 
@@ -19,9 +20,15 @@ static VALS: Mutex<BTreeMap<String, Value>> = Mutex::new(BTreeMap::new());
 
 /// Count one `example` under `cat` / `bucket`.
 pub fn bump(cat: &str, bucket: &str, example: &str) {
+    bump_n(cat, bucket, example, 0);
+}
+
+/// `bump` plus `bytes` added to the bucket total (reported as MB).
+pub fn bump_n(cat: &str, bucket: &str, example: &str, bytes: u64) {
     let mut l = LOG.lock().unwrap();
     let b = l.entry(cat.to_string()).or_default().entry(bucket.to_string()).or_default();
     b.count += 1;
+    b.bytes += bytes;
     if b.examples.len() < EXAMPLES && !b.examples.iter().any(|e| e == example) {
         b.examples.push(example.to_string());
     }
@@ -51,8 +58,10 @@ pub fn finish(out: &Path, stream: &Path) {
     for (cat, bs) in LOG.lock().unwrap().iter() {
         let mut m = Map::new();
         for (b, x) in bs {
-            eprintln!("[t6m:region] {cat} {b}: {} (e.g. {})", x.count, x.examples.join(", "));
-            m.insert(b.clone(), json!({"count": x.count, "examples": x.examples}));
+            let mb = (x.bytes as f64 / 1048576.0 * 10.0).round() / 10.0;
+            let size = if x.bytes > 0 { format!(", {mb} MB") } else { String::new() };
+            eprintln!("[t6m:region] {cat} {b}: {}{size} (e.g. {})", x.count, x.examples.join(", "));
+            m.insert(b.clone(), json!({"count": x.count, "mb": mb, "examples": x.examples}));
         }
         doc.insert(cat.clone(), Value::Object(m));
     }

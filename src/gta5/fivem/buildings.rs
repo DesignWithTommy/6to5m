@@ -1408,6 +1408,9 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
     if let Some(info) = ctx.up_to_date(&file, &fp).filter(|i| i.get("alpha").is_some()) {
         let a = from_info(&info);
         if a.texs.iter().all(|t| pools.dir.join(format!("{}.dds", &t[4..])).exists()) {
+            // per-file stats stored with the cache entry (older entries: unknown)
+            let lods = info["lods"].as_u64().map_or("unknown (cached before stats)".to_string(), |n| n.to_string());
+            super::regionlog::bump_n("ydr_lod_levels", &format!("{lods} (cached)"), &an, info["bytes"].as_u64().unwrap_or(0));
             let s = ctx.emit(&file, &fp, info, None)?;
             ctx.report.lock().unwrap().converted.push(json!({"kind": "building", "name": an, "source": format!("levels.rpf@{off:x}"), "ydr": s}));
             return Ok(Some(a));
@@ -1488,9 +1491,9 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
     }
     .map_err(|e| format!("{file}: {e}"))?;
     let n_lod = 1 + lower.iter().filter(|l| !l.geoms.is_empty()).count();
-    super::regionlog::bump("ydr_lod_levels", &n_lod.to_string(), &an);
+    super::regionlog::bump_n("ydr_lod_levels", &format!("{n_lod} (fresh)"), &an, bytes.len() as u64);
     let alpha: std::collections::BTreeSet<&String> = mesh.geoms.iter().filter(|g| g.kind != 0).map(|g| &g.texture).collect();
-    let info = json!({"lo": lo, "hi": hi, "texs": texs, "alpha": alpha, "tpx": texel_px(&mesh)});
+    let info = json!({"lo": lo, "hi": hi, "texs": texs, "alpha": alpha, "tpx": texel_px(&mesh), "lods": n_lod, "bytes": bytes.len()});
     let s = ctx.emit(&file, &fp, info.clone(), Some(bytes))?;
     ctx.report.lock().unwrap().converted.push(json!({"kind": "building", "name": an, "source": format!("levels.rpf@{off:x}"), "ydr": s, "textures": texs.len(), "fragment": is_frag}));
     Ok(Some(from_info(&info)))
