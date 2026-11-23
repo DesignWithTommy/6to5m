@@ -750,6 +750,33 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
     let nm = |e: &Entry| e.name.clone().unwrap_or_default();
     cands.sort_by_key(|e| (slot_of(&nm(e)).unwrap_or(8), rank(&nm(e))));
     let female = cands.iter().filter(|e| nm(e).contains("_fr1")).count() >= cands.iter().filter(|e| nm(e).contains("_mr1")).count();
+    // the ped's wardrobe variation (id-linked records, parts by shared
+    // textures) replaces the name-based look; the head stays
+    if !o.all && o.only.is_empty() {
+        if let Some(ws) = super::wardrobe::parts(&o.game, &o.work, &ix, &o.name, if female { "fr1" } else { "mr1" }) {
+            let mut by_name: HashMap<String, &Entry> = HashMap::new();
+            for e in ix.entries.iter().filter(|e| e.rtype.as_deref() == Some("dr")) {
+                let Some(n) = e.name.as_deref() else { continue };
+                let cur = by_name.entry(n.to_ascii_lowercase()).or_insert(e);
+                if e.usize > cur.usize {
+                    *cur = e;
+                }
+            }
+            let mut picked: Vec<&Entry> = cands.iter().copied().filter(|e| slot_of(&nm(e)) == Some(0)).collect();
+            let head = !picked.is_empty();
+            for n in &ws {
+                let Some(&e) = by_name.get(n) else { continue };
+                let s = slot_of(n);
+                if s.is_some() && (s != Some(0) || !head) && !picked.iter().any(|p| std::ptr::eq(*p, e)) {
+                    picked.push(e);
+                }
+            }
+            if picked.iter().any(|e| slot_of(&nm(e)) != Some(0)) {
+                cands = picked;
+                cands.sort_by_key(|e| (slot_of(&nm(e)).unwrap_or(8), rank(&nm(e))));
+            }
+        }
+    }
     if o.list {
         println!("{} ({}): {} drawables", o.name, if female { "female" } else { "male" }, cands.len());
         for e in &cands {

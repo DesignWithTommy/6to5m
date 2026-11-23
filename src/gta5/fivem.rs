@@ -37,6 +37,7 @@ mod vlog;
 mod texslot;
 mod quality;
 pub mod verify;
+mod wardrobe;
 
 use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
