@@ -86,6 +86,18 @@ unsafe fn output<I: Interface>(iid: *const GUID, out: *mut *mut c_void) -> Resul
     }
 }
 
+/// 6ixpack: the console's `G:` drive (title install root) is the exe's folder.
+fn console_path(path: OsString) -> std::path::PathBuf {
+    let s = path.to_string_lossy();
+    let b = s.as_bytes();
+    if b.len() >= 2 && b[0].eq_ignore_ascii_case(&b'G') && b[1] == b':' && (b.len() == 2 || b[2] == b'/' || b[2] == b'\\') {
+        if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.to_path_buf())) {
+            return dir.join(s[2..].trim_start_matches(['/', '\\']).replace('/', "\\"));
+        }
+    }
+    path.into()
+}
+
 /// Creates or obtains the process-wide Xbox storage factory.
 ///
 /// # Safety
@@ -134,11 +146,11 @@ impl IFactory_Impl for Factory_Impl {
         }
         // The caller supplies a NUL-terminated Windows path for the duration of OpenFile.
         let wide = windows::core::PCWSTR(path);
-        let path = OsString::from_wide(unsafe { wide.as_wide() });
+        let path = console_path(OsString::from_wide(unsafe { wide.as_wide() }));
         match OpenOptions::new()
             .read(true)
             .share_mode(FILE_SHARE_READ.0)
-            .open(path)
+            .open(&path)
         {
             Ok(file) => {
                 {
@@ -160,7 +172,12 @@ impl IFactory_Impl for Factory_Impl {
                 unsafe { out.write(object.into_raw()) };
                 S_OK
             }
-            Err(error) => HRESULT::from_win32(error.raw_os_error().unwrap_or(1) as u32),
+            Err(error) => {
+                if std::env::var_os("TUXBOX_LOG").is_some() {
+                    eprintln!("TuxBox xcrdapi: OpenFile {} failed: {error}", path.display());
+                }
+                HRESULT::from_win32(error.raw_os_error().unwrap_or(1) as u32)
+            }
         }
     }
     unsafe fn CreateStatusArray(
