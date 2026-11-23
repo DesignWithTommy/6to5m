@@ -33,7 +33,8 @@ use std::{
 const USAGE: &str = "usage: 6ixpack colour-textures --game <6m dir> [--out <dir>] [--work <dir>] [--archive <id>]
   --out      output folder (default: C:\\Users\\Desig\\Downloads\\gta 6 textures)
   --work     sixng work dir holding the archive indexes (default: work, or SIXNG_WORK)
-  --archive  only this archive (id or path fragment, repeatable)";
+  --archive  only this archive (id or path fragment, repeatable)
+  --min-size skip textures whose decoded top mip is narrower or shorter than this (default 600)";
 
 const BASE: &str = "c8e8c282";
 const DETAIL: &str = "0df47048";
@@ -87,6 +88,7 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
     let mut out = PathBuf::from(r"C:\Users\Desig\Downloads\gta 6 textures");
     let mut work = std::env::var_os("SIXNG_WORK").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("work"));
     let mut only: Vec<String> = Vec::new();
+    let mut min = 600u32;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut val = || it.next().ok_or_else(|| format!("{} needs a value\n{USAGE}", a.to_string_lossy()));
@@ -94,6 +96,7 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
             Some("--game") => game = Some(PathBuf::from(val()?)),
             Some("--out") => out = PathBuf::from(val()?),
             Some("--work") => work = PathBuf::from(val()?),
+            Some("--min-size") => min = val()?.to_str().and_then(|v| v.parse().ok()).ok_or("--min-size needs a number")?,
             Some("--archive") => only.push(val()?.to_string_lossy().into_owned()),
             Some("-h" | "--help") => {
                 println!("{USAGE}");
@@ -110,6 +113,7 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
     }
     let seen: Mutex<HashSet<u64>> = Mutex::new(HashSet::from([ENGINE_WHITE]));
     let (written, rgba_n, skipped_data, missing, failed) = (AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0));
+    let small = AtomicUsize::new(0);
     let quiet: sixng_core::export::Progress = sixng_core::export::no_progress();
     for a in ws.archives().into_iter().filter(|a| a.container == "rpf9") {
         if !only.is_empty() && !only.iter().any(|o| a.id.contains(o.as_str())) {
@@ -142,6 +146,12 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
                         skipped_data.fetch_add(1, Ordering::Relaxed);
                         continue;
                     };
+                    // Low-res copies (LOD bindings, small variants) are other
+                    // hash64s whose stored top mip is below the minimum.
+                    if tx.width < min || tx.height < min {
+                        small.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
                     if !seen.lock().unwrap().insert(h) {
                         continue;
                     }
@@ -152,6 +162,9 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
                         let (data, skipped) = store.data_ex(tx).map_err(|e| e.to_string())?;
                         let mip = if skipped == 0 { 0 } else { store.best_mip(tx).ok_or("only BCPack mips")? };
                         let (rgba, w, hh) = sixng_core::ttpf::decode_rgba(tx, &data, mip).map_err(|e| e.to_string())?;
+                        if w < min || hh < min {
+                            return Err(format!("only a {w}x{hh} mip decodes (top mips BCPack), below --min-size"));
+                        }
                         let dir = adir.join(&model);
                         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
                         let slot = sixng_core::names::param(&t.param_hash).unwrap_or_else(|| t.param_hash.clone());
@@ -175,12 +188,13 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
         println!("[colour-textures] {}: {} drawables, {} new PNGs", a.id, entries.len(), written.load(Ordering::Relaxed) - before);
     }
     println!(
-        "[colour-textures] wrote {} PNGs ({} with opacity alpha) to {}; {} data-slot bindings skipped, {} bindings not in any store, {} failed",
+        "[colour-textures] wrote {} PNGs ({} with opacity alpha) to {}; {} data-slot bindings skipped, {} bindings not in any store, {} below {min} px, {} failed",
         written.into_inner(),
         rgba_n.into_inner(),
         out.display(),
         skipped_data.into_inner(),
         missing.into_inner(),
+        small.into_inner(),
         failed.into_inner()
     );
     Ok(())
