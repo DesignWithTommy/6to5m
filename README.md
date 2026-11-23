@@ -79,7 +79,7 @@ What works today:
 - [x] gtxd.meta parent chain checked by every `fivem build` (one parent each, no cycles, every txd in stream/, each drawable's textures found in its txd chain, no texture stored twice); in-game check pending
 - [x] Road paths to .ynd (AI traffic): `fivem build` part `paths`, whole 512 m node areas over the bbox, links only into written areas
 - [x] Navmesh to .ynv (ped/AI pathing): `fivem build` part `navmesh`, 6m tiles clipped into 150 m cells, decimated and merged under the 16k-polygon cap, edge adjacency across written cells
-- [ ] Lights to ymap LODLights / DistantLODLights (night lighting)
+- [x] Lights to ymap LODLights / DistantLODLights (night lighting): exterior lights (entity + archetype sets) as `t6m_lodlights_X_Y` / `t6m_distlights_X_Y`, packed as CodeWalker; the archetype-to-meta-file index is built in the interior-ents pass (not yet checked in CodeWalker or in game)
 - [ ] Instanced batches (grass, vegetation) to ymap grass instance lists
 - [x] Minimap and zone names: the region's terrain as shaded relief in the six radar tiles `minimap_sea_<row>_<col>.ytd` (4500 m tiles from (-4140, 8400), fitted against vanilla); 512 m zones named after the dominant 6m archetype prefix (`<work>/zone_names.json` renames them), shown by `t6m_zones.lua`. Not yet tested in game
 - [x] Split output into several resources by region: `--split <metres>` writes `<out>/[<name>]/` with one resource per region plus `<name>_common` (ytyps, LOD/SLOD ymaps, shared txds, terrain, water) and an `ensure.cfg`; regions over `--split-max <MB>` (default 1024) are quartered. Not yet tested in game

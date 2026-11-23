@@ -138,6 +138,14 @@ fn lights_of_ext(m: &Meta, eo: usize) -> Vec<Light> {
     out
 }
 
+/// Archetypes (name hashes) with a light extension in one parsed meta.
+pub fn lit_archetypes(m: &Meta) -> Vec<u32> {
+    if !m.structs.contains_key(&LIGHT_EXT) {
+        return vec![];
+    }
+    m.objects(ARCHETYPE).into_iter().filter(|&o| !ext_sets(m, o + 0x90).is_empty()).map(|o| m.r.u32(o + 0x74)).collect()
+}
+
 /// Light extensions reachable from an extension-pointer array at `at`.
 fn ext_sets(m: &Meta, at: usize) -> Vec<(u32, [f32; 3], Vec<Light>)> {
     let r = m.r;

@@ -55,7 +55,7 @@ Loads in CodeWalker; not yet tested in game.
 ## fivem features (from the FiveM migration)
 - Road paths to .ynd (AI traffic), from `sixng paths`
 - Navmesh to .ynv (ped/AI pathing)
-- Lights to ymap LODLights / DistantLODLights (night lighting)
+- LODLights / DistantLODLights (`src/gta5/fivem/lodlights.rs`) are written but unverified: check in CodeWalker and at night in game (intensity byte = intensity x5.3125, clamped 255)
 - Instanced batches (grass, vegetation) to ymap grass instance lists
 - Minimap texture and zone names
 - Region split (`--split`) done; verify in game, and split the LOD/SLOD ymaps and terrain per region if common grows too big

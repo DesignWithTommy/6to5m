@@ -99,7 +99,13 @@ pub fn file_info(m: &Meta) -> FileInfo {
     FileInfo { space, interiors, entities }
 }
 
-/// Scan every meta resource and write `<work>/index/interior_entities.jsonl`:
+/// Name of the light index written next to interior_entities.jsonl:
+/// {archetype hash (hex): meta file offset (hex)} for archetypes with a
+/// light extension (first file by offset), gathered in the same pass.
+pub const LIGHT_INDEX: &str = "light_index_v1.json";
+
+/// Scan every meta resource and write `<work>/index/interior_entities.jsonl`
+/// (and the light index, LIGHT_INDEX):
 /// one line per file whose space is not `world`, {map, space, entities
 /// (count), interiors, members: [{index, interior, room, entity_set, ...}]}.
 /// Every entity of a non-world file is interior-local or group-local;
@@ -108,6 +114,7 @@ pub fn build(ws: &Workspace, a: &ArchiveInfo, metas: &[&Entry], progress: Progre
     let total = metas.len() as u64;
     let done = AtomicU64::new(0);
     crate::names::set_work_dir(&ws.work);
+    let lit: std::sync::Mutex<Vec<(u64, u32)>> = Default::default();
     let mut rows: Vec<(u64, Value, usize, usize, usize, usize, &'static str)> = metas
         .par_iter()
         .filter_map(|e| {
@@ -115,6 +122,10 @@ pub fn build(ws: &Workspace, a: &ArchiveInfo, metas: &[&Entry], progress: Progre
             progress(&e.id, d, total);
             let r = Resource::load_sys(&a.path, e).ok()?;
             let m = Meta::parse(&r)?;
+            let la = crate::lights::lit_archetypes(&m);
+            if !la.is_empty() {
+                lit.lock().unwrap().extend(la.into_iter().map(|h| (e.off, h)));
+            }
             let n = m.objects(meta7a::ENTITY).len();
             if n == 0 {
                 return None;
@@ -146,7 +157,17 @@ pub fn build(ws: &Workspace, a: &ArchiveInfo, metas: &[&Entry], progress: Progre
         }
     }
     w.flush()?;
+    let mut lit = lit.into_inner().unwrap();
+    lit.sort();
+    let mut li = std::collections::BTreeMap::new();
+    for (off, h) in lit {
+        li.entry(hex(h)).or_insert_with(|| format!("{off:x}"));
+    }
+    let tmp = dir.join("light_index.tmp");
+    fs::write(&tmp, serde_json::to_vec(&li)?)?;
+    fs::rename(&tmp, dir.join(LIGHT_INDEX))?;
     Ok(json!({
+        "lit_archetypes": li.len(),
         "files_by_space": by_space.iter().map(|(k, v)| (k.to_string(), json!({"files": v.0, "entities": v.1}))).collect::<serde_json::Map<_, _>>(),
         "interior_members": mem, "in_room": rooms, "in_entity_set": sets,
         "file": dir.join("interior_entities.jsonl"),

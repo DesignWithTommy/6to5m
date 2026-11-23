@@ -5,6 +5,8 @@
 use super::geom::{aabb, push_geoms, push_geoms_n, V3};
 #[path = "interiors.rs"]
 mod interiors;
+#[path = "lodlights.rs"]
+mod lodlights;
 #[path = "texopt.rs"]
 mod texopt;
 use super::{safe_name, sha, write_atomic, Ctx, FRAG_V, TEX_V, YDR_V};
@@ -565,7 +567,7 @@ fn placements_dir(ctx: &Ctx, index: &ArchiveIndex) -> Result<PathBuf, Box<dyn Er
         Some(t) => t < ctx.input_time || deps.iter().flatten().any(|d| *d > t),
     };
     let ie = ix.join("interior_entities.jsonl");
-    if stale(&ie, &[]) {
+    if stale(&ie, &[]) || !ix.join(sixng_core::interiorents::LIGHT_INDEX).exists() {
         let _p = super::Phase::new(ctx, "  prep interior-ents");
         sixng_core::interiorents::build(&ws, &a, &metas, sixng_core::export::no_progress())?;
     }
@@ -1381,6 +1383,9 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
         texs.retain(|t| t != MISSING);
     }
     let is_frag = entry.is_some_and(|e| e.rtype.as_deref() == Some("ft"));
+    if frag_out {
+        ctx.skip(name, "fragment geometry outside declared bounds (converted anyway, check placement)", json!({"source": src}));
+    }
     if mesh.geoms.is_empty() {
         ctx.skip(name, "no triangles", json!({"source": format!("levels.rpf@{off:x}")}));
         return Ok(None);
@@ -1389,23 +1394,8 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
         ctx.skip(name, "missing textures (placeholder used)", json!({"textures": missing}));
     }
     let (lo, hi) = aabb(mesh.geoms.iter().flat_map(|g| g.positions.iter()));
-    let cols = entry.filter(|_| frag).map(|e| super::frags::colliders(&ctx.o.game.join("levels.rpf"), e)).unwrap_or_default();
-    // A fragment's drawable bounds (+0x30/+0x40) are not in the frame its
-    // geometry and colliders share (doors: centred on the panel while the
-    // mesh and the bone-placed colliders start at the hinge), so a fragment
-    // with 6m colliders is flagged only when its mesh misses their union.
-    let frag_out = if cols.is_empty() {
-        frag_out
-    } else {
-        let (cl, ch) = cols.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(a, b), c| (std::array::from_fn(|k| a[k].min(c.min[k])), std::array::from_fn(|k| b[k].max(c.max[k]))));
-        let pad = 0.05 * (0..3).map(|k| ch[k] - cl[k]).fold(1.0f32, f32::max);
-        (0..3).any(|k| lo[k] > ch[k] + pad || hi[k] < cl[k] - pad)
-    };
-    if frag_out {
-        ctx.skip(name, "fragment geometry outside its collision (converted anyway, check placement)", json!({"source": src}));
-    }
     let bytes = match entry.filter(|_| frag) {
-        Some(_) => super::frags::build_prop_yft(&mesh, &cols, 9998.0),
+        Some(e) => super::frags::build_prop_yft(&mesh, &super::frags::colliders(&ctx.o.game.join("levels.rpf"), e), 9998.0),
         // the source model's own LOD levels and distances (LodGroup +0x50..+0x7C)
         None if lower.iter().any(|l| !l.geoms.is_empty()) => {
             let mut lv = vec![mesh.clone()];
@@ -1669,6 +1659,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     let yt = meta::build_ytyp(&MapTypes { name: "t6m_bld".into(), archetypes: archetypes.clone() })?;
     emit_meta(ctx, "t6m_bld.ytyp", yt)?;
     interiors::emit(ctx, &mlos, &done.iter().map(|(n, a)| (n.clone(), a.an.clone())).collect(), &archetypes)?;
+    lodlights::emit(ctx, &dir, index)?;
     {
         // for --split (split.rs): which txd each archetype uses
         let mut l = ctx.layout.lock().unwrap();
