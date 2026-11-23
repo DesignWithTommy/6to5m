@@ -9,11 +9,16 @@
 //! owns it (store slot owners). A texture whose 32-bit slot belongs to another
 //! identity moves to a slot derived from its 64-bit hash.
 //!
-//! Slots cached before this check have no `.id`: they are adopted when the
-//! DDS size fits the texture's stored size (or a mip of it), otherwise the
-//! texture moves.
+//! Slots cached before this check have no `.id`: their owner is the
+//! identity in the slot's record (`Src`), never a size match (a 1024 x 1024
+//! data map "fitted" a 1024 x 1024 wall colour). Claims are atomic
+//! (`Store::claim`): an unlocked check-then-set let two textures with the same
+//! 32-bit hash both take the slot in a parallel build, and one got the
+//! other's DDS. 6m ap_06_terminal_d alone binds 40 different textures under
+//! `447e24d9` (the base colour of its two-layer walls, packed-data and normal
+//! maps), so terminal walls drew a data map: white with dark blotches.
 
-use super::texmem::Store;
+use super::texmem::{Src, Store};
 use std::{
     path::Path,
     sync::atomic::{AtomicUsize, Ordering},
@@ -36,9 +41,19 @@ fn same(stored: &str, key: u64, h64: u64) -> bool {
     }
 }
 
-/// Cache id for a texture. `expect` gives its stored size (TTPF or pool).
-/// `suffix` is the file suffix of the slot (`""` colour, `"_n"` normal).
-pub(super) fn slot(store: &Store, suffix: &str, hash: u32, key: u64, h64: u64, expect: &dyn Fn() -> Option<(u32, u32)>) -> u32 {
+/// Identity recorded with a slot's DDS (slots made before owners were kept).
+fn rec_ident(store: &Store, side: &str) -> Option<String> {
+    Some(match store.rec(Path::new(&format!("{side}.dds")))?.src {
+        Src::Pool { key } => format!("{key:016x} {:016x}", 0),
+        Src::Ttpf { h64 } => format!("{:016x} {h64:016x}", 0),
+        Src::Normal { key, h64, .. } => format!("{key:016x} {h64:016x}"),
+        _ => return None,
+    })
+}
+
+/// Cache id for a texture. `suffix` is the file suffix of the slot (`""`
+/// colour, `"_n"` normal).
+pub(super) fn slot(store: &Store, suffix: &str, hash: u32, key: u64, h64: u64) -> u32 {
     if key == 0 && h64 == 0 {
         return hash;
     }
@@ -46,20 +61,9 @@ pub(super) fn slot(store: &Store, suffix: &str, hash: u32, key: u64, h64: u64, e
     let ids = [hash, alt(if h64 != 0 { h64 } else { key })];
     for (i, &id) in ids.iter().enumerate() {
         let side = format!("{id:08x}{suffix}");
-        match store.id(&side) {
-            Some(s) if same(&s, key, h64) => return id,
-            Some(_) => {}
-            None => {
-                let rec = store.rec(Path::new(&format!("{side}.dds")));
-                let fits = match (rec.map(|r| (r.w, r.h)), expect()) {
-                    (Some(d), Some(e)) => (0..12).any(|k| (e.0 >> k).max(1) == d.0 && (e.1 >> k).max(1) == d.1),
-                    _ => true,
-                };
-                if fits {
-                    store.set_id(&side, &ident);
-                    return id;
-                }
-            }
+        let owner = store.id(&side).unwrap_or_else(|| store.claim(&side, rec_ident(store, &side).unwrap_or_else(|| ident.clone())));
+        if same(&owner, key, h64) {
+            return id;
         }
         if i == 0 {
             MOVED.fetch_add(1, Ordering::Relaxed);

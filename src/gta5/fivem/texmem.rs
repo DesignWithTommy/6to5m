@@ -129,8 +129,10 @@ impl Store {
         self.ids.lock().unwrap().get(slot).cloned()
     }
 
-    pub fn set_id(&self, slot: &str, ident: &str) {
-        self.ids.lock().unwrap().insert(slot.to_string(), ident.to_string());
+    /// Owner of `slot`, recording `ident` first when it has none, under one
+    /// lock (texslot: two textures must never both take a slot).
+    pub fn claim(&self, slot: &str, ident: String) -> String {
+        self.ids.lock().unwrap().entry(slot.to_string()).or_insert(ident).clone()
     }
 
     /// Write the records (persistent stores only).

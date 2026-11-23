@@ -187,24 +187,7 @@ impl Pools {
     /// Cache slot of a texture (fivem/texslot.rs): its 32-bit hash unless
     /// another texture owns that file.
     fn slot(&self, suffix: &str, hash: u32, key: u64, h64: u64) -> u32 {
-        super::texslot::slot(&self.store, suffix, hash, key, h64, &|| self.dims(key, h64))
-    }
-
-    /// Stored size of a texture: TTPF by 64-bit hash, else its pool entry.
-    fn dims(&self, key: u64, h64: u64) -> Option<(u32, u32)> {
-        if h64 != 0 {
-            if let Some((_, t)) = sixng_core::ttpf::global(&self.game).get(h64) {
-                return Some((t.width, t.height));
-            }
-        }
-        let cat = self.catalog.as_ref()?;
-        let loc = cat.find(key).iter().find(|l| l.extractable)?;
-        let f = fs::File::open(&loc.path).ok()?;
-        // SAFETY: read-only map of a game file.
-        let map = unsafe { Mmap::map(&f) }.ok()?;
-        let pool = crate::texture::Pool::open(&map).ok()?;
-        let t = pool.textures.get(loc.index)?;
-        Some((t.width, t.height))
+        super::texslot::slot(&self.store, suffix, hash, key, h64)
     }
 
     fn get(&mut self, hash: u32, key: u64, h64: u64) -> Result<PathBuf, String> {

@@ -36,6 +36,11 @@ const TXD_CAP: u64 = 14 << 20;
 /// to download and mount per region).
 const TXD_PACK: u64 = 4 << 20;
 const MISSING: &str = "r6m_missing";
+/// Engine default texture in colour slots of every 6m shader family, held by
+/// no store or resource of the install (SixNG export.rs ENGINE_DEFAULTS:
+/// white). Terminal railings (ap_06_terminal_d shader 63, tinted) bind only
+/// it, so they resolved to nothing and drew magenta.
+const ENGINE_WHITE: u64 = 0x1e2c_9340_e14a_7d07;
 
 /// 6m render bucket bits -> GTA V shader kind (ydr::Geom::kind).
 /// DXT1 (opaque) or DXT5 (with alpha) DDS with a box-filtered mip chain,
@@ -377,24 +382,7 @@ impl Pools {
     /// Slot of a texture (fivem/texslot.rs): its 32-bit hash unless another
     /// texture owns it.
     fn slot(&self, suffix: &str, hash: u32, key: u64, h64: u64) -> u32 {
-        super::texslot::slot(&self.store, suffix, hash, key, h64, &|| self.dims(key, h64))
-    }
-
-    /// Stored size of a texture: TTPF by 64-bit hash, else its pool entry.
-    fn dims(&self, key: u64, h64: u64) -> Option<(u32, u32)> {
-        if h64 != 0 {
-            if let Some((_, t)) = sixng_core::ttpf::global(&self.game).get(h64) {
-                return Some((t.width, t.height));
-            }
-        }
-        let cat = self.catalog.as_ref()?;
-        let loc = cat.find(key).iter().find(|l| l.extractable)?;
-        let f = fs::File::open(&loc.path).ok()?;
-        // SAFETY: read-only map of a game file.
-        let map = unsafe { Mmap::map(&f) }.ok()?;
-        let pool = crate::texture::Pool::open(&map).ok()?;
-        let t = pool.textures.get(loc.index)?;
-        Some((t.width, t.height))
+        super::texslot::slot(&self.store, suffix, hash, key, h64)
     }
 
     /// DDS of a recorded texture: from memory, else decoded again from its
@@ -429,6 +417,11 @@ impl Pools {
         let hash = self.slot("", hash, key, h64);
         let p = self.path(hash);
         if self.store.exists(&p) {
+            return Ok(p);
+        }
+        if h64 == ENGINE_WHITE {
+            let d = self.tint_dds("w", [255; 3])?;
+            self.store.put(&p, d, super::texmem::Src::Tint { base: "w".into(), rgb: [255; 3] });
             return Ok(p);
         }
         let e1 = match self.pool_dds(key).and_then(|d| check_dds(&d).map(|_| d)) {
@@ -1883,7 +1876,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     }
     // source textures: decoded in memory (4 GB held), records in the index
     let cache = PathBuf::from("texmem");
-    let store = super::texmem::Store::open(ctx.o.work.join("index").join(format!("fivem_textures_v{}.json", sixng_core::bcpack::BCPACK_DECODER_VERSION)), 4 << 30);
+    let store = super::texmem::Store::open(ctx.o.work.join("index").join(format!("fivem_textures_v{}s2.json", sixng_core::bcpack::BCPACK_DECODER_VERSION)), 4 << 30);
     let ttdb = ctx.o.game.join("data").join("ttdb");
     let pools = Pools { game: ctx.o.game.clone(), catalog: crate::texture::Catalog::build(&ttdb).map_err(|e| eprintln!("{}: {e}", ttdb.display())).ok(), maps: Mutex::new(HashMap::new()), dir: cache.clone(), store };
     let mut by_off: HashMap<usize, &Entry> = index.entries.iter().map(|e| (e.off as usize, e)).collect();
