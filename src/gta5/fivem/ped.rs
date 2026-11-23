@@ -833,6 +833,13 @@ fn candidates<'a>(ix: &'a sixng_core::scan::ArchiveIndex, o: &PedOpts) -> Vec<&'
 /// garment: the ped's own, else the denim shorts of the fit that
 /// core_restofworld references (`invisible_<name>`), else the first
 /// full denim shorts of the fit. The legacy head goes when the ped has a head.
+///
+/// Checked against the wardrobe tags (2a8cdb1d = joaat of a garment name
+/// prefix): of 150 fr1 shorts / pants / skirt / crop-top prefixes only
+/// `shortsjeans_fr1_009` is tagged anywhere (12 struct-4a hits), and none of
+/// those resources is Lucia's (her seed-matched wardrobe packs.rpf@63b7010
+/// tags none). No record names her lower garment, so the fr1_016 pick above
+/// stays a name match, not a data link.
 fn full_detail<'a>(cands: Vec<&'a Entry>, ix: &'a sixng_core::scan::ArchiveIndex, skin: Option<&'a sixng_core::scan::ArchiveIndex>, name: &str, fit: &str) -> Vec<&'a Entry> {
     let low = |e: &Entry| e.name.as_deref().unwrap_or("").to_ascii_lowercase();
     if !cands.iter().any(|e| prefix_item(&low(e)).is_some_and(|x| x.1.starts_with("legacyped"))) {
