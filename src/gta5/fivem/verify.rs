@@ -51,6 +51,9 @@ pub fn verify(file: &str, bytes: &[u8]) -> Result<String, String> {
         "yft" => 162,
         "ybn" => 43,
         "ymap" | "ytyp" => 2,
+        // path nodes / navmesh cells (ynd.rs, ynv.rs): header and pages only
+        "ynd" => 1,
+        "ynv" => 2,
         _ => return Err(format!("{file}: unknown output type")),
     };
     let e = |m: String| format!("{file}: {m}");
@@ -80,6 +83,7 @@ pub fn verify(file: &str, bytes: &[u8]) -> Result<String, String> {
         "ydr" => drawable(&r),
         "yft" => frag(&r),
         "ybn" => bounds(&r),
+        "ynd" | "ynv" => Ok(String::from("pages")),
         _ => meta(&r, &ext),
     }
     .map_err(e)?;
