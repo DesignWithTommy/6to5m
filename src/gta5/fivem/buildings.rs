@@ -623,7 +623,7 @@ fn tinted(pools: &Pools, tex: &str, c: [u8; 3]) -> Result<String, String> {
 /// sixng-core as its GLB export does. All palette slots of a model share it.
 fn sixng_palette(ctx: &Ctx, e: &Entry) -> Option<Vec<[u8; 4]>> {
     use sixng_core::{drawable, resource::Resource, texture};
-    let r = Resource::load(&ctx.o.game.join("levels.rpf"), e).ok()?;
+    let r = Resource::load(&ctx.entry_path(e), e).ok()?;
     let emb: HashMap<u64, texture::TexInfo> = texture::find_textures(&r).into_iter().filter(|t| t.height == 1).filter_map(|t| Some((texture::embedded_hash(&r, &t)?, t))).collect();
     let h64 = drawable::find_shaders(&r).into_iter().flat_map(|s| s.textures).find(|t| u32::from_str_radix(&t.param_hash, 16).ok() == Some(TINT_PALETTE) && u64::from_str_radix(&t.hash64, 16).is_ok_and(|h| emb.contains_key(&h)))?.hash64;
     let rgba = texture::embedded_rgba(&r, emb.get(&u64::from_str_radix(&h64, 16).ok()?)?).ok()?;
@@ -683,6 +683,21 @@ fn placements_dir(ctx: &Ctx, index: &ArchiveIndex) -> Result<PathBuf, Box<dyn Er
         let _p = super::Phase::new(ctx, "  prep lod-links");
         sixng_core::lodlinks::build(&ws, &a, &metas, sixng_core::export::no_progress())?;
     }
+    export_region(ctx, &ws, &a.path, &a.id, &metas, &dir, &[mtime(&ie), mtime(&lp)])?;
+    Ok(dir)
+}
+
+/// Placement JSON for the map files of one archive that can touch the
+/// build region, into `dir` (index.jsonl + <offset>.json); redone when the
+/// recorded region does not cover --bbox or the output is older than the
+/// archive or `deps`.
+fn export_region(ctx: &Ctx, ws: &sixng_core::export::Workspace, archive: &Path, id: &str, metas: &[&Entry], dir: &Path, deps: &[Option<std::time::SystemTime>]) -> Result<(), Box<dyn Error>> {
+    let mtime = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
+    let input = mtime(archive).map_or(ctx.input_time, |t| t.max(ctx.input_time));
+    let stale = |p: &Path, deps: &[Option<std::time::SystemTime>]| match mtime(p) {
+        None => true,
+        Some(t) => t < input || deps.iter().flatten().any(|d| *d > t),
+    };
     let region_f = dir.join(".fivem_region.json");
     let made_for: Option<Option<[f32; 4]>> = fs::read(&region_f).ok().and_then(|b| serde_json::from_slice(&b).ok());
     let covers = match (made_for, ctx.o.bbox) {
@@ -691,7 +706,7 @@ fn placements_dir(ctx: &Ctx, index: &ArchiveIndex) -> Result<PathBuf, Box<dyn Er
         _ => false,
     };
     let pi = dir.join("index.jsonl");
-    if !covers || stale(&pi, &[mtime(&ie), mtime(&lp)]) {
+    if !covers || stale(&pi, deps) {
         let _p = super::Phase::new(ctx, "  prep placements");
         // a region export is enough for this build; grown 1 km so nearby rebuilds reuse it
         let reg = ctx.o.bbox.map(|b| [b[0] - 1000.0, b[1] - 1000.0, b[2] + 1000.0, b[3] + 1000.0]);
@@ -700,7 +715,7 @@ fn placements_dir(ctx: &Ctx, index: &ArchiveIndex) -> Result<PathBuf, Box<dyn Er
         }
         // only the map files that can touch the region (+ interior-space
         // files, few and needed by MLO instances): no whole-map export
-        let sp = meta_spatial(ctx, &a.path, &metas);
+        let sp = meta_spatial(ctx, archive, id, metas);
         let want: Vec<&Entry> = metas
             .iter()
             .copied()
@@ -710,19 +725,49 @@ fn placements_dir(ctx: &Ctx, index: &ArchiveIndex) -> Result<PathBuf, Box<dyn Er
                 (Some((world, b)), Some(r)) => !*world || (b[0] <= r[2] && b[2] >= r[0] && b[1] <= r[3] && b[3] >= r[1]),
             })
             .collect();
-        eprintln!("buildings: exporting {} of {} map files", want.len(), metas.len());
-        fast_export(&ws, &a.path, &want, &dir)?;
-        fs::create_dir_all(&dir)?;
+        eprintln!("buildings: exporting {} of {} map files of {id}", want.len(), metas.len());
+        fast_export(ws, archive, &want, dir)?;
+        fs::create_dir_all(dir)?;
         fs::write(&region_f, serde_json::to_vec(&reg)?)?;
     }
-    Ok(dir)
+    Ok(())
+}
+
+/// Placement dirs of the story / minigame packs (<work>/placements/<stem>):
+/// their LOD links (per-archive sixng side files) and region export, built
+/// like levels.rpf's. Their interiors are not placed (MLO instances come
+/// from levels.rpf only).
+fn pack_placements(ctx: &Ctx) -> Result<Vec<PathBuf>, Box<dyn Error>> {
+    if ctx.o.placements.is_some() {
+        return Ok(Vec::new());
+    }
+    let ws = sixng_core::export::Workspace::new(&ctx.o.game, &ctx.o.work);
+    let mut out = Vec::new();
+    for pk in &ctx.packs {
+        let a = ws.resolve(&pk.id)?;
+        let dir = ctx.o.work.join("placements").join(sixng_core::game::index_stem(&pk.id));
+        let metas: Vec<&Entry> = pk.index.entries.iter().filter(|e| e.kind == sixng_core::classify::Kind::Resource && e.sub == "7a").collect();
+        let ix = ctx.o.work.join("index");
+        let mtime = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
+        let lp = ix.join(sixng_core::game::per_archive_name("lod_parents", "jsonl", &pk.id));
+        let al = ix.join(sixng_core::game::per_archive_name("archetype_lod", "jsonl", &pk.id));
+        let src = mtime(&pk.path);
+        let old = |p: &Path| mtime(p).map_or(true, |t| src.is_some_and(|s| t < s));
+        if old(&lp) || old(&al) {
+            let _p = super::Phase::new(ctx, "  prep lod-links (pack)");
+            sixng_core::lodlinks::build(&ws, &a, &metas, sixng_core::export::no_progress())?;
+        }
+        export_region(ctx, &ws, &pk.path, &pk.id, &metas, &dir, &[mtime(&lp)])?;
+        out.push(dir);
+    }
+    Ok(out)
 }
 
 /// Per map file (entry offset): world-space flag and xy bbox of its entity
 /// positions, from the system page only. Cached in <work>/fivem_meta_xy.json
 /// per levels.rpf stamp; entries not in the cache are scanned, so this is a
 /// one-off scan per game version (files without entities are recorded too).
-fn meta_spatial(ctx: &Ctx, archive: &Path, metas: &[&Entry]) -> HashMap<u64, (bool, [f32; 4])> {
+fn meta_spatial(ctx: &Ctx, archive: &Path, id: &str, metas: &[&Entry]) -> HashMap<u64, (bool, [f32; 4])> {
     use sixng_core::meta7a::{Meta, ENTITY};
     use serde::{Deserialize, Serialize};
     #[derive(Serialize, Deserialize, Default)]
@@ -730,9 +775,12 @@ fn meta_spatial(ctx: &Ctx, archive: &Path, metas: &[&Entry]) -> HashMap<u64, (bo
         stamp: String,
         rows: Vec<(u64, u8, [f32; 4])>,
     }
-    let p = ctx.o.work.join("fivem_meta_xy.json");
-    let mut c: C = fs::read(&p).ok().and_then(|b| serde_json::from_slice(&b).ok()).filter(|c: &C| c.stamp == ctx.input_stamp).unwrap_or_default();
-    c.stamp = ctx.input_stamp.clone();
+    // one cache per archive (offsets of different archives overlap); the
+    // stamp is that archive's size:mtime (levels.rpf: same as ctx.input_stamp)
+    let p = ctx.o.work.join(sixng_core::game::per_archive_name("fivem_meta_xy", "json", id));
+    let stamp = fs::metadata(archive).ok().map(|m| format!("{}:{}", m.len(), m.modified().ok().and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0))).unwrap_or_default();
+    let mut c: C = fs::read(&p).ok().and_then(|b| serde_json::from_slice(&b).ok()).filter(|c: &C| c.stamp == stamp).unwrap_or_default();
+    c.stamp = stamp;
     let have: HashSet<u64> = c.rows.iter().map(|r| r.0).collect();
     let todo: Vec<&&Entry> = metas.iter().filter(|e| !have.contains(&e.off)).collect();
     if !todo.is_empty() {
@@ -774,8 +822,9 @@ fn fast_export(ws: &sixng_core::export::Workspace, archive: &Path, entries: &[&E
     let names = sixng_core::export::model_names(ws);
     let ix = ws.index_dir();
     let ids: HashSet<&str> = entries.iter().map(|e| e.id.as_str()).collect();
-    let par_lines = |f: &str| fs::read_to_string(ix.join(f)).unwrap_or_default();
-    let ptxt = par_lines("lod_parents.jsonl");
+    // every archive's side file (map ids carry their archive)
+    let par_lines = |f: &str| sixng_core::game::per_archive_files(&ix, f, "jsonl").iter().filter_map(|p| fs::read_to_string(p).ok()).collect::<Vec<_>>().join("\n");
+    let ptxt = par_lines("lod_parents");
     let parents: HashMap<String, HashMap<u64, Value>> = ptxt
         .par_lines()
         .filter(|l| l.find("\"map\":\"").and_then(|i| l[i + 7..].split('"').next()).is_some_and(|id| ids.contains(id)))
@@ -795,7 +844,7 @@ fn fast_export(ws: &sixng_core::export::Workspace, archive: &Path, entries: &[&E
         })
         .collect();
     drop(ptxt);
-    let atxt = par_lines("archetype_lod.jsonl");
+    let atxt = par_lines("archetype_lod");
     let arch_lod: HashMap<u32, (f32, f32)> = atxt
         .par_lines()
         .filter_map(|l| {
@@ -858,7 +907,7 @@ fn fast_export(ws: &sixng_core::export::Workspace, archive: &Path, entries: &[&E
                     hi[k] = hi[k].max(en.position[k]);
                 }
             }
-            Some(json!({"id": e.id, "file": format!("placements/levels/{fname}"), "name_hash": format!("{:08x}", mf.name_hash), "parent_hash": format!("{:08x}", mf.parent_hash),
+            Some(json!({"id": e.id, "file": format!("placements/{}/{fname}", dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()), "name_hash": format!("{:08x}", mf.name_hash), "parent_hash": format!("{:08x}", mf.parent_hash),
                 "entities": mf.entities.len(), "resolved": mf.entities.iter().filter(|x| x.name.is_some()).count(), "bbox": [lo, hi], "space": space}))
         })
         .collect();
@@ -914,19 +963,24 @@ pub(crate) fn sys_from_map(map: &[u8], e: &Entry) -> Option<sixng_core::resource
     Some(sixng_core::resource::Resource { sys, gfx: Vec::new(), gfx_base: 0 })
 }
 
-fn load_places(ctx: &Ctx, dir: &Path, index: &ArchiveIndex) -> Result<Vec<Place>, Box<dyn Error>> {
-    let idx = fs::read_to_string(dir.join("index.jsonl"))?;
-    let files: Vec<PathBuf> = idx
-        .lines()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .filter(|v| {
-            if v["space"] != "world" {
-                return false;
-            }
-            ctx.o.in_bbox(f3(&v["bbox"][0]), f3(&v["bbox"][1]))
-        })
-        .filter_map(|v| Some(dir.join(Path::new(v["file"].as_str()?).file_name()?)))
-        .collect();
+/// World placements from every placement dir (levels.rpf first, then the
+/// story / minigame packs); interiors from the levels.rpf dir.
+fn load_places(ctx: &Ctx, dirs: &[PathBuf], index: &ArchiveIndex) -> Result<Vec<Place>, Box<dyn Error>> {
+    let dir = &dirs[0];
+    let mut files: Vec<PathBuf> = Vec::new();
+    for (k, d) in dirs.iter().enumerate() {
+        let idx = match fs::read_to_string(d.join("index.jsonl")) {
+            Ok(t) => t,
+            Err(e) if k == 0 => return Err(e.into()),
+            Err(_) => continue,
+        };
+        files.extend(
+            idx.lines()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .filter(|v| v["space"] == "world" && ctx.o.in_bbox(f3(&v["bbox"][0]), f3(&v["bbox"][1])))
+                .filter_map(|v| Some(d.join(Path::new(v["file"].as_str()?).file_name()?))),
+        );
+    }
     eprintln!("buildings: {} world placement files in region", files.len());
     let load = |f: &Path| fs::read(f).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok());
     let per: Vec<(String, Vec<Value>)> = files
@@ -954,8 +1008,8 @@ fn load_places(ctx: &Ctx, dir: &Path, index: &ArchiveIndex) -> Result<Vec<Place>
             ctx.skip(&format!("hash_{:08x}", e["archetype"].as_u64().unwrap_or(0)), "unnamed hash", json!({"position": pos}));
             return;
         };
-        let Some(off) = e["model_id"].as_str().and_then(|m| m.strip_prefix("levels.rpf@")).and_then(|h| usize::from_str_radix(h.split('#').next().unwrap_or(h), 16).ok()) else {
-            ctx.skip(&name, "model not in levels.rpf", json!({"model_id": e["model_id"]}));
+        let Some(off) = e["model_id"].as_str().and_then(|m| ctx.voff_of(m)) else {
+            ctx.skip(&name, "model archive not loaded", json!({"model_id": e["model_id"]}));
             return;
         };
         // Same model at the same place (10 cm) with the same orientation is
@@ -1049,7 +1103,7 @@ fn load_places(ctx: &Ctx, dir: &Path, index: &ArchiveIndex) -> Result<Vec<Place>
 fn lod_parents(ctx: &Ctx, maps: &HashSet<&str>) -> (HashMap<(String, usize), (String, usize)>, HashMap<(String, usize), String>) {
     let mut out = HashMap::new();
     let mut batch = HashMap::new();
-    let Ok(text) = fs::read_to_string(ctx.o.work.join("index").join("lod_parents.jsonl")) else {
+    let Some(text) = index_text(ctx, "lod_parents", "jsonl") else {
         ctx.skip("(lod chains)", "lod_parents.jsonl missing (run sixng lod-links); entities left as orphans", json!({}));
         return (out, batch);
     };
@@ -1077,6 +1131,13 @@ fn lod_parents(ctx: &Ctx, maps: &HashSet<&str>) -> (HashMap<(String, usize), (St
     (out, batch)
 }
 
+/// All per-archive copies of a sixng index side file (levels.rpf's first),
+/// concatenated; None when there is none.
+fn index_text(ctx: &Ctx, base: &str, ext: &str) -> Option<String> {
+    let v: Vec<String> = sixng_core::game::per_archive_files(&ctx.o.work.join("index"), base, ext).iter().filter_map(|p| fs::read_to_string(p).ok()).collect();
+    (!v.is_empty()).then(|| v.join("\n"))
+}
+
 /// archetype name -> lodDist from sixng lod-links (<work>/index/archetype_lod.jsonl).
 fn archetype_lods(ctx: &Ctx, names: &[&String]) -> HashMap<String, f32> {
     let mut want: HashMap<String, Vec<&String>> = HashMap::new();
@@ -1084,14 +1145,15 @@ fn archetype_lods(ctx: &Ctx, names: &[&String]) -> HashMap<String, f32> {
         want.entry(format!("{:08x}", crate::gta5::rsc::joaat(split_tint(n).0))).or_default().push(*n);
     }
     let mut out = HashMap::new();
-    let Ok(text) = fs::read_to_string(ctx.o.work.join("index").join("archetype_lod.jsonl")) else { return out };
+    let Some(text) = index_text(ctx, "archetype_lod", "jsonl") else { return out };
     for l in text.lines() {
         let Some(h) = l.strip_prefix("{\"archetype\":\"").and_then(|r| r.get(..8)) else { continue };
         let Some(ns) = want.get(h) else { continue };
         if let Ok(v) = serde_json::from_str::<Value>(l) {
             if let Some(d) = v["lod_dist"].as_f64().filter(|d| *d > 0.0) {
                 for n in ns {
-                    out.insert((*n).clone(), d as f32);
+                    // levels.rpf's file first: earlier archives win
+                    out.entry((*n).clone()).or_insert(d as f32);
                 }
             }
         }
@@ -1320,7 +1382,7 @@ fn keep_variant(sm: &crate::model::Mesh, set: &[u32], kept: u32) -> crate::model
 fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: usize, entry: Option<&Entry>) -> Result<Option<(Built, Vec<Mesh>, [f32; 4])>, String> {
     let ext_palettes = std::cell::OnceCell::new();
     let an = an.to_string();
-    let models = crate::model::load_models(&ctx.levels, off);
+    let models = { let (m, o) = ctx.src_map(off); crate::model::load_models(m, o) };
     let base = |n: &str| n.split(".#").next().unwrap_or(n).to_lowercase();
     let want = name.to_lowercase();
     let pick = models.iter().position(|m| base(&m.name) == want).or_else(|| (0..models.len()).max_by_key(|&i| models[i].meshes.iter().map(|m| m.positions.len()).sum::<usize>()));
@@ -1481,7 +1543,7 @@ fn rpf9_mesh(ctx: &Ctx, pools: &Pools, name: &str, row: usize, an: &str, off: us
 /// drawable (fragment children when it has none), raw bind pose, no physics.
 fn sixng_mesh(ctx: &Ctx, pools: &Pools, an: &str, e: &Entry) -> Result<Built, String> {
     use sixng_core::{drawable, resource::Resource};
-    let r = Resource::load(&ctx.o.game.join("levels.rpf"), e).map_err(|x| x.to_string())?;
+    let r = Resource::load(&ctx.entry_path(e), e).map_err(|x| x.to_string())?;
     let info = drawable::describe(&r);
     let slice = |i: usize| {
         let b = &info.buffers[i];
@@ -1558,7 +1620,7 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
     let file = if frag { format!("{an}.yft") } else { format!("{an}.ydr") };
     // Four-layer ground models carry their own writer tag, so a change to
     // that path re-converts only them (shader records: name hash + "atem").
-    let lyr4 = crate::model::system_page(&ctx.levels, off).is_some_and(|sys| sys.windows(8).any(|w| &w[4..] == b"atem" && FOUR_LAYER.contains(&u32::from_le_bytes([w[0], w[1], w[2], w[3]]))));
+    let lyr4 = { let (m, o) = ctx.src_map(off); crate::model::system_page(m, o) }.is_some_and(|sys| sys.windows(8).any(|w| &w[4..] == b"atem" && FOUR_LAYER.contains(&u32::from_le_bytes([w[0], w[1], w[2], w[3]]))));
     let fp = if lyr4 { format!("{YDR_V}|{LYR4_V}|bld|{off:x}|{name}") } else { format!("{YDR_V}|bld|{off:x}|{name}") };
     let fp = if name.starts_with("b6m_") { format!("{}|{fp}", super::batches::BATCH_V) } else { fp };
     let fp = if frag { format!("{FRAG_V}|{fp}") } else { fp };
@@ -1583,11 +1645,11 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
                 super::vlog::cached(&file, info.get("t6m_vehicles"));
             }
             let s = ctx.emit(&file, &fp, info, None)?;
-            ctx.report.lock().unwrap().converted.push(json!({"kind": "building", "name": an, "source": format!("levels.rpf@{off:x}"), "ydr": s}));
+            ctx.report.lock().unwrap().converted.push(json!({"kind": "building", "name": an, "source": ctx.src_id(off), "ydr": s}));
             return Ok(Some(a));
         }
     }
-    let src = format!("levels.rpf@{off:x}");
+    let src = ctx.src_id(off);
     let batch = super::batches::def(name);
     let (base, row) = match &batch {
         Some(d) => (d.model.as_str(), 0),
@@ -1625,14 +1687,14 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
     }
     let is_frag = entry.is_some_and(|e| e.rtype.as_deref() == Some("ft"));
     if mesh.geoms.is_empty() {
-        ctx.skip(name, "no triangles", json!({"source": format!("levels.rpf@{off:x}")}));
+        ctx.skip(name, "no triangles", json!({"source": ctx.src_id(off)}));
         return Ok(None);
     }
     if !missing.is_empty() {
         ctx.skip(name, "missing textures (placeholder used)", json!({"textures": missing}));
     }
     let (lo, hi) = aabb(mesh.geoms.iter().flat_map(|g| g.positions.iter()));
-    let cols = entry.filter(|_| frag).map(|e| super::frags::colliders(&ctx.o.game.join("levels.rpf"), e)).unwrap_or_default();
+    let cols = entry.filter(|_| frag).map(|e| super::frags::colliders(&ctx.entry_path(e), e)).unwrap_or_default();
     // A fragment's drawable bounds (+0x30/+0x40) are not in the frame its
     // geometry and colliders share (doors: centred on the panel while the
     // mesh and the bone-placed colliders start at the hinge), so a fragment
@@ -1669,14 +1731,16 @@ fn convert(ctx: &Ctx, pools: &Pools, name: &str, off: usize, entry: Option<&Entr
         info["t6m_vehicles"] = super::vlog::fresh(&file, &bytes, cols.len().max(1), frag_out.then_some(delta));
     }
     let s = ctx.emit(&file, &fp, info.clone(), Some(bytes))?;
-    ctx.report.lock().unwrap().converted.push(json!({"kind": "building", "name": an, "source": format!("levels.rpf@{off:x}"), "ydr": s, "textures": texs.len(), "fragment": is_frag}));
+    ctx.report.lock().unwrap().converted.push(json!({"kind": "building", "name": an, "source": ctx.src_id(off), "ydr": s, "textures": texs.len(), "fragment": is_frag}));
     Ok(Some(from_info(&info)))
 }
 
 pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     let p = super::Phase::new(ctx, "  placements");
     let dir = placements_dir(ctx, index)?;
-    let places = load_places(ctx, &dir, index)?;
+    let mut dirs = vec![dir.clone()];
+    dirs.extend(pack_placements(ctx)?);
+    let places = load_places(ctx, &dirs, index)?;
     // interiors as MLOs (default; --interiors flattens them into world space instead)
     let mlos = if ctx.o.interiors { Vec::new() } else { interiors::load(ctx, &dir, index) };
     // archetype name -> model offset (first wins), most used first
@@ -1701,7 +1765,10 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(&cache)?;
     let ttdb = ctx.o.game.join("data").join("ttdb");
     let pools = Pools { game: ctx.o.game.clone(), catalog: crate::texture::Catalog::build(&ttdb).map_err(|e| eprintln!("{}: {e}", ttdb.display())).ok(), maps: Mutex::new(HashMap::new()), dir: cache.clone() };
-    let by_off: HashMap<usize, &Entry> = index.entries.iter().map(|e| (e.off as usize, e)).collect();
+    let mut by_off: HashMap<usize, &Entry> = index.entries.iter().map(|e| (e.off as usize, e)).collect();
+    for (s, pk) in ctx.packs.iter().enumerate() {
+        by_off.extend(pk.index.entries.iter().map(|e| (e.off as usize | ((s + 1) << super::PACK_SHIFT), e)));
+    }
     drop(p);
     let p = super::Phase::new(ctx, "  models (ydr)");
     let res: Vec<(String, Result<Option<Arch>, String>)> =

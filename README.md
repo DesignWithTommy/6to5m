@@ -58,7 +58,7 @@ What works today:
 - [x] Road and asphalt surfaces
 - [x] Four-layer roads and ground: terrain_cb_w_4lyr.sps with the four 6m layer diffuses, lookup weights baked into Colour1 (no layer bump maps yet)
 - [x] LOD/SLOD drawables with no linked model (unresolved archetypes 84,216 to 37; `#member` model ids resolved, so every airport placement converts)
-- [ ] Placements in `story000` (10.8k entities) and `shared_minigame000` (20.3k); levels.rpf placements already resolve 104,377/104,379
+- [x] Placements in `story000` (10.8k entities) and `shared_minigame000` (20.3k): per-archive sixng LOD/link files, placed with archive-aware model offsets when indexed (their MLO interiors not yet); levels.rpf placements resolve 104,377/104,379
 - [x] Interiors as GTA V MLOs: `t6m_int.ytyp` (CMloArchetypeDef with decoded rooms, entity sets and the interior entities) and `t6m_int_X_Y.ymap` (CMloInstanceDef); `--interiors` still flattens them into world space instead
 - [x] MLO portals decoded from 6m (`995072ca`) and entities attached to their rooms (`T6M_MLO_LIMBO=1` puts them all in limbo); entity sets start off
 - [x] Room ids in interior collision (so the game knows the player is inside a room)

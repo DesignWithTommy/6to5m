@@ -176,11 +176,28 @@ pub struct Report {
     pub diagnostics: Value,
 }
 
+/// Map archives placed besides levels.rpf (6m story and minigame packs).
+pub const PACK_ARCHIVES: &[&str] = &["pack/story000/story000.rpf", "pack/shared_minigame000/shared_minigame000.rpf"];
+/// Bit where a virtual offset's archive slot starts (archives < 16 TB).
+pub const PACK_SHIFT: u32 = 44;
+
+/// One extra placement archive: id, file, memory map and sixng index.
+pub struct Pack {
+    pub id: String,
+    pub path: PathBuf,
+    pub map: Mmap,
+    pub index: sixng_core::scan::ArchiveIndex,
+}
+
 /// Shared build state.
 pub struct Ctx {
     pub o: Opts,
     pub stream: PathBuf,
     pub levels: Mmap,
+    /// Other placement archives (PACK_ARCHIVES that are present and
+    /// indexed). Model offsets into them are "virtual": the 1-based slot in
+    /// the bits from PACK_SHIFT up, so one usize names archive and offset.
+    pub packs: Vec<Pack>,
     /// Newest input mtime: outputs older than this are rebuilt.
     pub input_time: SystemTime,
     manifest: Mutex<Manifest>,
@@ -195,6 +212,38 @@ pub struct Ctx {
 }
 
 impl Ctx {
+    /// Archive bytes and real offset of a virtual model offset.
+    pub fn src_map(&self, voff: usize) -> (&[u8], usize) {
+        match voff >> PACK_SHIFT {
+            0 => (&self.levels[..], voff),
+            s => (&self.packs[s - 1].map[..], voff & ((1usize << PACK_SHIFT) - 1)),
+        }
+    }
+
+    /// sixng model id ("<archive>@<hex>") of a virtual offset.
+    pub fn src_id(&self, voff: usize) -> String {
+        let off = voff & ((1usize << PACK_SHIFT) - 1);
+        match voff >> PACK_SHIFT {
+            0 => format!("levels.rpf@{off:x}"),
+            s => format!("{}@{off:x}", self.packs[s - 1].id),
+        }
+    }
+
+    /// Virtual offset of a sixng model id ("<archive>@<hex>[#member]");
+    /// None for an archive that is not loaded.
+    pub fn voff_of(&self, model_id: &str) -> Option<usize> {
+        let (a, h) = model_id.rsplit_once('@')?;
+        let off = usize::from_str_radix(h.split('#').next()?, 16).ok()?;
+        let slot = if a == "levels.rpf" { 0 } else { self.packs.iter().position(|p| p.id == a)? + 1 };
+        Some(off | (slot << PACK_SHIFT))
+    }
+
+    /// Archive file of an index entry (entry ids are "<archive>@<hex>").
+    pub fn entry_path(&self, e: &sixng_core::scan::Entry) -> PathBuf {
+        let a = e.id.rsplit_once('@').map_or("levels.rpf", |x| x.0);
+        self.packs.iter().find(|p| p.id == a).map_or_else(|| self.o.game.join("levels.rpf"), |p| p.path.clone())
+    }
+
     fn cache_key(&self, fp: &str) -> String {
         sha(&format!("{fp}|{}", self.input_stamp))
     }
@@ -446,7 +495,29 @@ pub fn run(args: &[OsString]) -> Result<(), Box<dyn Error>> {
     let cache = o.work.join("fivem_out_cache");
     fs::create_dir_all(&cache)?;
     let input_stamp = format!("{}:{}", lf.metadata()?.len(), input_time.duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0));
-    let ctx = Ctx { o, stream, levels, input_time, manifest: Mutex::new(manifest), report: Mutex::new(Report::default()), layout: Mutex::new(layout), emitted: Default::default(), cache, input_stamp };
+    // story / minigame packs: placed only when indexed (`sixng index <id>`)
+    let packs: Vec<Pack> = if o.only.iter().any(|x| x == "buildings") {
+        PACK_ARCHIVES
+            .iter()
+            .filter_map(|id| {
+                let path = o.game.join(id);
+                if !path.is_file() {
+                    return None;
+                }
+                let ip = sixng_core::scan::index_path(&o.work.join("index"), id);
+                let Ok(index) = sixng_core::scan::load_index(&ip) else {
+                    eprintln!("{id}: not indexed ({}), its placements are skipped", ip.display());
+                    return None;
+                };
+                // SAFETY: read-only map; nothing writes the archive while we run.
+                let map = fs::File::open(&path).ok().and_then(|f| unsafe { Mmap::map(&f) }.ok())?;
+                Some(Pack { id: id.to_string(), path, map, index })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let ctx = Ctx { o, stream, levels, packs, input_time, manifest: Mutex::new(manifest), report: Mutex::new(Report::default()), layout: Mutex::new(layout), emitted: Default::default(), cache, input_stamp };
     let part = |p: &str| ctx.o.only.iter().any(|x| x == p);
 
     let result = (|| -> Result<(), Box<dyn Error>> {
