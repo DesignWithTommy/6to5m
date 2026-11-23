@@ -140,11 +140,18 @@ fn prefix_item(name: &str) -> Option<(String, String)> {
     (i >= 3).then(|| (t[..i - 1].join("_"), t[i - 1].to_string()))
 }
 
+/// Item word of any part name: the token before the fit tag.
+fn item_word(name: &str) -> Option<String> {
+    let t: Vec<&str> = name.split('_').collect();
+    let i = t.iter().position(|x| is_fit(x))?;
+    (i >= 1).then(|| t[i - 1].to_string())
+}
+
 /// SixNG outfit slot of an item word; None = accessory (off by default).
 fn outfit_slot(item: &str) -> Option<&'static str> {
     const SL: &[(&str, &str)] = &[
         ("hair", "hair"), ("beard", "beard"), ("brows", "brows"), ("lashes", "lashes"), ("eyes", "eyes"), ("teeth", "teeth"),
-        ("bodyupper", "body_upper"), ("bodylower", "body_lower"), ("fullbody", "full"), ("dress", "full"), ("jumpsuit", "full"), ("overalls", "full"),
+        ("bodyupper", "body_upper"), ("bodylower", "body_lower"), ("bodynipples", "body_upper"), ("bodygenitals", "body_lower"), ("hand", "hand"), ("feet", "feet"), ("fullbody", "full"), ("dress", "full"), ("jumpsuit", "full"), ("overalls", "full"),
         ("jacket", "outer"), ("coat", "outer"), ("blazer", "outer"), ("cardigan", "outer"),
         ("tshirt", "top"), ("shirt", "top"), ("sweatshirt", "top"), ("hoodie", "top"), ("tanktop", "top"), ("blouse", "top"), ("bra", "top"),
         ("pants", "bottom"), ("shorts", "bottom"), ("skirt", "bottom"), ("undies", "bottom"), ("leggings", "bottom"),
@@ -175,8 +182,11 @@ fn slot_of(name: &str) -> Option<usize> {
     if ["bipedbounds", "_cloth_sim", "physics"].iter().any(|k| n.contains(k)) {
         return None;
     }
-    let item = prefix_item(&n).map(|x| x.1).unwrap_or_default();
+    // shared parts (`hand_fr1_…`, `bodynipplesgen_fr1_…`) have no character
+    // prefix: their item is the word before the fit tag
+    let item = prefix_item(&n).map(|x| x.1).or_else(|| item_word(&n)).unwrap_or_default();
     Some(match outfit_slot(&item) {
+        Some("hand") => 5,
         Some("head" | "eyes" | "brows" | "lashes") => 0,
         Some("beard") => 1,
         Some("hair") => 2,
@@ -812,6 +822,84 @@ fn candidates<'a>(ix: &'a sixng_core::scan::ArchiveIndex, o: &PedOpts) -> Vec<&'
     chosen.into_values().collect()
 }
 
+/// Never a legacy proxy body when full-detail pieces exist. The
+/// `legacyped…_fullbody` copy is a shared ~874-vertex cutscene proxy
+/// (Leonida character_models.md "Lucia records"), so it is replaced by the
+/// shared body skin (arms + hands `hand_<fit>_000_nude_cull`, legs + feet
+/// `feet_<fit>_000_full` in packs.rpf; upper / lower body
+/// `bodynipplesgen_<fit>_*` / `bodygenitalsgen_<fit>_*` in
+/// core_restofworld.rpf), the ped's own top at full detail (a `_cull_00`
+/// copy gives way to the `_full` drawable of the same item), and a lower
+/// garment: the ped's own, else the denim shorts of the fit that
+/// core_restofworld references (`invisible_<name>`), else the first
+/// full denim shorts of the fit. The legacy head goes when the ped has a head.
+fn full_detail<'a>(cands: Vec<&'a Entry>, ix: &'a sixng_core::scan::ArchiveIndex, skin: Option<&'a sixng_core::scan::ArchiveIndex>, name: &str, fit: &str) -> Vec<&'a Entry> {
+    let low = |e: &Entry| e.name.as_deref().unwrap_or("").to_ascii_lowercase();
+    if !cands.iter().any(|e| prefix_item(&low(e)).is_some_and(|x| x.1.starts_with("legacyped"))) {
+        return cands;
+    }
+    // every named drawable, highest detail copy (largest) per name
+    let mut by: BTreeMap<String, &Entry> = BTreeMap::new();
+    for e in ix.entries.iter().chain(skin.map(|s| s.entries.iter()).into_iter().flatten()) {
+        if e.rtype.as_deref() != Some("dr") || e.name.is_none() {
+            continue;
+        }
+        let cur = by.entry(low(e)).or_insert(e);
+        if e.usize > cur.usize {
+            *cur = e;
+        }
+    }
+    let first = |pre: &str| by.iter().find(|(n, _)| n.starts_with(pre) && n.ends_with("_full") && !n.contains("_alt_")).map(|(_, e)| *e);
+    let skin_parts: Vec<Option<&Entry>> = vec![
+        by.get(&format!("hand_{fit}_000_nude_cull")).copied(),
+        by.get(&format!("feet_{fit}_000_full")).copied(),
+        first(&format!("bodynipplesgen_{fit}_")),
+        first(&format!("bodygenitalsgen_{fit}_")),
+    ];
+    if skin_parts.iter().any(|p| p.is_none()) {
+        eprintln!("[t6m:peds] {name}: full-detail body skin incomplete ({fit}); keeping the legacy body");
+        return cands;
+    }
+    let has_head = cands.iter().any(|e| slot_of(&low(e)) == Some(0) && !low(e).contains("legacyhead"));
+    let mut out: Vec<&Entry> = cands
+        .into_iter()
+        .filter(|e| {
+            let it = prefix_item(&low(e)).map(|x| x.1).unwrap_or_default();
+            !it.starts_with("legacyped") && !(has_head && it.starts_with("legacyhead"))
+        })
+        .collect();
+    out.extend(skin_parts.into_iter().flatten());
+    let group = |n: &str| outfit_slot(&prefix_item(n).map(|x| x.1).or_else(|| item_word(n)).unwrap_or_default());
+    // the ped's own top: full detail
+    let own: Vec<(&String, &&Entry)> = by.iter().filter(|(n, _)| prefix_item(n).is_some_and(|x| x.0 == name)).collect();
+    if !out.iter().any(|e| matches!(group(&low(e)), Some("top" | "full"))) {
+        let top = own.iter().filter(|(n, _)| group(n) == Some("top")).min_by_key(|(n, _)| (n.contains("_cull"), (*n).clone()));
+        if let Some((n, e)) = top {
+            let full = n.find("_cull").and_then(|i| {
+                let stem = format!("{}_full", &n[n.find(&format!("_{}", prefix_item(n)?.1))? + 1..i]);
+                by.iter().filter(|(m, _)| m.ends_with(&stem)).map(|(m, e)| (m.clone(), *e)).next()
+            });
+            let pick = full.map(|x| x.1).unwrap_or(**e);
+            eprintln!("[t6m:peds] {name}: top {}", low(pick));
+            out.push(pick);
+        }
+    }
+    // a lower garment
+    if !out.iter().any(|e| matches!(group(&low(e)), Some("bottom" | "full"))) {
+        let mine = own.iter().filter(|(n, _)| group(n) == Some("bottom")).min_by_key(|(n, _)| (n.contains("_cull"), (*n).clone())).map(|(_, e)| **e);
+        let shorts: Vec<(&String, &&Entry)> = by.iter().filter(|(n, _)| n.starts_with(&format!("shortsjeans_{fit}_")) && n.ends_with("_full")).collect();
+        let pick = mine
+            .or_else(|| shorts.iter().find(|(n, _)| by.contains_key(&format!("invisible_{n}"))).map(|(_, e)| **e))
+            .or_else(|| shorts.first().map(|(_, e)| **e));
+        if let Some(e) = pick {
+            eprintln!("[t6m:peds] {name}: lower {}", low(e));
+            out.push(e);
+        }
+    }
+    eprintln!("[t6m:peds] {name}: legacy proxy body replaced by full-detail pieces");
+    out
+}
+
 /// Order variations: the plain drawable first.
 fn rank(name: &str) -> (u8, String) {
     let n = name.to_ascii_lowercase();
@@ -863,6 +951,10 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
                 cands.sort_by_key(|e| (slot_of(&nm(e)).unwrap_or(8), rank(&nm(e))));
             }
         }
+    }
+    if !o.all && o.only.is_empty() {
+        cands = full_detail(cands, &ix, skin_ix.as_ref(), &o.name, if female { "fr1" } else { "mr1" });
+        cands.sort_by_key(|e| (slot_of(&nm(e)).unwrap_or(8), rank(&nm(e))));
     }
     if o.list {
         println!("{} ({}): {} drawables", o.name, if female { "female" } else { "male" }, cands.len());
