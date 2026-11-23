@@ -424,6 +424,75 @@ fn tri_area(p: &[[f32; 3]], idx: &[u32]) -> f64 {
         .sum()
 }
 
+/// Body bone a `GM_<set>_<side>_<part>_<dir>` helper (girth `U01`, cull `CULL`) sits on. The
+/// helpers are stored parentless (parent index none) in the clothing
+/// drawable, their attachment only named; they are runtime correctives, so
+/// they skin rigidly to that body bone instead of being dropped.
+fn gm_parent(name: &str) -> Option<&'static str> {
+    // GM_<set>_<side>_<part>_<dir>: set U01 (girth) or CULL (cull-region helpers)
+    let rest = name.strip_prefix("GM_")?.split_once('_')?.1;
+    let (side, part) = rest.split_once('_')?;
+    let part = part.split('_').next()?;
+    // limb segments are numbered along the limb (Forearm01, Forearm02, ...)
+    let limb = part.trim_end_matches(|c: char| c.is_ascii_digit());
+    let lr = |l: &'static str, r: &'static str| if side == "L" { Some(l) } else if side == "R" { Some(r) } else { None };
+    match limb {
+        "Forearm" | "Elbow" => return lr("SKEL_L_Forearm", "SKEL_R_Forearm"),
+        "UpperArm" => return lr("SKEL_L_UpperArm", "SKEL_R_UpperArm"),
+        "Calf" => return lr("SKEL_L_Calf", "SKEL_R_Calf"),
+        "Thigh" if side != "C" => return lr("SKEL_L_Thigh", "SKEL_R_Thigh"),
+        _ => {}
+    }
+    Some(match (side, part) {
+        ("C", "Pelvis") => "SKEL_Pelvis",
+        ("C", "Spine0") => "SKEL_Spine0",
+        ("C", "Spine1") => "SKEL_Spine1",
+        ("C", "Spine2") => "SKEL_Spine2",
+        ("C", "Spine3") => "SKEL_Spine3",
+        ("C", "Spine4") => "SKEL_Spine4",
+        ("C", "Spine5") | ("C", "Trap") => "SKEL_Spine5",
+        ("C", "Neck1") => "SKEL_Neck1",
+        ("C", "Thigh01") => "SKEL_Pelvis",
+        ("L", "Thigh01") => "SKEL_L_Thigh",
+        ("R", "Thigh01") => "SKEL_R_Thigh",
+        ("L", "Trap") => "SKEL_L_Clavicle",
+        ("R", "Trap") => "SKEL_R_Clavicle",
+        ("L", "Delt") | ("L", "Armpit") | ("L", "UpperArm01") => "SKEL_L_UpperArm",
+        ("R", "Delt") | ("R", "Armpit") | ("R", "UpperArm01") => "SKEL_R_UpperArm",
+        ("L", "Forearm01") => "SKEL_L_Forearm",
+        ("R", "Forearm01") => "SKEL_R_Forearm",
+        _ => return None,
+    })
+}
+
+/// Bone palettes also name helpers the drawable's own skeleton leaves out
+/// (hash only): joaat of every `GM_U01_<side>_<part>[_F|_B][_<dir>]` name
+/// `gm_parent` knows -> its body bone.
+fn gm_by_hash() -> &'static HashMap<u32, &'static str> {
+    static M: std::sync::OnceLock<HashMap<u32, &'static str>> = std::sync::OnceLock::new();
+    M.get_or_init(|| {
+        let mut parts: Vec<String> = ["Pelvis", "Spine0", "Spine1", "Spine2", "Spine3", "Spine4", "Spine5", "Trap", "Neck1", "Delt", "Armpit", "Elbow"].map(String::from).to_vec();
+        for l in ["Forearm", "UpperArm", "Calf", "Thigh"] {
+            parts.extend((1..=6).map(|i| format!("{l}{i:02}")));
+        }
+        let dirs = ["", "_O", "_I", "_CF", "_CB", "_L", "_R", "_LF", "_RF", "_LB", "_RB", "_F", "_B"];
+        let mut m = HashMap::new();
+        for (set, side) in ["U01", "CULL"].into_iter().flat_map(|a| ["L", "R", "C"].map(move |b| (a, b))) {
+            for p in &parts {
+                for mid in ["", "_F", "_B"] {
+                    for d in dirs {
+                        let n = format!("GM_{set}_{side}_{p}{mid}{d}");
+                        if let Some(b) = gm_parent(&n) {
+                            m.insert(sixng_core::meta7a::joaat(&n), b);
+                        }
+                    }
+                }
+            }
+        }
+        m
+    })
+}
+
 /// Decode one 6m drawable into skinned geometry on the GTA V skeleton.
 fn decode_part(game: &Path, e: &Entry, six: &sixng_core::pedskel::PedSkeleton, map6: &[u8], texs: &TexSource) -> Result<Part, String> {
     let name = e.name.clone().unwrap_or_default();
@@ -451,7 +520,7 @@ fn decode_part(game: &Path, e: &Entry, six: &sixng_core::pedskel::PedSkeleton, m
                     break;
                 }
             }
-            None
+            gm_parent(&info.skeleton[i].name).and_then(|n| six.by_hash.get(&joaat(n)).copied())
         })
         .collect();
     let own_hash: HashMap<u32, usize> = info.skeleton.iter().enumerate().map(|(i, b)| (joaat(&b.name), i)).collect();
@@ -459,7 +528,7 @@ fn decode_part(game: &Path, e: &Entry, six: &sixng_core::pedskel::PedSkeleton, m
         if let Some(&i) = six.by_hash.get(&h) {
             return Some(map6[i]);
         }
-        own_hash.get(&h).and_then(|&i| own[i]).map(|p| map6[p])
+        own_hash.get(&h).and_then(|&i| own[i]).or_else(|| gm_by_hash().get(&h).and_then(|n| six.by_hash.get(&joaat(n)).copied())).map(|p| map6[p])
     };
     let main: Vec<_> = info.models.iter().filter(|m| !m.part && m.lod == 0).collect();
     let models: Vec<_> = if main.iter().any(|m| !m.geometries.is_empty()) { main } else { info.models.iter().filter(|m| m.part).collect() };
@@ -474,6 +543,7 @@ fn decode_part(game: &Path, e: &Entry, six: &sixng_core::pedskel::PedSkeleton, m
     };
     let mut best_area = 0f64;
     let mut unmapped = 0usize;
+    let mut miss: HashMap<String, usize> = HashMap::new();
     for md in models {
         let pal: Option<Vec<Option<u8>>> = md.bone_palette.as_ref().map(|p| p.iter().map(|&h| to_gta(h)).collect());
         for (k, &gi) in md.geometries.iter().enumerate() {
@@ -512,7 +582,12 @@ fn decode_part(game: &Path, e: &Entry, six: &sixng_core::pedskel::PedSkeleton, m
                                 Some(x) => x.1 += w,
                                 None => infl.push((b, w)),
                             },
-                            None => unmapped += 1,
+                            None => {
+                                unmapped += 1;
+                                let j = js[i][c] as usize;
+                                let h = md.bone_palette.as_ref().and_then(|p| p.get(j).copied());
+                                *miss.entry(match h { Some(h) => format!("{h:08x}"), None => format!("#{j}") }).or_default() += 1;
+                            }
                         }
                     }
                 }
@@ -557,7 +632,10 @@ fn decode_part(game: &Path, e: &Entry, six: &sixng_core::pedskel::PedSkeleton, m
         }
     }
     if unmapped > 0 {
-        part.warnings.push(format!("{unmapped} vertex influences name bones in neither skeleton (dropped)"));
+        let mut top: Vec<_> = miss.into_iter().collect();
+        top.sort_by(|a, b| b.1.cmp(&a.1));
+        let top: Vec<String> = top.iter().take(8).map(|(k, n)| format!("{k} x{n}")).collect();
+        part.warnings.push(format!("{unmapped} vertex influences name bones in neither skeleton (dropped): {}", top.join(", ")));
     }
     if part.geoms.is_empty() {
         return Err("no geometry".into());
