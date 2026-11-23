@@ -758,8 +758,16 @@ fn pack_placements(ctx: &Ctx) -> Result<Vec<(PathBuf, String)>, Box<dyn Error>> 
         }
         export_region(ctx, &ws, &pk.path, &pk.id, &metas, &dir, &[mtime(&lp)])?;
         // MLO instances of the pack (interiors.jsonl next to its placements)
+        // interior collision: export_interiors links bounds by bbox from
+        // <work>/collision/<archive>/index.jsonl (unnamed rageobj resources)
+        let ci = ctx.o.work.join("collision").join(pk.id.trim_end_matches(".rpf")).join("index.jsonl");
+        if old(&ci) {
+            let _p = super::Phase::new(ctx, "  prep collision (pack)");
+            let objs: Vec<&Entry> = pk.index.entries.iter().filter(|e| e.kind == sixng_core::classify::Kind::RageObj && e.name.is_none()).collect();
+            sixng_core::export::export_collision(&a, &objs, &ctx.o.work, sixng_core::export::no_progress())?;
+        }
         let ij = dir.join("interiors.jsonl");
-        if old(&ij) {
+        if old(&ij) || mtime(&ci).zip(mtime(&ij)).is_some_and(|(c, i)| c > i) {
             let _p = super::Phase::new(ctx, "  prep interiors (pack)");
             sixng_core::export::export_interiors(&a, &metas, &pk.index.entries, &ctx.o.work, sixng_core::export::no_progress())?;
         }
