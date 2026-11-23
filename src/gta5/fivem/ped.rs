@@ -421,6 +421,31 @@ struct Part {
     warnings: Vec<String>,
 }
 
+/// Area-weighted vertex normals; vertices at the same position share one
+/// (UV seams stay smooth).
+fn smooth_normals(p: &[[f32; 3]], idx: &[u32]) -> Vec<[f32; 3]> {
+    let key = |v: &[f32; 3]| v.map(|x| (x * 1e4).round() as i32);
+    let mut acc: HashMap<[i32; 3], [f32; 3]> = HashMap::new();
+    for t in idx.chunks_exact(3) {
+        let (a, b, c) = (p[t[0] as usize], p[t[1] as usize], p[t[2] as usize]);
+        let (u, v) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
+        let f = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+        for &i in t {
+            let e = acc.entry(key(&p[i as usize])).or_insert([0.0; 3]);
+            for k in 0..3 {
+                e[k] += f[k];
+            }
+        }
+    }
+    p.iter()
+        .map(|v| {
+            let s = acc.get(&key(v)).copied().unwrap_or([0.0, 0.0, 1.0]);
+            let l = (s[0] * s[0] + s[1] * s[1] + s[2] * s[2]).sqrt();
+            if l > 1e-12 { [s[0] / l, s[1] / l, s[2] / l] } else { [0.0, 0.0, 1.0] }
+        })
+        .collect()
+}
+
 fn tri_area(p: &[[f32; 3]], idx: &[u32]) -> f64 {
     idx.chunks_exact(3)
         .filter(|t| t.iter().all(|&i| (i as usize) < p.len()))
@@ -575,7 +600,15 @@ fn decode_part(game: &Path, e: &Entry, six: &sixng_core::pedskel::PedSkeleton, m
                 }
             };
             let uv = m.uvs.iter().find(|u| u.0 == 3).or(m.uvs.first()).map(|u| u.1.clone()).filter(|u| u.len() == n).unwrap_or_else(|| vec![[0.0; 2]; n]);
-            let normals = m.normals.clone().filter(|v| v.len() == n).unwrap_or_else(|| vec![[0.0, 0.0, 1.0]; n]);
+            // stored normals, else smooth ones from the faces (a constant
+            // normal shaded every limb flat and faceted)
+            let normals = match m.normals.clone().filter(|v| v.len() == n) {
+                Some(v) => v,
+                None => {
+                    part.warnings.push(format!("geometry {gi}: no stored normals, smoothed from faces"));
+                    smooth_normals(&m.positions, &m.indices)
+                }
+            };
             let tangents = m.tangents.clone().filter(|v| v.len() == n).unwrap_or_else(|| uv_tangents(&m.positions, &normals, &uv, &m.indices));
             let mut verts = Vec::with_capacity(n);
             for i in 0..n {
@@ -838,8 +871,59 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
             None => parts.push(e),
         }
     }
+    // Hair on people (SixNG 5475976 furlink::on_skin): no hair model links
+    // its grooms, so the grooms are found by fit: pieces whose strand roots
+    // lie on the head (median root distance under 6 mm), in archive order;
+    // a style's pieces are neighbours, and the run of at most 8 pieces with
+    // the most strands is taken (SixNG --find-hair).
+    let mut auto_hair: Vec<String> = Vec::new();
+    if o.hair.is_none() && o.grooms.is_none() {
+        let head: Vec<[f32; 3]> = parts.iter().filter(|p| p.slot == 0).flat_map(|p| p.geoms.iter().flat_map(|g| g.0.verts.iter().map(|v| v.pos))).collect();
+        if !head.is_empty() {
+            match groom::catalog(&o.game, &o.work, &ix) {
+                Ok(all) => {
+                    let step = (head.len() / 6000).max(1);
+                    let pts: Vec<[f32; 3]> = head.iter().step_by(step).copied().collect();
+                    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+                    for p in &pts {
+                        for k in 0..3 {
+                            lo[k] = lo[k].min(p[k]);
+                            hi[k] = hi[k].max(p[k]);
+                        }
+                    }
+                    let pieces: Vec<&groom::GroomInfo> = all.iter().filter(|g| g.lod == 0).collect();
+                    use rayon::prelude::*;
+                    let fits: Vec<(usize, &groom::GroomInfo)> = pieces
+                        .par_iter()
+                        .enumerate()
+                        .filter(|(_, g)| (0..3).all(|k| g.root_box[0][k] >= lo[k] - 0.04 && g.root_box[1][k] <= hi[k] + 0.04))
+                        .filter_map(|(i, g)| {
+                            let gr = groom::load(&o.game, &ix, &g.id).ok()?;
+                            let k = gr.k.max(1);
+                            let roots: Vec<[f32; 3]> = (0..gr.strands).step_by((gr.strands / 40).max(1)).filter_map(|s| gr.points.get(s * k).copied()).collect();
+                            let mut d: Vec<f32> = roots.iter().map(|r| pts.iter().map(|p| (r[0] - p[0]).powi(2) + (r[1] - p[1]).powi(2) + (r[2] - p[2]).powi(2)).fold(f32::MAX, f32::min).sqrt()).collect();
+                            d.sort_by(|a, b| a.total_cmp(b));
+                            (!d.is_empty() && d[d.len() / 2] < 0.006).then_some((i, *g))
+                        })
+                        .collect();
+                    let mut runs: Vec<Vec<(usize, &groom::GroomInfo)>> = Vec::new();
+                    for f in fits {
+                        match runs.last_mut() {
+                            Some(r) if r.last().is_some_and(|p| f.0 == p.0 + 1) => r.push(f),
+                            _ => runs.push(vec![f]),
+                        }
+                    }
+                    if let Some(r) = runs.iter().filter(|r| r.len() <= 8).max_by_key(|r| r.iter().map(|g| g.1.strands).sum::<u32>()) {
+                        auto_hair = r.iter().map(|g| g.1.id.clone()).collect();
+                    }
+                    eprintln!("[t6m:peds] {}: hair by fit: {} runs on the head, picked {}", o.name, runs.len(), auto_hair.join(" "));
+                }
+                Err(e) => eprintln!("[t6m:peds] {}: hair by fit: {e}", o.name),
+            }
+        }
+    }
     // strand grooms: list candidates, or add hair / beard cards
-    if o.grooms.is_some() || o.hair.is_some() || o.beard.is_some() {
+    if o.grooms.is_some() || o.hair.is_some() || o.beard.is_some() || !auto_hair.is_empty() {
         let head_box = parts.iter().filter(|p| p.slot == 0).flat_map(|p| p.geoms.iter().flat_map(|g| g.0.verts.iter().map(|v| v.pos))).fold(None, |b: Option<[[f32; 3]; 2]>, p| {
             Some(match b {
                 None => [p, p],
@@ -861,11 +945,19 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
         }
         let head_bone = skel.bones.iter().position(|b| b.name.eq_ignore_ascii_case("SKEL_Head")).unwrap_or(0) as u8;
         let rgba = [o.hair_color[0], o.hair_color[1], o.hair_color[2], 255];
-        for (id, slot) in [(&o.hair, 2usize), (&o.beard, 1usize)] {
-            let Some(id) = id else { continue };
-            let g = groom::load(&o.game, &ix, id)?;
+        let hair_ids: Vec<String> = o.hair.iter().cloned().chain(auto_hair.iter().cloned()).collect();
+        let jobs: Vec<(Vec<String>, usize)> = vec![(hair_ids, 2usize), (o.beard.iter().cloned().collect(), 1usize)];
+        for (ids, slot) in &jobs {
+            let slot = *slot;
+            if ids.is_empty() {
+                continue;
+            }
             parts.retain(|p| p.slot != slot); // the 3-vertex placeholders, if any
             let mut geoms = Vec::new();
+            let mut strands = 0;
+            for id in ids {
+            let g = groom::load(&o.game, &ix, id)?;
+            strands += g.strands;
             let per = (60000 / (g.k * 4)).max(1);
             let mut s0 = 0;
             while s0 < g.strands {
@@ -879,7 +971,9 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
                 let verts = (0..pos.len()).map(|i| SkinVert { pos: pos[i], normal: nrm[i], uv: uv[i], tangent: tangents[i], weights: [255, 0, 0, 0], bones: [head_bone, 0, 0, 0] }).collect();
                 geoms.push((SkinGeom { verts, indices: idx.iter().map(|&x| x as u16).collect(), shader: 0 }, false));
             }
-            report.push(json!({"source": id, "slot": SLOTS[slot], "groom_strands": g.strands, "points_per_strand": g.k, "geometries": geoms.len()}));
+            }
+            let id = ids.join("+");
+            report.push(json!({"source": id, "slot": SLOTS[slot], "groom_strands": strands, "geometries": geoms.len()}));
             parts.push(Part { src: format!("groom {id}"), slot, geoms, diffuse: Some((rgba.repeat(16 * 16), 16, 16)), normal: None, skin: false, warnings: Vec::new() });
         }
     }
