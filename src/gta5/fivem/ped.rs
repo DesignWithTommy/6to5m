@@ -283,6 +283,12 @@ fn retarget(six: &[Bone], female: bool) -> (Skeleton, Vec<u8>, usize) {
     (Skeleton { bones, sig }, map, matched)
 }
 
+/// diffusetex / bumptex parameter hashes; body skin shaders (Leonida
+/// docs/character_models.md "Hands and feet").
+const SLOT_DIFFUSE: u32 = 0xC8E8_C282;
+const SLOT_BUMP: u32 = 0x1E77_BF4C;
+const SKIN_SHADERS: [&str; 2] = ["210fbc6a", "8d69edab"];
+
 /// Diffuse/colour parameter hashes in priority order (model::COLOR_SLOTS).
 const COLOR_SLOTS: [u32; 16] = [
     3370697346, 756347250, 0x346394EA, 0x7D4F12E2, 3464205966, 3632507550, 851042057, 1024521143, 3853173992, 2464948076, 3389132183, 3547013225,
@@ -408,6 +414,10 @@ struct Part {
     slot: usize,
     geoms: Vec<(SkinGeom, bool)>, // (geometry, alpha)
     diffuse: Option<(Vec<u8>, u32, u32)>,
+    /// tangent-space normal map (bumptex), RGB
+    normal: Option<(Vec<u8>, u32, u32)>,
+    /// body skin shader (hands, feet, body pieces): no albedo in the package
+    skin: bool,
     warnings: Vec<String>,
 }
 
@@ -498,7 +508,7 @@ fn decode_part(game: &Path, e: &Entry, six: &sixng_core::pedskel::PedSkeleton, m
     let name = e.name.clone().unwrap_or_default();
     let r = Resource::load(&game.join("packs.rpf"), e).map_err(|x| x.to_string())?;
     let info: DrawableInfo = drawable::describe(&r);
-    let mut part = Part { src: name.clone(), slot: slot_of(&name).unwrap_or(8), geoms: Vec::new(), diffuse: None, warnings: Vec::new() };
+    let mut part = Part { src: name.clone(), slot: slot_of(&name).unwrap_or(8), geoms: Vec::new(), diffuse: None, normal: None, skin: false, warnings: Vec::new() };
     let slice = |i: usize| -> &[u8] {
         let b = &info.buffers[i];
         let end = ((b.gfx_off + b.bytes) as usize).min(r.gfx.len());
@@ -613,14 +623,31 @@ fn decode_part(game: &Path, e: &Entry, six: &sixng_core::pedskel::PedSkeleton, m
             if area > best_area {
                 if let Some(sh) = sh {
                     let ph = |t: &drawable::TexRef| u32::from_str_radix(t.param_hash.trim_start_matches("0x"), 16).ok();
-                    let mut cands: Vec<&drawable::TexRef> = COLOR_SLOTS.iter().filter_map(|slot| sh.textures.iter().find(|t| ph(t) == Some(*slot))).collect();
-                    // other slots only when not a known non-colour role (normals,
-                    // packed data, masks, tint palettes): binding those as
-                    // diffuse gave the teal / blue bodies
-                    cands.extend(sh.textures.iter().filter(|t| {
-                        let h = ph(t);
-                        !h.is_some_and(|h| COLOR_SLOTS.contains(&h)) && h.and_then(|h| sixng_core::material::slot_role(&format!("{h:08x}"))).is_none_or(|r| r.contains("colour") || r.contains("base_color"))
-                    }));
+                    // ped materials: the only albedo slot is diffusetex
+                    // (c8e8c282). speculartex (c6f46e79), speculartex2 / ORM
+                    // (739e3d0d), materialid (8adb8480) and the garment
+                    // shaders' sheets are not colour; a part without
+                    // diffusetex keeps a flat colour (Leonida
+                    // docs/character_models.md "Textures")
+                    let cands: Vec<&drawable::TexRef> = sh.textures.iter().filter(|t| ph(t) == Some(SLOT_DIFFUSE)).collect();
+                    if SKIN_SHADERS.contains(&sh.name_hash.as_str()) {
+                        part.skin = true;
+                    }
+                    if let Some(t) = sh.textures.iter().find(|t| ph(t) == Some(SLOT_BUMP)) {
+                        let h64 = u64::from_str_radix(t.hash64.trim_start_matches("0x"), 16).unwrap_or(0);
+                        match texs.rgba(h64, key_of(sh, t.param)) {
+                            Ok((mut px, w, h)) => {
+                                // two-channel (BC5) normals: rebuild Z
+                                for c in px.chunks_exact_mut(4) {
+                                    let (x, y) = (c[0] as f32 / 127.5 - 1.0, c[1] as f32 / 127.5 - 1.0);
+                                    c[2] = (((1.0 - x * x - y * y).max(0.0).sqrt() * 0.5 + 0.5) * 255.0) as u8;
+                                    c[3] = 255;
+                                }
+                                part.normal = Some((px, w, h));
+                            }
+                            Err(err) => part.warnings.push(format!("texture {} (normal): {err}", t.hash32)),
+                        }
+                    }
                     for t in cands {
                         let h64 = u64::from_str_radix(t.hash64.trim_start_matches("0x"), 16).unwrap_or(0);
                         match texs.rgba(h64, key_of(sh, t.param)) {
@@ -853,11 +880,33 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
                 geoms.push((SkinGeom { verts, indices: idx.iter().map(|&x| x as u16).collect(), shader: 0 }, false));
             }
             report.push(json!({"source": id, "slot": SLOTS[slot], "groom_strands": g.strands, "points_per_strand": g.k, "geometries": geoms.len()}));
-            parts.push(Part { src: format!("groom {id}"), slot, geoms, diffuse: Some((rgba.repeat(16 * 16), 16, 16)), warnings: Vec::new() });
+            parts.push(Part { src: format!("groom {id}"), slot, geoms, diffuse: Some((rgba.repeat(16 * 16), 16, 16)), normal: None, skin: false, warnings: Vec::new() });
         }
     }
     if parts.is_empty() {
         return Err(format!("{}: nothing decoded: {}", o.name, serde_json::to_string(&report)?).into());
+    }
+
+    // Body skin (hands, feet, body) ships no albedo: a flat tone, the mean
+    // of the face albedo's centre (the head preset), else grey
+    let tone = parts.iter().filter(|p| p.slot == 0).find_map(|p| p.diffuse.as_ref()).map(|(px, w, h)| {
+        let (mut acc, mut n) = ([0u64; 3], 0u64);
+        for y in h / 3..h / 2 {
+            for x in w * 2 / 5..w * 3 / 5 {
+                let i = ((y * w + x) * 4) as usize;
+                for k in 0..3 {
+                    acc[k] += px[i + k] as u64;
+                }
+                n += 1;
+            }
+        }
+        let n = n.max(1);
+        [(acc[0] / n) as u8, (acc[1] / n) as u8, (acc[2] / n) as u8, 255]
+    });
+    for p in parts.iter_mut().filter(|p| p.skin && p.diffuse.is_none()) {
+        if let Some(t) = tone {
+            p.diffuse = Some((t.repeat(16), 4, 4));
+        }
     }
 
     // GTA V names: <slot>_<nnn>_u, <slot>_diff_<nnn>_a_uni
@@ -876,7 +925,10 @@ pub fn run(args: &[String]) -> Result<(), Box<dyn Error>> {
             Some((rgba, w, h)) => make_tex(&diff, rgba, *w, *h, o.max_tex),
             None => flat_tex(&diff, [160, 160, 160, 255]),
         });
-        textures.push(flat_tex(&nrm, [128, 128, 255, 255]));
+        textures.push(match &p.normal {
+            Some((px, w, h)) => make_tex(&nrm, px, *w, *h, o.max_tex),
+            None => flat_tex(&nrm, [128, 128, 255, 255]),
+        });
         textures.push(flat_tex(&spec, [32, 32, 32, 255]));
         let cut = p.slot == 1 || p.slot == 2;
         let mut shaders: Vec<ShaderDef> = Vec::new();
