@@ -76,13 +76,7 @@ fn material_map(ctx: &Ctx) -> BTreeMap<u16, u8> {
 
 fn decode(path: &std::path::Path, e: &Entry, full: bool) -> Option<sixng_core::bounds::Collision> {
     let r = Resource::load_sys(path, e).ok()?;
-    // T6M_COL_TESSELLATE=1: old path, primitives meshed into triangles (A/B switch)
-    let mut c = if std::env::var_os("T6M_COL_TESSELLATE").is_some() {
-        if full { sixng_core::bounds::decode(&r)? } else { sixng_core::bounds::decode_movement(&r)? }
-    } else {
-        sixng_core::bounds::decode_native(&r, !full)?
-    };
-    c.native.retain(prim_ok);
+    let c = sixng_core::bounds::decode_native(&r, !full)?;
     (!c.by_mat.values().all(|x| x.1.is_empty()) || !c.native.is_empty()).then_some(c)
 }
 
@@ -129,7 +123,7 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
         .par_iter()
         .map(|((cx, cy), es)| {
             let file = format!("t6m_cc_{:03}_{:03}.ybn", cx + 200, cy + 200);
-            let fp = sha(&format!("{YBN_V}|col|{mats_fp}|{}{}|{}{}", ctx.o.weapon_collision, if std::env::var_os("T6M_COL_TESSELLATE").is_some() { "|tess" } else { "" }, es.iter().map(|e| e.id.as_str()).collect::<Vec<_>>().join(","), ctx.o.offset_fp()));
+            let fp = sha(&format!("{YBN_V}|col|{mats_fp}|{}|{}{}", ctx.o.weapon_collision, es.iter().map(|e| e.id.as_str()).collect::<Vec<_>>().join(","), ctx.o.offset_fp()));
             if let Some(info) = ctx.up_to_date(&file, &fp) {
                 log.lock().unwrap().cells_cached += 1;
                 ctx.emit(&file, &fp, info, None)?;
@@ -211,20 +205,6 @@ pub fn build(ctx: &Ctx, index: &ArchiveIndex) -> Result<(), Box<dyn Error>> {
     }
     log.into_inner().unwrap().write(ctx, mats.is_empty());
     Ok(())
-}
-
-/// Drops primitives the physics code could divide by zero on: non-finite
-/// values, radius <= 1 mm, zero-length capsule/cylinder axes, flat boxes.
-fn prim_ok(p: &sixng_core::bounds::NativePrim) -> bool {
-    use sixng_core::bounds::NativePrim as P;
-    let fin = |v: &[f32; 3]| v.iter().all(|x| x.is_finite());
-    let d = |a: &[f32; 3], b: &[f32; 3]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
-    let r_ok = |r: f32| r.is_finite() && r > 0.001;
-    match p {
-        P::Sphere { centre, radius, .. } => fin(centre) && r_ok(*radius),
-        P::Capsule { a, b, radius, .. } | P::Cylinder { a, b, radius, .. } => fin(a) && fin(b) && r_ok(*radius) && d(a, b) > 0.001,
-        P::Box { corners, .. } => corners.iter().all(fin) && (0..4).all(|i| (i + 1..4).all(|j| d(&corners[i], &corners[j]) > 0.001)),
-    }
 }
 
 /// Counters for the live-test log (cells rebuilt this run only; cached

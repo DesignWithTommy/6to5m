@@ -94,7 +94,7 @@ pub const TEX_V: &str = "tex2";
 pub const YDR_V: &str = "ydr13";
 /// Fragment props as dynamic .yft (fivem/frags.rs).
 pub const FRAG_V: &str = "frag3";
-pub const YBN_V: &str = "ybn4";
+pub const YBN_V: &str = "ybn5";
 pub const TERRAIN_V: &str = "terrain2";
 /// Meta files (ymap/ytyp) and water.xml are rebuilt every run and compared
 /// byte for byte, so they need no version. MANIFEST_V is the manifest layout.
